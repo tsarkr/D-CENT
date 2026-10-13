@@ -25,11 +25,14 @@ if str(ROOT) not in sys.path:
 
 from rdflib import Graph, Literal, RDF, URIRef
 from rdflib.namespace import RDFS
+from bs4 import BeautifulSoup
 
 from scripts.config import ROOT as CONFIG_ROOT, get_neo4j_config, get_pg_config, load_secrets, setting
 from scripts.hanja_utils import apply_initial_sound_law, translate_hanja_name
 from scripts.tag_tei_with_dict import LocalDocentEngine
 from scripts.generate_cidoc_mappings import CidocTimelineGenerator
+from scripts.link_persnames_i815 import wrap_name_in_tei
+from scripts.tei_utils import extract_tei_surface
 
 
 class TestRunner:
@@ -131,9 +134,9 @@ def test_integrated_sentence_recognition_and_cidoc(runner: TestRunner):
     
     # Step 1: 한자 사전 태깅
     pre_tagged = engine._clean_and_pre_tag_hanja(sentence)
-    runner.assert_true("<term><foreign xml:lang=\"zh-Hani\">金容圭</foreign><gloss>김용규</gloss></term>" in pre_tagged,
+    runner.assert_true('<term><ruby><rb xml:lang="ko-Hani">金容圭</rb><rt xml:lang="ko-Hang">김용규</rt></ruby></term>' in pre_tagged,
                      "한자(金容圭) 사전 태그 정상 삽입")
-    runner.assert_true("<term><foreign xml:lang=\"zh-Hani\">金基鉉</foreign><gloss>김기현</gloss></term>" in pre_tagged,
+    runner.assert_true('<term><ruby><rb xml:lang="ko-Hani">金基鉉</rb><rt xml:lang="ko-Hang">김기현</rt></ruby></term>' in pre_tagged,
                      "한자(金基鉉) 사전 태그 정상 삽입")
 
     # Step 2: 식별된 유효 인명 적용
@@ -145,6 +148,49 @@ def test_integrated_sentence_recognition_and_cidoc(runner: TestRunner):
     runner.assert_true('<persName ref="#EV_1919_이계창">이계창</persName>' in tagged_tei, "한글 인명(이계창) persName 태그 정상 적용")
     runner.assert_true("장연군" in tagged_tei and "<persName" not in tagged_tei.split("장연군")[0].split(">")[-1],
                      "지명(장연군) 오인식 persName 방지 확인")
+
+    legacy_tei = '<p><persName><term><foreign>金容圭</foreign><gloss>김용규</gloss></term></persName></p>'
+    normalized_legacy = engine._clean_and_pre_tag_hanja(legacy_tei)
+    runner.assert_true('<foreign' not in normalized_legacy and '<gloss' not in normalized_legacy,
+                     "구형 foreign/gloss 태그 제거 확인")
+    runner.assert_equal(normalized_legacy.count('김용규'), 1, "구형 독음 평문 중복 제거 확인")
+    runner.assert_true('<ruby><rb xml:lang="ko-Hani">金容圭</rb><rt xml:lang="ko-Hang">김용규</rt></ruby>' in normalized_legacy,
+                     "구형 TEI ruby 구조 재생성 확인")
+
+    ruby_soup = BeautifulSoup(
+        '<p><persName ref="#EV_1919_金容圭"><term><ruby><rb>金容圭</rb><rt>김용규</rt></ruby></term></persName>'
+        '<placeName ref="#EV_1919_장연"><term><ruby><rb>長淵</rb><rt>장연</rt></ruby></term></placeName></p>',
+        "xml",
+    )
+    person_surface, person_reading = extract_tei_surface(ruby_soup.find("persName"))
+    place_surface, place_reading = extract_tei_surface(ruby_soup.find("placeName"))
+    runner.assert_equal((person_surface, person_reading), ("金容圭", "김용규"), "ruby 인명 한자·독음 보존")
+    runner.assert_equal((place_surface, place_reading), ("長淵", "장연"), "ruby 지명 한자·독음 보존")
+
+    multi_ruby = BeautifulSoup(
+        '<persName><term><ruby><rb>金容圭</rb><rt>김용규</rt></ruby></term> '
+        '<term><ruby><rb>金基鉉</rb><rt>김기현</rt></ruby></term></persName>',
+        "xml",
+    )
+    runner.assert_equal(extract_tei_surface(multi_ruby.find("persName")), ("金容圭 金基鉉", "김용규 김기현"),
+                        "복수 ruby 인명 표면·독음 결합")
+
+    mixed_ruby = BeautifulSoup(
+        '<persName><ruby><rb>金容圭</rb><rt>김용규</rt></ruby> 외 46인</persName>',
+        "xml",
+    )
+    runner.assert_equal(extract_tei_surface(mixed_ruby.find("persName")), ("金容圭 외 46인", "김용규"),
+                        "ruby와 일반 텍스트 표면 보존")
+
+    extended_hanja = engine._clean_and_pre_tag_hanja("豈A")
+    runner.assert_true("<rb xml:lang=\"ko-Hani\">豈</rb>" in extended_hanja, "확장 한자 태깅 지원")
+
+    unlinked_ruby = '<term><ruby><rb xml:lang="ko-Hani">金容圭</rb><rt xml:lang="ko-Hang">김용규</rt></ruby></term>'
+    linked_ruby = wrap_name_in_tei(unlinked_ruby, "김용규", "https://example.test/person")
+    runner.assert_true('<rt xml:lang="ko-Hang"><persName' not in linked_ruby,
+                     "ruby 독음 내부 persName 중첩 방지")
+    runner.assert_true('<persName ref="https://example.test/person"><term><ruby>' in linked_ruby,
+                     "ruby term 전체 인물 링크")
 
     # 2. CIDOC-CRM 온톨로지 생성 검증
     cidoc_gen = CidocTimelineGenerator.__new__(CidocTimelineGenerator)

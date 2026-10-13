@@ -20,10 +20,16 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import requests
 import tomllib
 import psycopg2
 import xml.etree.ElementTree as ET
+
+from scripts.tei_utils import extract_ruby_parts
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -241,13 +247,36 @@ def wrap_name_in_tei(tei_text: str, name: str, url: str) -> str:
     # 1. Update existing tags that have internal references
     # Example: <persName ref="#some_id">Name</persName> -> <persName ref="URL">Name</persName>
     # We use a non-greedy match for the content to avoid over-matching.
-    internal_ref_pattern = re.compile(rf'<persName\s+ref="#[^"]+"[^>]*>({re.escape(name)})</persName>')
-    tei_text = internal_ref_pattern.sub(f'<persName ref="{url}">\\1</persName>', tei_text)
+    internal_ref_pattern = re.compile(r'<persName\s+ref="#[^"]+"([^>]*)>(.*?)</persName>', re.DOTALL)
 
-    # 2. Wrap occurrences that are not already in a persName tag
+    def update_internal_ref(match):
+        inner = match.group(2)
+        base, reading = extract_ruby_parts(inner)
+        plain = re.sub(r'<[^>]+>', '', inner).strip()
+        if name not in {reading, base, plain}:
+            return match.group(0)
+        return f'<persName ref="{url}"{match.group(1)}>{inner}</persName>'
+
+    tei_text = internal_ref_pattern.sub(update_internal_ref, tei_text)
+
+    term_pattern = re.compile(
+        rf'<term><ruby><rb[^>]*>[^<]+</rb><rt[^>]*>{re.escape(name)}</rt></ruby></term>'
+    )
+    out, position, depth = [], 0, 0
+    for match in term_pattern.finditer(tei_text):
+        before = tei_text[position:match.start()]
+        depth += len(re.findall(r'<persName\b[^>]*(?<!/)>', before)) - before.count('</persName>')
+        out.append(before)
+        out.append(match.group(0) if depth > 0 else f'<persName ref="{url}">{match.group(0)}</persName>')
+        position = match.end()
+    out.append(tei_text[position:])
+    tei_text = ''.join(out)
+
+    # 2. Wrap occurrences that are not already in a persName or ruby tag
     tokens = re.split(r'(<[^>]+>)', tei_text)
     result = []
     in_persname = 0
+    in_ruby = 0
     pattern = re.compile(rf'\b{re.escape(name)}\b')
 
     for token in tokens:
@@ -257,10 +286,14 @@ def wrap_name_in_tei(tei_text: str, name: str, url: str) -> str:
                 in_persname += 1
             elif token.startswith('</persName>'):
                 in_persname = max(0, in_persname - 1)
+            elif token.startswith('<ruby') and not token.endswith('/>'):
+                in_ruby += 1
+            elif token.startswith('</ruby>'):
+                in_ruby = max(0, in_ruby - 1)
             result.append(token)
         else:
             # Text Node
-            if in_persname > 0:
+            if in_persname > 0 or in_ruby > 0:
                 result.append(token)
             else:
                 new_token = pattern.sub(f'<persName ref="{url}">{name}</persName>', token)

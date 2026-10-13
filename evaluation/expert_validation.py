@@ -38,6 +38,7 @@ from annotation_io import add_sheet, new_workbook, read_sheet
 from stats_utils import cohen_kappa, prf
 
 from scripts.config import get_pg_connection
+from scripts.tei_utils import extract_ruby_parts
 
 OUT_DIR = Path(__file__).resolve().parent / "expert_validation"
 # table -> column holding the event id of the row (None: no event link, entities only)
@@ -68,8 +69,7 @@ INSTRUCTIONS = [
 
 def _surface(inner: str) -> str:
     """Readable form of a tagged span, e.g. '金容圭 (김용규)'."""
-    foreign = "".join(re.findall(r"<foreign[^>]*>([^<]+)</foreign>", inner)).strip()
-    gloss = "".join(re.findall(r"<gloss>([^<]+)</gloss>", inner)).strip()
+    foreign, gloss = extract_ruby_parts(inner)
     if foreign and gloss:
         return f"{foreign} ({gloss})"
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", inner)).strip()
@@ -78,7 +78,7 @@ def _surface(inner: str) -> str:
 def _body_text(tei: str) -> str:
     body = re.search(r"<body>(.*?)</body>", tei, flags=re.DOTALL)
     # Drop glosses so the annotator reads the source as written.
-    text = re.sub(r"<gloss>[^<]*</gloss>", "", body.group(1) if body else tei)
+    text = re.sub(r"<rt[^>]*>[^<]*</rt>", "", body.group(1) if body else tei)
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).strip()
 
 

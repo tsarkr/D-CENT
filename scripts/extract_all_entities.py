@@ -9,6 +9,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts.config import ROOT, load_secrets, get_pg_connection
+from scripts.tei_utils import extract_ruby_parts
 
 class TeiEntityExtractor:
     def __init__(self):
@@ -20,11 +21,7 @@ class TeiEntityExtractor:
         hanja = ""
         gloss = ""
         
-        f_match = re.search(r'<foreign[^>]*>([^<]+)</foreign>', tag_content)
-        g_match = re.search(r'<gloss>([^<]+)</gloss>', tag_content)
-        
-        if f_match: hanja = f_match.group(1).strip()
-        if g_match: gloss = g_match.group(1).strip()
+        hanja, gloss = extract_ruby_parts(tag_content)
         
         if not gloss:
             clean_text = re.sub(r'<[^>]+>', '', tag_content).strip()
@@ -118,7 +115,7 @@ class TeiEntityExtractor:
                             if is_duplicate:
                                 continue
 
-                            if "<foreign" in content or not "<" in content:
+                            if "<ruby" in content or not "<" in content:
                                 hanja, gloss = self._parse_inner_text(content)
                                 type_label = term_type if term_type else 'general'
                                 writer.writerow([table, rowid, event_ref, 'term', type_label, hanja, gloss])

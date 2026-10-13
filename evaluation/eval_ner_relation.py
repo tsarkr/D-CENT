@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.config import ROOT as PROJ_ROOT, get_pg_connection, load_secrets, setting
 from scripts.hanja_utils import translate_hanja_name
+from scripts.tei_utils import extract_ruby_parts
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,18 +57,13 @@ PLACE_SUFFIXES = ('도', '시', '군', '면', '읍', '리', '구', '부', '포',
 def extract_all_glosses(tag_content: str) -> list[str]:
     """Extract all valid surface forms (glosses or translated text) inside a TEI XML tag."""
     glosses = []
-    # 1. Extract all explicit <gloss> tags
-    for m in re.finditer(r'<gloss>([^<]+)</gloss>', tag_content):
-        g = m.group(1).strip()
-        if g:
-            glosses.append(g)
-    # 2. Extract <foreign> tags and translate hanja
-    for m in re.finditer(r'<foreign[^>]*>([^<]+)</foreign>', tag_content):
-        h = m.group(1).strip()
-        if h:
-            translated = translate_hanja_name(h)
-            if translated and translated not in glosses:
-                glosses.append(translated)
+    bases, readings = extract_ruby_parts(tag_content)
+    if readings:
+        glosses.append(readings)
+    if bases:
+        translated = translate_hanja_name(bases)
+        if translated and translated not in glosses:
+            glosses.append(translated)
     # 3. Fallback: strip tags if no gloss/foreign
     if not glosses:
         clean = re.sub(r'<[^>]+>', ' ', tag_content).strip()

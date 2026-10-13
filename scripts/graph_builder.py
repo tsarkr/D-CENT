@@ -31,6 +31,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts.config import load_secrets, setting, get_pg_config, get_neo4j_config, SECRETS, ROOT
+from scripts.tei_utils import extract_tei_surface
 
 RELATION_MAPPING = {
     "부친": "P152_has_parent",
@@ -96,52 +97,52 @@ def extract_family_relations_from_text(text, valid_names=None):
             n,
         )
         from scripts.hanja_utils import translate_hanja_name
-        return translate_hanja_name(n).strip() if re.search(r'[\u4e00-\u9fff]', n) else n.strip()
+        return translate_hanja_name(n).strip() if re.search(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]', n) else n.strip()
 
     patterns = [
         # 1. '유관순도 부친인 유중권의' / '유관순의 부친 유중권' / '유관순의 아버지 유중권'
         (
-            r'([가-힣\u4e00-\u9fff]{2,4})(?:[은는이가도을를의\s]+)?(?:부친인|아버지인|아버님인)\s+([가-힣\u4e00-\u9fff]{2,4})',
+            r'([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})(?:[은는이가도을를의\s]+)?(?:부친인|아버지인|아버님인)\s+([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(부친)',
         ),
         (
-            r'([가-힣\u4e00-\u9fff]{2,4})\s*(?:의)?\s*(?:부친|아버지|아버님)\s+([가-힣\u4e00-\u9fff]{2,4})',
+            r'([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})\s*(?:의)?\s*(?:부친|아버지|아버님)\s+([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(부친)',
         ),
         # 2. '모친인' / '의 모친' / '어머니'
         (
-            r'([가-힣\u4e00-\u9fff]{2,4})(?:[은는이가도을를의\s]+)?(?:모친인|어머니인|어머님인)\s+([가-힣\u4e00-\u9fff]{2,4})',
+            r'([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})(?:[은는이가도을를의\s]+)?(?:모친인|어머니인|어머님인)\s+([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(모친)',
         ),
         (
-            r'([가-힣\u4e00-\u9fff]{2,4})\s*(?:의)?\s*(?:모친|어머니|어머님)\s+([가-힣\u4e00-\u9fff]{2,4})',
+            r'([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})\s*(?:의)?\s*(?:모친|어머니|어머님)\s+([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(모친)',
         ),
         # 3. '아들' / '딸' / '자녀' / '장남' / '차남' / '장녀' / '차녀' (단독 '자'나 '부' 매칭 금지)
         (
-            r'([가-힣\u4e00-\u9fff]{2,4})\s*(?:의)?\s*(?:아들|자녀|딸|장남|차남|장녀|차녀|자식|친자|양자)\s+([가-힣\u4e00-\u9fff]{2,4})',
+            r'([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})\s*(?:의)?\s*(?:아들|자녀|딸|장남|차남|장녀|차녀|자식|친자|양자)\s+([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})',
             'P152_has_parent',
             'parent_to_child',
             '가족 관계(자녀)',
         ),
         # 4. '친형인' / '친동생인' / '아우인' / '형인' / '동생인'
         (
-            r'([가-힣\u4e00-\u9fff]{2,4})(?:[은는이가도을를의\s]+)?(?:친형인|친동생인|아우인|형인|동생인)\s+([가-힣\u4e00-\u9fff]{2,4})',
+            r'([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})(?:[은는이가도을를의\s]+)?(?:친형인|친동생인|아우인|형인|동생인)\s+([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})',
             'foaf:knows',
             'sibling',
             '형제 관계',
         ),
         # 5. '동지인' / '의 동지'
         (
-            r'([가-힣\u4e00-\u9fff]{2,4})\s*의\s*동지\s+([가-힣\u4e00-\u9fff]{2,4})',
+            r'([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})\s*의\s*동지\s+([가-힣\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,4})',
             'foaf:knows',
             'comrade',
             '동지 관계',
@@ -1042,19 +1043,8 @@ def build_ultimate_graph():
                             continue
 
                         for pers in section.find_all('persName'):
-                            # extract <gloss> if present, remove it from tree, then get main name
-                            gloss_tag = pers.find('gloss')
-                            gloss_text = ''
-                            if gloss_tag:
-                                try:
-                                    gloss_text = gloss_tag.get_text(' ', strip=True) or ''
-                                except Exception:
-                                    gloss_text = ''
-                                try:
-                                    gloss_tag.extract()
-                                except Exception:
-                                    pass
-                            for person_name in _split_names(pers.get_text(' ', strip=True), split_whitespace=True):
+                            person_name, gloss_text = extract_tei_surface(pers)
+                            for person_name in _split_names(person_name, split_whitespace=True):
                                 person_acc.append({
                                     'event_id': event_id,
                                     'person_name': person_name,
@@ -1063,18 +1053,7 @@ def build_ultimate_graph():
                                 })
 
                         for place in section.find_all('placeName'):
-                            gloss_tag = place.find('gloss')
-                            gloss_text = ''
-                            if gloss_tag:
-                                try:
-                                    gloss_text = gloss_tag.get_text(' ', strip=True) or ''
-                                except Exception:
-                                    gloss_text = ''
-                                try:
-                                    gloss_tag.extract()
-                                except Exception:
-                                    pass
-                            place_name = _strip_xml_text(place.get_text(' ', strip=True))
+                            place_name, gloss_text = extract_tei_surface(place)
                             place_ref = str(place.get('ref') or '').lstrip('#').strip()
                             if place_name:
                                 place_acc.append({

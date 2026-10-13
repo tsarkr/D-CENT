@@ -10,6 +10,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts.config import ROOT, get_pg_connection
+from scripts.tei_utils import extract_ruby_parts
 
 class CidocTimelineGenerator:
     def __init__(self):
@@ -68,10 +69,8 @@ class CidocTimelineGenerator:
         prev_activity_uri = None
 
         for idx, (ref, inner_content) in enumerate(pers_blocks):
-            gloss_match = re.search(r'<gloss>([^<]+)</gloss>', inner_content)
-            if gloss_match:
-                pure_name = gloss_match.group(1).strip()
-            else:
+            _, pure_name = extract_ruby_parts(inner_content)
+            if not pure_name:
                 pure_name = re.sub(r'<[^>]+>', '', inner_content).strip()
 
             if not pure_name:

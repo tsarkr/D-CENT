@@ -92,14 +92,18 @@ class LocalDocentEngine:
             print(f"  [안내] {table_name} 테이블에 'tei_status' 컬럼을 신규 생성했습니다.")
 
     def _clean_and_pre_tag_hanja(self, text):
-        text = re.sub(r'</?(?:term|foreign|gloss|persName)[^>]*>', '', text)
+        text = re.sub(r'<(gloss|rt)[^>]*>.*?</\1>', '', text, flags=re.DOTALL)
+        text = re.sub(r'</?(?:term|foreign|ruby|rb|persName)[^>]*>', '', text)
         
         def replace_hanja(match):
             word = match.group(0)
             reading = translate_hanja_name(word)
-            return f'<term><foreign xml:lang="zh-Hani">{word}</foreign><gloss>{reading}</gloss></term>'
+            if re.search(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]', reading):
+                print(f"  ⚠️ 한자 독음 변환 실패로 ruby 생성을 건너뜁니다: {word} -> {reading}")
+                return word
+            return f'<term><ruby><rb xml:lang="ko-Hani">{word}</rb><rt xml:lang="ko-Hang">{reading}</rt></ruby></term>'
             
-        return re.sub(r'[\u4e00-\u9fff]+', replace_hanja, text)
+        return re.sub(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+', replace_hanja, text)
 
     def _is_valid_person_name(self, name):
         if not name: return False
@@ -126,7 +130,7 @@ class LocalDocentEngine:
         invalid_phrases.update(EVENT_TITLE_KOREAN)
         for sub in invalid_phrases:
             if sub in name: return False
-        if re.search(r'[\u4e00-\u9fff]', name):
+        if re.search(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]', name):
             if re.search(r'(郡|市|Do|面|里|村|長|官|署|所|隊|兵|院|海|女)$', name): return False
         return True
 
@@ -142,11 +146,11 @@ class LocalDocentEngine:
         candidate = str(name).strip()
         candidate = re.sub(r'[\s\u3000]+', '', candidate)
         candidate = candidate.rstrip('외外間人名')
-        if re.search(r'[가-힣]', candidate) and re.search(r'[\u4e00-\u9fff]', candidate):
+        if re.search(r'[가-힣]', candidate) and re.search(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]', candidate):
             hangul_parts = re.findall(r'[가-힣]+', candidate)
             if hangul_parts: candidate = hangul_parts[-1]
         candidate = re.sub(r'(으로부터|로부터|으로써|이라고|라고|에게서|에게|께|에서|까지|부터|보다|만|밖에|조차|마저|도|은|는|이|가|을|를|의|와|과|에|로|으로|처럼|같이|및|등)$', '', candidate)
-        if re.search(r'[\u4e00-\u9fff]', candidate) and not re.search(r'[가-힣]', candidate):
+        if re.search(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]', candidate) and not re.search(r'[가-힣]', candidate):
             candidate = translate_hanja_name(candidate)
         return candidate.strip()
 
@@ -196,7 +200,7 @@ class LocalDocentEngine:
         extracted = []
         def walk(elem, ancestors):
             if elem.tag == 'persName' and not any(data_col in skip_data_cols for data_col in ancestors):
-                name_text = elem.findtext('.//gloss') or elem.findtext('.//foreign') or ''.join(elem.itertext())
+                name_text = elem.findtext('.//rt') or elem.findtext('.//rb') or ''.join(elem.itertext())
                 name_text = str(name_text).strip()
                 for candidate in self._extract_last_token_names(name_text):
                     candidate = self._normalize_person_candidate(candidate)
@@ -229,7 +233,7 @@ class LocalDocentEngine:
                     if buffer_candidates: extracted.extend(buffer_candidates)
                 child_candidates = []
                 if child.tag == 'persName':
-                    child_text = child.findtext('.//gloss') or child.findtext('.//foreign') or ''.join(child.itertext())
+                    child_text = child.findtext('.//rt') or child.findtext('.//rb') or ''.join(child.itertext())
                     child_text = str(child_text).strip()
                     for candidate in self._extract_last_token_names(child_text):
                         candidate = self._normalize_person_candidate(candidate)
@@ -256,7 +260,7 @@ class LocalDocentEngine:
             if elem.attrib.get('data-col') != '상위자료_제목': continue
             title_text = ''.join(elem.itertext()).strip()
             if not title_text: continue
-            for match in re.finditer(r'([\u4e00-\u9fff]{2,}?)外\s*(?:\d+\s*)?(?:人|名)?', title_text):
+            for match in re.finditer(r'([\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}?)外\s*(?:\d+\s*)?(?:人|名)?', title_text):
                 candidate = self._normalize_person_candidate(match.group(1))
                 if self._is_valid_person_name(candidate): extracted.append(candidate)
         return list(dict.fromkeys(extracted))
@@ -284,8 +288,8 @@ class LocalDocentEngine:
                         candidate = self._normalize_person_candidate(token)
                         if self._is_valid_person_name(candidate) and self._looks_like_person_name(candidate) and len(candidate) >= 3: extracted.append(candidate)
             elif data_col == '출처정보':
-                bracket_hits = re.findall(r'([\u4e00-\u9fff]{2,})\s*\[[^\]]+\]', field_text)
-                particle_hits = re.findall(r'([\u4e00-\u9fff]{2,})(?=\s*(?:은|는|이|가|도|와|과|의|를|을|에|에서|에게|께|등|및|로|으로|이며|인|란|라고|자|후|전|보다|까지|부터)\b)', field_text)
+                bracket_hits = re.findall(r'([\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,})\s*\[[^\]]+\]', field_text)
+                particle_hits = re.findall(r'([\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,})(?=\s*(?:은|는|이|가|도|와|과|의|를|을|에|에서|에게|께|등|및|로|으로|이며|인|란|라고|자|후|전|보다|까지|부터)\b)', field_text)
                 for candidate_text in bracket_hits + particle_hits:
                     candidate = self._normalize_person_candidate(candidate_text)
                     if self._is_valid_person_name(candidate) and self._looks_like_person_name(candidate) and len(candidate) >= 3: extracted.append(candidate)
@@ -302,9 +306,9 @@ class LocalDocentEngine:
             elif data_col not in BIBLIOGRAPHY_PERSON_FIELDS: continue
             term_candidates = []
             for term in elem.findall('.//term'):
-                gloss = term.findtext('gloss')
-                foreign = term.findtext('foreign')
-                term_text = (gloss or foreign or ''.join(term.itertext())).strip()
+                reading = term.findtext('.//rt')
+                base = term.findtext('.//rb')
+                term_text = (reading or base or ''.join(term.itertext())).strip()
                 if term_text: term_candidates.extend(self._extract_last_token_names(term_text))
             if not term_candidates:
                 field_text = ''.join(elem.itertext()).strip()
@@ -370,7 +374,7 @@ class LocalDocentEngine:
     def _apply_persname_tags(self, pre_tagged_tei, real_names, event_id):
         for name in real_names:
             if not name or len(name) < 2: continue
-            hanja_pattern = rf'(<term><foreign[^>]*>([^\s<]+)</foreign><gloss>{re.escape(name)}</gloss></term>)'
+            hanja_pattern = rf'(<term><ruby><rb[^>]*>([^\s<]+)</rb><rt[^>]*>{re.escape(name)}</rt></ruby></term>)'
             replacement = f'<persName ref="#{event_id}_\\2">\\1</persName>'
             pre_tagged_tei = re.sub(hanja_pattern, replacement, pre_tagged_tei)
             plain_pattern = rf'(?<![>#_\-\[₩A-Za-z0-9]){re.escape(name)}(?![<A-Za-z0-9])'
