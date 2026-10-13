@@ -67,7 +67,7 @@ class LocalDocentEngine:
         signal.signal(signal.SIGINT, self._handle_signal)
         
         print("📦 Ollama 초고속 인명 추출 엔진 연결 중 (qwen3.6)...")
-        self.llm = OllamaLLM(model="qwen3.6", format="json", temperature=0.0)
+        self.llm = OllamaLLM(model="qwen3.6", format="json", temperature=0.0, reasoning=False)
         print("✅ 엔진 연결 완료.")
 
     def _handle_signal(self, signum, frame):
@@ -391,6 +391,12 @@ class LocalDocentEngine:
         # This table contains only event/place links. It cannot produce people,
         # so sending its TEI through the LLM fallback only adds latency.
         skipped_tables = {'raw_detail_place', 'raw_event_place_link'}
+        no_person_tables = {
+            'raw_admin_region',
+            'raw_oppression_org_police',
+            'raw_oppression_org_military',
+            'raw_oppression_org_gendarme',
+        }
         for table in tables:
             if table in skipped_tables: continue
             if self.interrupted: break
@@ -413,7 +419,10 @@ class LocalDocentEngine:
                 try:
                     event_ref = str(event_id).strip() if event_id else f"{table}_{rowid}"
                     pre_tagged = self._clean_and_pre_tag_hanja(tei)
-                    real_names = self._extract_names_with_llm_context(table, pre_tagged)
+                    real_names = (
+                        [] if table in no_person_tables
+                        else self._extract_names_with_llm_context(table, pre_tagged)
+                    )
                     final_tei = self._apply_persname_tags(pre_tagged, real_names, event_ref)
                     self.cur.execute(f'UPDATE "{table}" SET tei = %s, tei_status = %s WHERE rowid = %s', (final_tei, self.done_status, rowid))
                     pending_commits += 1
