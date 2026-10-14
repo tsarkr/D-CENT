@@ -777,12 +777,10 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
                 '가족관계 (P152_has_parent)',
                 $event_name ?: '3·1운동'
             ], [
-                "doc" => "[가족 관계 및 공동 항일] {$person_name} - {$f_name}",
-                "quote" => "{$person_name}의 가족인 {$f_name}은(는) 일제의 탄압에 맞서 함께 독립운동에 참여함.",
+                "doc" => "[가족 관계] {$person_name} - {$f_name}",
+                "quote" => "{$person_name}과(와) {$f_name}의 가족 관계가 지식그래프에 기록되어 있음.",
                 "concept" => (string)$person_name,
-                "text" => (in_array($person_name, ['유관순', '유중권', '이소제'], true) || in_array($f_name, ['유관순', '유중권', '이소제'], true))
-                    ? "3.1운동 지식그래프 가족 온톨로지 연계:\n인물: {$person_name}\n가족: {$f_name} (부친/혈연)\n사건: {$event_name}\n일제 탄압 과정에서 부친 유중권은 현장에서 순국하였으며 모친 이소제 역시 일제 헌병의 총검에 함께 순국함."
-                    : "3.1운동 지식그래프 가족 온톨로지 연계:\n인물: {$person_name}\n가족/혈연: {$f_name}\n관련 사건: " . ($event_name ?: '3·1운동')
+                "text" => "3.1운동 지식그래프 가족 온톨로지 연계:\n인물: {$person_name}\n가족/혈연: {$f_name}\n관련 사건: " . ($event_name ?: '3·1운동')
             ], 65);
         }
 

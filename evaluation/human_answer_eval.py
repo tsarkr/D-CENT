@@ -54,9 +54,11 @@ RATING_CHOICES: dict[str, list[str] | None] = {
     "completeness": SCALE,
     "unsupported_claims": None,
     "usefulness": SCALE,
+    "narrative_order": [*SCALE, NA],
+    "narrative_attribution": [*SCALE, NA],
 }
 RATING_COLUMNS = list(RATING_CHOICES)
-SCALE_METRICS = ["accuracy", "completeness", "usefulness"]          # 1-5, higher is better
+SCALE_METRICS = ["accuracy", "completeness", "usefulness", "narrative_order", "narrative_attribution"]          # 1-5, higher is better
 NUMERIC_METRICS = [*SCALE_METRICS, "unsupported_claims", "declined"]  # compared between systems
 LENGTH_BIAS_METRICS = ["accuracy", "completeness"]
 SUPPORT_VALUES = {"O": 1.0, "△": 0.5, "X": 0.0}
@@ -91,6 +93,12 @@ INSTRUCTIONS = [
     "6) usefulness (1~5): 질문한 연구자·관람객에게 실제로 도움이 되는가. 1=쓸모없음, 5=그대로 활용 가능.",
     "   예) 5: 답과 근거 사료를 바로 확인해 인용할 수 있음.",
     "   예) 2: 틀린 내용은 없으나 질문과 관련이 적은 일반적 서술이 대부분임.",
+    "7) narrative_order (1~5/해당없음): 여러 사건의 경과·확산을 묻는 질문에서 사건이 올바른 시간 순서로 배열되었는가.",
+    "   1=순서가 대부분 틀림, 3=일부 뒤바뀜, 5=모두 올바름. 한 사건만 묻는 질문이거나 거절한 답변이면 '해당없음'.",
+    "   예) 2: 3월 26일 시위를 3월 1일 서울 시위보다 앞선 사건으로 서술함.",
+    "8) narrative_attribution (1~5/해당없음): 서사에 등장하는 인물·장소·행위가 올바른 사건과 사료에 귀속되었는가.",
+    "   1=다른 사건·지역의 인물이나 행위가 섞임, 3=일부 잘못 귀속, 5=모두 올바름. 7번과 같은 경우 '해당없음'.",
+    "   예) 2: 이웃 면의 시위 주도자를 질문한 시위의 주도자로 서술함.",
     "",
     "[citations] 시트: 답변 문장(claim)과 그 문장이 인용한 사료 원문(source_text)입니다.",
     "  - supports: O=사료가 문장을 뒷받침함, △=일부만 뒷받침함, X=뒷받침하지 않거나 무관함.",
