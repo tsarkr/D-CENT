@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load the Korean History Thesaurus into Neo4j and optionally add Ollama vectors."""
+"""Load the Korean History Thesaurus into Neo4j."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import argparse
 import csv
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +25,6 @@ REQUIRED_COLUMNS = {
     "term_lk",
     "term_desc",
 }
-DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
-OLLAMA_BATCH_SIZE = 100
 
 
 def read_thesaurus_csv(csv_path: Path) -> list[dict[str, str]]:
@@ -87,7 +83,6 @@ SCHEMA_STATEMENTS = (
     "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Thesaurus) REQUIRE t.term_id IS UNIQUE",
     "CREATE INDEX IF NOT EXISTS FOR (t:Thesaurus) ON (t.name)",
     "CREATE CONSTRAINT IF NOT EXISTS FOR (c:ThesaurusCategory) REQUIRE c.path IS UNIQUE",
-    "CREATE VECTOR INDEX samil_docent_vector_idx IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
 )
 
 UPSERT_QUERY = """
@@ -194,135 +189,6 @@ def load_batches(driver: Any, rows: list[dict[str, str]], batch_size: int) -> in
     return written
 
 
-def embedding_text(row: dict[str, Any]) -> str:
-    neighbors = row.get("neighbors") or ""
-    return (
-        f"[유형: 시소러스] 이름: {row.get('name', '')}({row.get('hanja', '')})\n"
-        f"분류: {row.get('category', '')}\n설명: {row.get('description', '')}\n"
-        f"관련 그래프 문맥: {neighbors}"
-    )
-
-
-def read_embedding_batches(driver: Any, batch_size: int) -> list[list[dict[str, Any]]]:
-    query = """
-    MATCH (t:Thesaurus)
-    WHERE t.embedding IS NULL AND EXISTS((t)--())
-    OPTIONAL MATCH (t)-[r]-(neighbor)
-    WITH t, collect(
-        CASE WHEN neighbor IS NULL THEN NULL ELSE
-            type(r) + " -> " + coalesce(neighbor.name, neighbor.명칭, neighbor.title, neighbor.제목, neighbor.사건명, neighbor.term_id, "")
-        END
-    ) AS neighbors
-    RETURN t.term_id AS term_id, t.name AS name, t.hanja AS hanja,
-           t.category AS category, t.description AS description,
-           reduce(text = "", value IN neighbors |
-               text + CASE WHEN value IS NULL THEN "" ELSE value + " | " END
-           ) AS neighbors
-    ORDER BY t.term_id
-    """
-    with driver.session() as session:
-        rows = [record.data() for record in session.run(query)]
-    return [rows[start : start + batch_size] for start in range(0, len(rows), batch_size)]
-
-
-def request_ollama_embeddings(
-    ollama_url: str, model: str, texts: list[str]
-) -> list[list[float]]:
-    """Call Ollama's batch embedding endpoint for one batch."""
-    import requests
-
-    base_url = ollama_url.rstrip("/")
-    endpoint = f"{base_url}/api/embed"
-    fallback_endpoint = f"{base_url}/api/embeddings"
-    try:
-        response = requests.post(
-            endpoint,
-            json={"model": model, "input": texts},
-            timeout=300,
-        )
-        if response.status_code != 404:
-            response.raise_for_status()
-            body = response.json()
-            vectors = body.get("embeddings")
-            if not isinstance(vectors, list) or len(vectors) != len(texts):
-                raise RuntimeError(
-                    f"Ollama 응답 개수 불일치: 요청 {len(texts)}건, "
-                    f"응답 {len(vectors or [])}건"
-                )
-            if any(not isinstance(vector, list) or not vector for vector in vectors):
-                raise RuntimeError("Ollama 응답에 유효한 embedding 벡터가 없습니다.")
-            return vectors
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Ollama 연결 실패: {ollama_url}. 서버가 실행 중인지 확인하세요."
-        ) from exc
-
-    vectors = []
-    for text in texts:
-        try:
-            response = requests.post(
-                fallback_endpoint,
-                json={"model": model, "prompt": text},
-                timeout=300,
-            )
-            response.raise_for_status()
-            vector = response.json().get("embedding")
-            if not isinstance(vector, list) or not vector:
-                raise RuntimeError("Ollama 응답에 유효한 embedding 벡터가 없습니다.")
-            vectors.append(vector)
-        except (requests.RequestException, ValueError) as exc:
-            raise RuntimeError(f"Ollama 임베딩 요청 실패: {exc}") from exc
-    return vectors
-
-
-STORE_EMBEDDINGS_QUERY = """
-UNWIND $rows AS row
-MATCH (t:Thesaurus {term_id: row.term_id})
-SET t.embedding = row.embedding
-RETURN count(t) AS updated
-"""
-
-
-def embed_missing_nodes(driver: Any, ollama_url: str, model: str) -> int:
-    batches = read_embedding_batches(driver, OLLAMA_BATCH_SIZE)
-    if not batches:
-        print("임베딩 대상 Thesaurus 노드가 없습니다.", flush=True)
-        return 0
-
-    total = sum(len(batch) for batch in batches)
-    print(
-        f"임베딩 시작: 대상 {total}건, {len(batches)}개 배치 "
-        f"(모델: {model}, 배치당 최대 {OLLAMA_BATCH_SIZE}건)",
-        flush=True,
-    )
-    updated_total = 0
-    for batch_index, batch in enumerate(batches, start=1):
-        print(
-            f"Ollama 요청 중: 배치 {batch_index}/{len(batches)} "
-            f"({len(batch)}건)",
-            flush=True,
-        )
-        vectors = request_ollama_embeddings(
-            ollama_url, model, [embedding_text(row) for row in batch]
-        )
-        updates = [
-            {"term_id": row["term_id"], "embedding": vector}
-            for row, vector in zip(batch, vectors)
-        ]
-        with driver.session() as session:
-            result = session.run(STORE_EMBEDDINGS_QUERY, rows=updates).single()
-            updated = int(result["updated"]) if result else 0
-        if updated != len(batch):
-            raise RuntimeError(
-                f"임베딩 저장 개수 불일치: 요청 {len(batch)}건, 저장 {updated}건"
-            )
-        updated_total += updated
-        print(f"Ollama 임베딩 저장: {updated_total}/{total}건", flush=True)
-        if batch_index < len(batches):
-            time.sleep(1.0)
-    return updated_total
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="한국역사용어시소러스의 근대·일제강점기 데이터를 Neo4j에 적재합니다."
@@ -330,19 +196,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--csv", default=str(DEFAULT_CSV), help="시소러스 CSV 파일 경로")
     parser.add_argument(
         "--batch-size", type=int, default=1000, help="Neo4j 트랜잭션 배치 크기"
-    )
-    parser.add_argument(
-        "--skip-embed", action="store_true", help="Ollama 임베딩 생성을 건너뜁니다."
-    )
-    parser.add_argument(
-        "--ollama-url",
-        default=setting("OLLAMA_HOST", DEFAULT_OLLAMA_URL),
-        help="Ollama 서버 주소",
-    )
-    parser.add_argument(
-        "--embedding-model",
-        default=setting("OLLAMA_EMBED_MODEL", DEFAULT_EMBEDDING_MODEL),
-        help="Ollama 임베딩 모델명",
     )
     return parser.parse_args()
 
@@ -371,15 +224,6 @@ def main() -> int:
         driver.verify_connectivity()
         load_batches(driver, rows, args.batch_size)
         print("Neo4j 적재 완료.", flush=True)
-        if args.skip_embed:
-            print("--skip-embed 지정으로 임베딩을 건너뜁니다.", flush=True)
-        else:
-            print(
-                "--skip-embed가 없어 Ollama 임베딩을 계속합니다. "
-                "임베딩 모델이 로컬에 없으면 먼저 ollama pull을 실행하세요.",
-                flush=True,
-            )
-            embed_missing_nodes(driver, args.ollama_url, args.embedding_model)
     finally:
         print("Neo4j 연결 종료 중...", flush=True)
         driver.close()

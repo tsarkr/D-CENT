@@ -295,8 +295,9 @@ def _ensure_schema(session):
         "CREATE INDEX place_name IF NOT EXISTS FOR (p:장소) ON (p.명칭)",
         "CREATE INDEX place_korean_name IF NOT EXISTS FOR (p:장소) ON (p.한글명칭)",
         "DROP INDEX namesIndex IF EXISTS",
-        "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:Person|Place|Event|Organization|Document|Thesaurus) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭, n.description, n.설명, n.hanja, n.category]",
-        "CREATE VECTOR INDEX samil_docent_vector_idx IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
+        "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:Person|Place|Event|Organization|Document|Thesaurus) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭, n.description, n.설명, n.hanja, n.category, n.romanized]",
+        # Node embeddings are not used by the query path; remove the legacy vector index.
+        "DROP INDEX samil_docent_vector_idx IF EXISTS",
     ]
 
     for statement in statements:

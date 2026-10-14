@@ -13,8 +13,7 @@ RDBMS preprocessing:
 Neo4j serving:
 1) scripts/graph_builder.py
 2) thesaurus_to_neo4j.py
-3) scripts/vectorize_neo4j.py
-4) scripts/apply_vectors_to_neo4j.py
+3) scripts/romanize_names.py
 
 Each step is run synchronously; on error the process exits with non-zero code.
 """
@@ -54,41 +53,28 @@ NEO4J_STEPS = [
 
 
 def build_steps(
-    skip_thesaurus_embed=False,
     thesaurus_csv=None,
     thesaurus_batch_size=None,
-    ollama_url=None,
-    embedding_model=None,
     stage='all',
 ):
     """Build only the requested pipeline stage.
 
     ``rdbms`` stops after PostgreSQL/TEI/CIDOC preprocessing. ``neo4j``
     assumes that preprocessing is already complete and only rebuilds the
-    graph, thesaurus links, and vectors. ``all`` preserves the legacy flow.
+    graph, thesaurus links, and romanized name variants. ``all`` runs both.
     """
     if stage not in {'all', 'rdbms', 'neo4j'}:
         raise ValueError(f'지원하지 않는 파이프라인 단계: {stage}')
     thesaurus_args = []
     csv_path = thesaurus_csv or os.getenv('THESAURUS_CSV')
     batch_size = thesaurus_batch_size or os.getenv('THESAURUS_BATCH_SIZE')
-    ollama_host = ollama_url or os.getenv('OLLAMA_HOST')
-    ollama_model = embedding_model or os.getenv('OLLAMA_EMBED_MODEL')
     if csv_path:
         thesaurus_args.extend(['--csv', csv_path])
     if batch_size:
         thesaurus_args.extend(['--batch-size', str(batch_size)])
-    if ollama_host:
-        thesaurus_args.extend(['--ollama-url', ollama_host])
-    if ollama_model:
-        thesaurus_args.extend(['--embedding-model', ollama_model])
-    # Embeddings are generated once, after thesaurus relationships are loaded,
-    # so isolated flat thesaurus vectors cannot be written by the pipeline.
-    thesaurus_args.append('--skip-embed')
     neo4j_steps = NEO4J_STEPS + [
         (ROOT / 'thesaurus_to_neo4j.py', thesaurus_args),
-        (ROOT / 'scripts' / 'vectorize_neo4j.py', []),
-        (ROOT / 'scripts' / 'apply_vectors_to_neo4j.py', []),
+        (ROOT / 'scripts' / 'romanize_names.py', []),
     ]
     if stage == 'rdbms':
         return RDBMS_STEPS
@@ -153,29 +139,19 @@ def main():
         help='엔티티 XLSX 검토 일시정지를 건너뜁니다.',
     )
     parser.add_argument(
-        '--skip-thesaurus-embed',
-        action='store_true',
-        help='시소러스 적재 후 Ollama 임베딩을 건너뜁니다.',
-    )
-    parser.add_argument(
         '--dry-run',
         action='store_true',
         help='실행하지 않고 단계와 필수 파일만 확인합니다.',
     )
     parser.add_argument('--thesaurus-csv', help='시소러스 CSV 경로')
     parser.add_argument('--thesaurus-batch-size', type=int, help='시소러스 Neo4j 배치 크기')
-    parser.add_argument('--ollama-url', help='Ollama 서버 주소')
-    parser.add_argument('--embedding-model', help='Ollama 임베딩 모델명')
     args = parser.parse_args()
     skip_hitl_pause = args.skip_hitl or os.getenv('SKIP_HITL_PAUSE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
     if args.thesaurus_batch_size is not None and args.thesaurus_batch_size < 1:
         parser.error('--thesaurus-batch-size는 1 이상이어야 합니다.')
     steps = build_steps(
-        args.skip_thesaurus_embed,
         args.thesaurus_csv,
         args.thesaurus_batch_size,
-        args.ollama_url,
-        args.embedding_model,
         stage=args.stage,
     )
     print('Pipeline orchestrator starting')

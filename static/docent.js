@@ -136,16 +136,20 @@
     const API_BASE = 'docent.php';
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     *  Intent Router — 클라이언트 사전 질의 의도 분류 모듈
-     *  사용자 질문을 FULLTEXT / VECTOR / GRAPH 3가지 전략으로
-     *  백엔드 호출 전에 빠르게 분류합니다.
+     *  질의 유형 분류 — 클라이언트 사전 분류 모듈
+     *  규칙 기반으로 질문을 개체 조회 / 서술형 / 관계·서사 탐색으로 나눕니다.
+     *  검색 방식을 바꾸지는 않으며, 서버 질의 분석이 실패했을 때
+     *  의도 유형의 기본값(SERVER_INTENT)으로만 쓰입니다.
+     *  (벡터·임베딩 검색은 수행하지 않습니다.)
      * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
     const STRATEGY_LABELS = {
-        FULLTEXT: { label: '전문/키워드 검색', icon: '🔤', color: 'text-blue-600' },
-        VECTOR:   { label: '문맥/시맨틱 검색', icon: '🧠', color: 'text-purple-600' },
-        GRAPH:    { label: '다중 홉 관계 탐색', icon: '🕸️', color: 'text-emerald-600' }
+        FULLTEXT: { label: '개체 조회', icon: '🔤', color: 'text-blue-600' },
+        VECTOR:   { label: '배경·서술형 질의', icon: '📖', color: 'text-purple-600' },
+        GRAPH:    { label: '관계·서사 탐색', icon: '🕸️', color: 'text-emerald-600' }
     };
+    // 서버 질의 분석(handle_action_analyze)의 intent_type 체계로 변환
+    const SERVER_INTENT = { FULLTEXT: 'ENTITY_SEARCH', VECTOR: 'GENERAL_INFO', GRAPH: 'EVENT_RELATION' };
 
     /* ── 패턴 사전 ── */
     const GRAPH_PATTERNS = [
@@ -723,9 +727,10 @@
             /* 0. Intent Router — 클라이언트 사전 분류 */
             const intentResult = classifyIntent(term);
             const strategyMeta = STRATEGY_LABELS[intentResult.intent] || STRATEGY_LABELS.FULLTEXT;
-            addStep(strategyMeta.icon, `[Intent Router] 검색 전략 분류: ${strategyMeta.label.toUpperCase()} — ${intentResult.reason}`, 'done');
+            addStep(strategyMeta.icon, `[질의 유형] ${strategyMeta.label} — ${intentResult.reason}`, 'done');
             logSystem(`[Router] intent=${intentResult.intent}, keywords=[${intentResult.keywords.join(',')}], reason=${intentResult.reason}`);
 
+            const serverIntent = SERVER_INTENT[intentResult.intent] || 'ENTITY_SEARCH';
             const kws = (intentResult.keywords && intentResult.keywords.length > 0) ? intentResult.keywords : [term];
             const detectedLang = detectInputLanguage(term) || 'ko';
             const langLabels = { ko: '🇰🇷 한국어 (Korean)', en: '🇺🇸 English (영문)', ja: '🇯🇵 日本語 (Japanese)', zh: '🇨🇳 中文 (Chinese)' };
@@ -741,7 +746,7 @@
             let gd;
             let analysis;
             if (detectedLang === 'ko') {
-                const analyzePromise = api('analyze',{term, search_strategy: intentResult.intent}).catch(err => {
+                const analyzePromise = api('analyze',{term, search_strategy: serverIntent}).catch(err => {
                     logSystem(`⚠️ analyze 비동기 알림: ${err.message}`);
                     return null;
                 });
@@ -749,29 +754,29 @@
                     term,
                     keywords: JSON.stringify(kws),
                     intent_ko: term,
-                    search_strategy: intentResult.intent
+                    search_strategy: serverIntent
                 });
                 analysis = (await analyzePromise) || {
-                    intent_type: intentResult.intent,
+                    intent_type: serverIntent,
                     search_keywords: kws,
                     analyzed_intent_ko: term,
                     response_language: detectedLang,
-                    intent: intentResult.intent,
+                    intent: serverIntent,
                     keywords: kws,
                     focus: '종합',
                     explanation: term
                 };
             } else {
-                const analyzed = await api('analyze',{term, search_strategy: intentResult.intent}).catch(err => {
+                const analyzed = await api('analyze',{term, search_strategy: serverIntent}).catch(err => {
                     logSystem(`⚠️ analyze 실패: ${err.message}`);
                     return null;
                 });
                 analysis = analyzed || {
-                    intent_type: intentResult.intent,
+                    intent_type: serverIntent,
                     search_keywords: kws,
                     analyzed_intent_ko: term,
                     response_language: detectedLang,
-                    intent: intentResult.intent,
+                    intent: serverIntent,
                     keywords: kws,
                     focus: '종합',
                     explanation: term
@@ -784,7 +789,7 @@
                     term,
                     keywords: JSON.stringify(analyzedKeywords),
                     intent_ko: analyzedIntentKo,
-                    search_strategy: analysis.intent_type || analysis.intent || intentResult.intent
+                    search_strategy: analysis.intent_type || analysis.intent || serverIntent
                 });
             }
             lastEvidences=gd.evidences||[]; currentNodes=gd.nodes||[]; currentEdges=gd.edges||[];

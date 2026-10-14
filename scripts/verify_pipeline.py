@@ -242,7 +242,21 @@ def test_pipeline_dry_run_and_integrity(runner: TestRunner):
     )
     runner.assert_equal(res.returncode, 0, "run_pipeline.py --dry-run 종료코드 0")
     runner.assert_true("Pipeline orchestrator starting" in res.stdout, "오케스트레이터 시작 로그 확인")
-    runner.assert_true(res.stdout.count("[OK]") >= 10, "10개 파이프라인 단계 모두 [OK] 확인")
+    runner.assert_true(res.stdout.count("[OK]") >= 9, "9개 파이프라인 단계 모두 [OK] 확인")
+    runner.assert_true("vectorize" not in res.stdout and "apply_vectors" not in res.stdout,
+                       "노드 임베딩 단계가 파이프라인에 없음")
+    runner.assert_true(not (ROOT / "scripts" / "vectorize_neo4j.py").exists(), "vectorize_neo4j.py 삭제 확인")
+
+
+def test_romanized_name_variants(runner: TestRunner):
+    print("\n[+] 검증: 인명 로마자 변형 (romanize_names)")
+    from scripts.romanize_names import romanize_name
+    variants = romanize_name("이동휘")
+    runner.assert_true("Yi Dong-hwi" in variants and "Lee Dong-hwi" in variants, "이동휘 → Yi/Lee Dong-hwi")
+    runner.assert_true("Yu Gwan-sun" in romanize_name("유관순") and "Ryu Kwan-sun" in romanize_name("유관순"),
+                       "유관순 → Yu Gwan-sun / Ryu Kwan-sun")
+    runner.assert_true(romanize_name("남궁억")[0].startswith("Namgung"), "복성(남궁) 처리")
+    runner.assert_equal(romanize_name("金容圭"), [], "한자 이름은 변형 생성 안 함")
 
 
 def main():
@@ -257,6 +271,7 @@ def main():
     test_person_name_validation_and_splitting(runner)
     test_integrated_sentence_recognition_and_cidoc(runner)
     test_pipeline_dry_run_and_integrity(runner)
+    test_romanized_name_variants(runner)
 
     print("\n" + "=" * 60)
     print(f"📊 검증 결과: 통과 {runner.passed}개 / 실패 {runner.failed}개")

@@ -47,12 +47,10 @@ scripts/extract_all_entities.py
                                 │
                                 ▼
                     Neo4j 그래프
-                       │       │
-          vectorize_neo4j.py    │
-          apply_vectors_to_neo4j.py
-                       │       │
-                       ▼       ▼
-                   vector_store/  PHP Docent / MCP
+                    (thesaurus_to_neo4j.py, romanize_names.py)
+                                │
+                                ▼
+                    PHP Docent / MCP
 ```
 
 ## 요구사항
@@ -61,9 +59,9 @@ scripts/extract_all_entities.py
 - PostgreSQL
 - Neo4j 5.x
 - Ollama
-  - TEI 인명 보조 추출: 기본 `qwen3.6`
-  - 임베딩: 기본 `nomic-embed-text`
-  - RAGAS 로컬 Judge: 기본 `gemma4:26b`
+  - 데이터 파이프라인과 질의 응답에는 필요 없음
+  - 평가 전용: hybrid 기준선 임베딩(`BASELINE_EMBED_MODEL`, 예: `bge-m3`),
+    context precision 판정 `gemma4:26b`
 - PHP와 Composer
   - `laudis/neo4j-php-client`
   - `vlucas/phpdotenv`
@@ -128,8 +126,8 @@ GEMINI_MODEL = "gemini-flash-lite-latest"
 | `CHUNK_SIZE` | `200` | TEI 태깅 처리 묶음 |
 | `SKIP_HITL_PAUSE` | 미설정 | `1/true/yes/on`이면 사람 검토 일시정지 생략 |
 | `PIPELINE_STAGE` | `all` | `all`, `rdbms`, `neo4j` |
-| `OLLAMA_HOST` | Ollama 기본 주소 | 임베딩·시소러스 Ollama 주소 |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Neo4j 임베딩 모델 |
+| `OLLAMA_HOST` | Ollama 기본 주소 | 평가 스크립트용 Ollama 주소 |
+| `BASELINE_EMBED_MODEL` | `OLLAMA_EMBED_MODEL` 또는 `nomic-embed-text` | 평가용 hybrid 기준선의 dense 모델 |
 | `GEMINI_TEMPERATURE` | `0.1` | PHP Gemini 호출 temperature |
 | `GEMINI_TOP_P` | `0.85` | PHP Gemini 호출 top-p |
 | `RAGAS_PROVIDER` | `ollama` | `ollama` 또는 `gemini` |
@@ -168,10 +166,9 @@ GEMINI_MODEL = "gemini-flash-lite-latest"
 8. [scripts/graph_builder.py](./scripts/graph_builder.py): PostgreSQL 결과를
    Neo4j 노드·관계로 구축합니다.
 9. [thesaurus_to_neo4j.py](./thesaurus_to_neo4j.py): 시소러스를 Neo4j에 적재합니다.
-10. [scripts/vectorize_neo4j.py](./scripts/vectorize_neo4j.py):
-    Neo4j 노드 임베딩을 [vector_store/](./vector_store/)에 생성합니다.
-11. [scripts/apply_vectors_to_neo4j.py](./scripts/apply_vectors_to_neo4j.py):
-    임베딩을 Neo4j 노드의 `embedding` 속성에 기록합니다.
+10. [scripts/romanize_names.py](./scripts/romanize_names.py): 인물 노드에
+    로마자 이름 변형(예: Lee/Yi/Rhee Dong-hwi)을 추가하고 `namesIndex` 전문
+    색인에 포함시킵니다.
 
 사람 검토 없이 실행하려면:
 
@@ -179,12 +176,7 @@ GEMINI_MODEL = "gemini-flash-lite-latest"
 .venv3.14/bin/python run_pipeline.py --skip-hitl
 ```
 
-`--skip-thesaurus-embed` 옵션은 호환성을 위해 유지되어 있습니다. 현재
-오케스트레이터는 시소러스 적재 시 개별 임베딩을 건너뛰고, 뒤의
-`vectorize_neo4j.py` 단계에서 전체 그래프 임베딩을 생성하는 흐름을 사용합니다.
-따라서 임베딩 자체를 만들지 않으려면 `run_pipeline.py` 전체 실행 대신
-`--stage rdbms`만 실행하거나, Neo4j 단계의 임베딩 스크립트를 개별적으로
-실행하십시오.
+파이프라인은 임베딩을 만들지 않습니다. 검색은 Cypher, 전문 색인, 탐색 틀만 사용합니다.
 
 전처리와 그래프 구축을 분리하면 불필요한 재처리를 피할 수 있습니다.
 
@@ -638,7 +630,7 @@ php -l docent.php
 ```
 
 데이터베이스 연결 검증은 실제 `PG_*`/`NEO4J_*` 설정이 필요합니다. 원격 DB를
-대상으로 할 때는 `upload_data.py`, `graph_builder.py`, `apply_vectors_to_neo4j.py`
+대상으로 할 때는 `upload_data.py`, `graph_builder.py`, `romanize_names.py`
 를 먼저 실행하지 말고 읽기 전용 확인 쿼리와 `--dry-run`으로 연결·대상을
 검증하십시오.
 
@@ -650,7 +642,7 @@ php -l docent.php
 | [scripts/](./scripts/) | PostgreSQL·TEI·CIDOC·Neo4j 처리 |
 | [includes/](./includes/) | PHP 설정, DB, 보안, Gemini, prompt, action |
 | [evaluation/](./evaluation/) | 벤치마크·RAGAS·NER/RE 평가 |
-| [vector_store/](./vector_store/) | 외부 임베딩 산출물 |
+| [vector_store/baselines/](./vector_store/) | 평가용 hybrid 기준선의 dense 인덱스 캐시 |
 | [Latex/](./Latex/) | 논문 원고와 빌드 산출물 |
 | [run_pipeline.py](./run_pipeline.py) | 전체 전처리 오케스트레이터 |
 | [docent.php](./docent.php) | PHP 웹/API 진입점 |
@@ -660,7 +652,7 @@ php -l docent.php
 
 - `upload_data.py`는 대상 테이블을 삭제 후 재생성하므로 운영 DB에서 신중히
   실행합니다.
-- `graph_builder.py`와 `apply_vectors_to_neo4j.py`는 Neo4j를 변경합니다.
+- `graph_builder.py`, `thesaurus_to_neo4j.py`, `romanize_names.py`는 Neo4j를 변경합니다.
 - `--wipe` 등 파괴적 옵션이나 DB 초기화 명령은 백업과 대상 확인 후 실행합니다.
 - 원자료, TEI, ground truth, 검색 context는 서로 다른 증거 층위입니다. 모델
   응답에 맞춰 ground truth를 수정하지 말고, 원문·그래프 근거를 먼저 검토합니다.

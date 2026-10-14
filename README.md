@@ -50,12 +50,10 @@ scripts/extract_all_entities.py
                                 │
                                 ▼
                     Neo4j graph
-                       │       │
-          vectorize_neo4j.py    │
-          apply_vectors_to_neo4j.py
-                       │       │
-                       ▼       ▼
-                   vector_store/  PHP Docent / MCP
+                    (thesaurus_to_neo4j.py, romanize_names.py)
+                                │
+                                ▼
+                    PHP Docent / MCP
 ```
 
 ## Requirements
@@ -64,9 +62,10 @@ scripts/extract_all_entities.py
 - PostgreSQL
 - Neo4j 5.x
 - Ollama
-  - `qwen3.6` for TEI person-name assistance
-  - `nomic-embed-text` for embeddings
-  - `gemma4:26b` for the local RAGAS and direct context-precision judges
+  - Not required for the data pipeline or the query path
+  - Evaluation only: an embedding model for the hybrid baseline
+    (`BASELINE_EMBED_MODEL`, e.g. `bge-m3`) and `gemma4:26b` for the
+    context-precision judge
 - PHP and Composer
   - `laudis/neo4j-php-client`
   - `vlucas/phpdotenv`
@@ -131,8 +130,8 @@ Important optional settings:
 | `CHUNK_SIZE` | `200` | TEI tagging batch size |
 | `SKIP_HITL_PAUSE` | unset | Skip the human-review pause when set to `1`, `true`, `yes`, or `on` |
 | `PIPELINE_STAGE` | `all` | Select `all`, `rdbms`, or `neo4j` |
-| `OLLAMA_HOST` | Ollama default | Ollama endpoint for embeddings and thesaurus processing |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Neo4j embedding model |
+| `OLLAMA_HOST` | Ollama default | Ollama endpoint used by the evaluation scripts |
+| `BASELINE_EMBED_MODEL` | `OLLAMA_EMBED_MODEL` or `nomic-embed-text` | Dense model of the hybrid evaluation baseline |
 | `GEMINI_TEMPERATURE` | `0.1` | PHP Gemini temperature |
 | `GEMINI_TOP_P` | `0.85` | PHP Gemini top-p |
 | `RAGAS_PROVIDER` | `ollama` | Select `ollama` or `gemini` |
@@ -170,10 +169,9 @@ Run all stages:
 8. [scripts/graph_builder.py](./scripts/graph_builder.py) builds the Neo4j
    nodes and relationships.
 9. [thesaurus_to_neo4j.py](./thesaurus_to_neo4j.py) loads the thesaurus.
-10. [scripts/vectorize_neo4j.py](./scripts/vectorize_neo4j.py) creates node
-    embeddings in [vector_store/](./vector_store/).
-11. [scripts/apply_vectors_to_neo4j.py](./scripts/apply_vectors_to_neo4j.py)
-    writes embeddings to Neo4j node properties.
+10. [scripts/romanize_names.py](./scripts/romanize_names.py) adds romanized
+    name variants (e.g. Lee/Yi/Rhee Dong-hwi) to Person nodes and to the
+    `namesIndex` full-text index.
 
 Skip the human-review pause:
 
@@ -187,15 +185,12 @@ Run only one pipeline stage:
 # PostgreSQL/TEI/CIDOC preprocessing
 .venv3.14/bin/python run_pipeline.py --stage rdbms --skip-hitl
 
-# Neo4j, thesaurus, and vector processing from existing RDBMS output
+# Neo4j graph, thesaurus, and romanized names from existing RDBMS output
 .venv3.14/bin/python run_pipeline.py --stage neo4j
 ```
 
-The `--skip-thesaurus-embed` option is retained for compatibility. The current
-orchestrator skips per-thesaurus embedding during thesaurus loading and creates
-the complete graph embedding in the later `vectorize_neo4j.py` stage. To avoid
-embedding altogether, run only `--stage rdbms` or invoke the Neo4j stages
-individually.
+The pipeline creates no embeddings: retrieval uses Cypher, the full-text
+index, and traversal templates only.
 
 Re-running `upload_data.py` drops and recreates target tables, so derived
 columns such as `tei` and `tei_status` are removed. After reloading source data,
@@ -647,7 +642,7 @@ php -l docent.php
 Database connectivity checks require valid `PG_*` and `NEO4J_*` settings. When
 working with a remote database, verify the target with read-only queries and
 `--dry-run` before running `upload_data.py`, `graph_builder.py`, or
-`apply_vectors_to_neo4j.py`.
+`romanize_names.py`.
 
 ## Important paths
 
@@ -657,7 +652,7 @@ working with a remote database, verify the target with read-only queries and
 | [scripts/](./scripts/) | PostgreSQL, TEI, CIDOC, and Neo4j processing |
 | [includes/](./includes/) | PHP configuration, database, security, prompts, and actions |
 | [evaluation/](./evaluation/) | Benchmarks, RAGAS, and NER/RE evaluation |
-| [vector_store/](./vector_store/) | Generated embedding artifacts |
+| [vector_store/baselines/](./vector_store/) | Dense index cache of the hybrid evaluation baseline |
 | [Latex/](./Latex/) | Manuscript and LaTeX build artifacts |
 | [run_pipeline.py](./run_pipeline.py) | Full preprocessing orchestrator |
 | [docent.php](./docent.php) | PHP web/API entry point |
@@ -667,7 +662,7 @@ working with a remote database, verify the target with read-only queries and
 
 - `upload_data.py` drops and recreates target tables; use it cautiously in
   operational environments.
-- `graph_builder.py` and `apply_vectors_to_neo4j.py` modify Neo4j.
+- `graph_builder.py`, `thesaurus_to_neo4j.py`, and `romanize_names.py` modify Neo4j.
 - Confirm the target and take a backup before destructive or reset operations.
 - Keep source evidence, TEI, ground truth, and retrieved context conceptually
   separate. Do not modify ground truth to match a model response.

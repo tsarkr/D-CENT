@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import time
 import math
 import re
 import subprocess
@@ -127,13 +128,36 @@ class BM25Index:
 # ─────────────────────────────────────────────────────────────────────────────
 # Dense retrieval (Ollama embeddings, cached on disk)
 # ─────────────────────────────────────────────────────────────────────────────
-def _embed(texts: list[str], kind: str) -> np.ndarray:
-    from scripts.vectorize_neo4j import ollama_embeddings
+def _ollama_embed(texts: list[str], model: str, base_url: str, batch_size: int = 32) -> np.ndarray:
+    """Embed texts with Ollama's /api/embed endpoint and L2-normalize the rows."""
+    import requests
 
+    endpoint = f"{base_url.rstrip('/')}/api/embed"
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        batch = [str(t or "")[:3000] for t in texts[start:start + batch_size]]
+        for attempt in range(5):
+            try:
+                response = requests.post(endpoint, json={"model": model, "input": batch}, timeout=300)
+                response.raise_for_status()
+                embeddings = response.json().get("embeddings")
+                if not isinstance(embeddings, list) or len(embeddings) != len(batch):
+                    raise RuntimeError(f"unexpected embedding count at offset {start}")
+                vectors.extend(embeddings)
+                break
+            except Exception:
+                if attempt == 4:
+                    raise
+                time.sleep(2 * (attempt + 1))
+    matrix = np.asarray(vectors, dtype=np.float32)
+    return matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
+
+
+def _embed(texts: list[str], kind: str) -> np.ndarray:
     model = setting("BASELINE_EMBED_MODEL", setting("OLLAMA_EMBED_MODEL", "nomic-embed-text"))
     if "nomic" in model:  # nomic models are trained with task prefixes
         texts = [f"search_{kind}: {t}" for t in texts]
-    return ollama_embeddings(texts, model, setting("OLLAMA_HOST", "http://localhost:11434"), 32)
+    return _ollama_embed(texts, model, setting("OLLAMA_HOST", "http://localhost:11434"))
 
 
 def _dense_matrix(chunks: list[dict[str, Any]]) -> np.ndarray:
