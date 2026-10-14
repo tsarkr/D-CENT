@@ -71,15 +71,16 @@ if (isset($_GET['ajax'])) {
         $class_name = get_class($e);
         error_log(sprintf('Docent AJAX failure [%s]: [%s] %s in %s:%d', $action, $class_name, $detail_msg, $file_name, $line_no));
         http_response_code(500);
-        echo json_encode([
-            "error" => sprintf('[%s] %s (%s:%d)', $class_name, $detail_msg, $file_name, $line_no),
-            "details" => [
+        $error_response = ["error" => "요청을 처리하는 중 서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."];
+        if (get_cfg('APP_DEBUG', '0') === '1') {
+            $error_response["details"] = [
                 "class" => $class_name,
                 "message" => $detail_msg,
                 "file" => $file_name,
                 "line" => $line_no
-            ]
-        ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            ];
+        }
+        echo json_encode($error_response, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
     }
     exit;
 }

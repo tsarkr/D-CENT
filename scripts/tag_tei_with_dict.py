@@ -2,14 +2,11 @@ import argparse
 import psycopg2
 from pathlib import Path
 import re
-import json
 import sys  
 import signal  
 import os
 import hanja  
 from xml.etree import ElementTree as ET
-from langchain_ollama import OllamaLLM
-from langchain_core.prompts import ChatPromptTemplate
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
@@ -66,9 +63,6 @@ class LocalDocentEngine:
         
         signal.signal(signal.SIGINT, self._handle_signal)
         
-        print("📦 Ollama 초고속 인명 추출 엔진 연결 중 (qwen3.6)...")
-        self.llm = OllamaLLM(model="qwen3.6", format="json", temperature=0.0, reasoning=False)
-        print("✅ 엔진 연결 완료.")
 
     def _handle_signal(self, signum, frame):
         print("\n\n🛑 [인터럽트] 주인님, Ctrl+C 입력을 감지했습니다. 현재 건까지만 안전하게 커밋하고 정지합니다...")
@@ -318,26 +312,7 @@ class LocalDocentEngine:
                 if self._is_valid_person_name(candidate): extracted.append(candidate)
         return list(dict.fromkeys(extracted))
 
-    def _parse_llm_response_names(self, response_text):
-        if hasattr(response_text, 'content'): response_text = response_text.content
-        response_text = str(response_text).strip()
-        if not response_text: return []
-        try: data = json.loads(response_text)
-        except Exception:
-            match = re.search(r'\{.*\}', response_text, re.S)
-            if not match: return []
-            try: data = json.loads(match.group(0))
-            except Exception: return []
-        names = data.get('names', [])
-        if not isinstance(names, list): return []
-        refined = []
-        for name in names:
-            candidate = self._normalize_person_candidate(name)
-            if self._is_valid_person_name(candidate): refined.append(candidate)
-        return list(dict.fromkeys(refined))
-
-    def _extract_names_with_llm_context(self, table_name, raw_text):
-        clean_context = re.sub(r'<[^>]+>', ' ', raw_text)
+    def _extract_person_names(self, table_name, raw_text):
         if table_name == 'raw_bibliography':
             names = self._extract_names_from_persname_tags(raw_text, skip_data_cols={'제목', '상위자료_제목'})
             names.extend(self._extract_names_from_top_title_field(raw_text))
@@ -354,22 +329,9 @@ class LocalDocentEngine:
             names = list(dict.fromkeys(names))
             if names: return names
             return self._extract_names_from_structured_fields(raw_text, EVENT_PERSON_FIELDS)
-        prompt = ChatPromptTemplate.from_template("""
-            You are a strict historical data extraction expert. 
-            Analyze the provided Korean historical context and extract ALL actual individual "personal names" (인명, names of people).
-            [CRITICAL CENSORSHIP RULES]
-            - Extract ONLY real human names (e.g., "이계창", "박희도", "백시찬").
-            - Do NOT extract geographical places, regions, or single towns (e.g., "장호원", "황해", "온양", "장연", "청단", "비안").
-            - Do NOT extract modern generic titles, actions, or temporary nouns (e.g., "임명", "상고", "석달", "정신녀", "정명녀").
-            Return ONLY a valid JSON object with a single key "names" containing the array of extracted personal names. No explanation, no markdown blocks.
-            Text context:
-            {context}
-        """)
-        chain = prompt | self.llm
-        try:
-            response_text = chain.invoke({"context": clean_context})
-            return self._parse_llm_response_names(response_text)
-        except Exception: return []
+        # Other tables (administrative regions, repression organizations) carry no
+        # person fields; names are taken only from structured metadata.
+        return []
 
     def _apply_persname_tags(self, pre_tagged_tei, real_names, event_id):
         for name in real_names:
@@ -382,14 +344,14 @@ class LocalDocentEngine:
         return pre_tagged_tei
 
     def run_full_pipeline(self, limit=0, skip_hitl=False):
-        print("🚀 [최종 진화 완결] LLM 문맥 추출 + 파이썬 포함문자열 기계 차단 파이프라인 가동...")
+        print("🚀 TEI 한자 ruby 태깅 + 메타데이터 기반 인명 태깅 시작...")
         self.cur.execute("""
             SELECT table_name FROM information_schema.columns 
             WHERE column_name = 'tei' AND table_schema = 'public'
         """)
         tables = [row[0] for row in self.cur.fetchall()]
         # This table contains only event/place links. It cannot produce people,
-        # so sending its TEI through the LLM fallback only adds latency.
+        # so it is skipped entirely.
         skipped_tables = {'raw_detail_place', 'raw_event_place_link'}
         no_person_tables = {
             'raw_admin_region',
@@ -421,7 +383,7 @@ class LocalDocentEngine:
                     pre_tagged = self._clean_and_pre_tag_hanja(tei)
                     real_names = (
                         [] if table in no_person_tables
-                        else self._extract_names_with_llm_context(table, pre_tagged)
+                        else self._extract_person_names(table, pre_tagged)
                     )
                     final_tei = self._apply_persname_tags(pre_tagged, real_names, event_ref)
                     self.cur.execute(f'UPDATE "{table}" SET tei = %s, tei_status = %s WHERE rowid = %s', (final_tei, self.done_status, rowid))

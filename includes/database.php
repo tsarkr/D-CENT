@@ -84,7 +84,7 @@ function get_pg_tables_metadata($pdo) {
             $tables_raw[$key]['first_col'] = $col_name;
         }
         if (in_array($data_type, ['character varying', 'text', 'character'], true)) {
-            if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $col_name)) {
+            if (preg_match('/^[\p{L}_][\p{L}\p{N}_]*$/u', $col_name)) {
                 $tables_raw[$key]['text_cols'][] = $col_name;
             }
         }
@@ -93,7 +93,7 @@ function get_pg_tables_metadata($pdo) {
     $meta = [];
     foreach ($tables_raw as $entry) {
         $id_col = $entry['first_col'] ?? 'rowid';
-        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $id_col)) $id_col = 'rowid';
+        if (!preg_match('/^[\p{L}_][\p{L}\p{N}_]*$/u', $id_col)) $id_col = 'rowid';
         $text_cols = $entry['text_cols'];
         foreach (['명칭', '사건명', '제목'] as $p) {
             if (($idx = array_search($p, $text_cols)) !== false) {

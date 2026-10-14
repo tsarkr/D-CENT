@@ -508,6 +508,15 @@ function generate_text_to_cypher(string $query): string {
         $cypher = preg_replace('/^```(?:cypher)?\s*|\s*```$/i', '', trim($raw));
         $cypher = trim($cypher);
 
+        // 단일 끝 세미콜론만 허용하고, 다중 쿼리·주석·비허용 프로시저는 거부합니다.
+        $cypher = preg_replace('/;\s*$/', '', $cypher);
+        if (strpos($cypher, ';') !== false
+            || preg_match('/\/\/|\/\*/', $cypher)
+            || preg_match('/\bCALL\s+(?!db\.index\.fulltext\.queryNodes\b)/i', $cypher)) {
+            error_log('Text-to-Cypher rejected multiple statements, comments, or unsafe procedure: ' . substr($cypher, 0, 100));
+            return '';
+        }
+
         // 비한정 가변 홉([*]) 그래프 탐색 과부하 방지 (최대 3-hop 안전 한정)
         $cypher = preg_replace('/-\[\*\]-/i', '-[*1..3]-', $cypher);
 
@@ -771,7 +780,9 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
                 "doc" => "[가족 관계 및 공동 항일] {$person_name} - {$f_name}",
                 "quote" => "{$person_name}의 가족인 {$f_name}은(는) 일제의 탄압에 맞서 함께 독립운동에 참여함.",
                 "concept" => (string)$person_name,
-                "text" => "3.1운동 지식그래프 가족 온톨로지 연계:\n인물: {$person_name}\n가족: {$f_name} (부친/혈연)\n사건: {$event_name}\n일제 탄압 과정에서 부친 유중권은 현장에서 순국하였으며 모친 이소제 역시 일제 헌병의 총검에 함께 순국함."
+                "text" => (in_array($person_name, ['유관순', '유중권', '이소제'], true) || in_array($f_name, ['유관순', '유중권', '이소제'], true))
+                    ? "3.1운동 지식그래프 가족 온톨로지 연계:\n인물: {$person_name}\n가족: {$f_name} (부친/혈연)\n사건: {$event_name}\n일제 탄압 과정에서 부친 유중권은 현장에서 순국하였으며 모친 이소제 역시 일제 헌병의 총검에 함께 순국함."
+                    : "3.1운동 지식그래프 가족 온톨로지 연계:\n인물: {$person_name}\n가족/혈연: {$f_name}\n관련 사건: " . ($event_name ?: '3·1운동')
             ], 65);
         }
 
@@ -1433,7 +1444,7 @@ function handle_action_node_detail() {
             }
         } catch (\Throwable $sql_err) {
             error_log("node_detail query error: " . $sql_err->getMessage());
-            $response_data["db_error"] = $sql_err->getMessage();
+            $response_data["db_error"] = "데이터베이스 조회 중 오류가 발생했습니다.";
         }
     }
 

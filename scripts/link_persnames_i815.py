@@ -277,7 +277,10 @@ def wrap_name_in_tei(tei_text: str, name: str, url: str) -> str:
     result = []
     in_persname = 0
     in_ruby = 0
-    pattern = re.compile(rf'\b{re.escape(name)}\b')
+    pattern = re.compile(
+        rf'(?<![가-힣]){re.escape(name)}'
+        rf'(?=(?:은|는|이|가|을|를|의|과|와|도|에|로|으로|에게|께서|으로부터|로부터)?(?:[^가-힣]|$))'
+    )
 
     for token in tokens:
         if token.startswith('<') and token.endswith('>'):

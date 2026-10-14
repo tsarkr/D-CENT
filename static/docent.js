@@ -578,10 +578,14 @@
     }
 
     function renderMarkdown(md) {
+        const safeMarkdown = String(md == null ? '' : md)
+            .replace(/<\s*(script|iframe|object|embed)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+            .replace(/<\s*\/?\s*(script|iframe|object|embed)\b[^>]*>/gi, '')
+            .replace(/\bon(?:error|load)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
         if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-            try { return marked.parse(md); } catch (_) {}
+            try { return marked.parse(safeMarkdown); } catch (_) {}
         }
-        return escapeHtml(md).replace(/\n/g, '<br>');
+        return escapeHtml(safeMarkdown).replace(/\n/g, '<br>');
     }
 
     function setQuery(t) {
@@ -729,37 +733,62 @@
             addStep('🌐', `[다국어 감지] 질의 언어 감지: ${detectedName} → 한국어 지식그래프 교차 탐색`, 'done');
             updateExplainLangBadge(detectedLang);
 
-            /* 1. Graph (Neo4j 지식그래프 질의를 지연 없이 즉시 발송!) */
+            /* 1. Graph: 외국어는 analyze의 한국어 변환을 먼저 반영 */
             const s2 = addStep('🔍',`지식그래프에서 "${kws.join(', ')}" 탐색 중...`);
             if ($reasoningTitle) $reasoningTitle.textContent='지식그래프 사료 탐색 중...';
             logSystem(`의도: ${intentResult.intent}, KW: ${kws.join(', ')}, 감지언어: ${detectedLang}`);
 
-            // 백엔드 AI Analyze는 병렬(Background)로 실행하여 Neo4j 질의를 블로킹하지 않음
-            const analyzePromise = api('analyze',{term, search_strategy: intentResult.intent}).catch(err => {
-                logSystem(`⚠️ analyze 비동기 알림: ${err.message}`);
-                return null;
-            });
-
-            // Neo4j 직접 질의를 즉시 실행
-            const gd = await api('graph',{
-                term, 
-                keywords: JSON.stringify(kws),
-                intent_ko: term,
-                search_strategy: intentResult.intent
-            });
+            let gd;
+            let analysis;
+            if (detectedLang === 'ko') {
+                const analyzePromise = api('analyze',{term, search_strategy: intentResult.intent}).catch(err => {
+                    logSystem(`⚠️ analyze 비동기 알림: ${err.message}`);
+                    return null;
+                });
+                gd = await api('graph',{
+                    term,
+                    keywords: JSON.stringify(kws),
+                    intent_ko: term,
+                    search_strategy: intentResult.intent
+                });
+                analysis = (await analyzePromise) || {
+                    intent_type: intentResult.intent,
+                    search_keywords: kws,
+                    analyzed_intent_ko: term,
+                    response_language: detectedLang,
+                    intent: intentResult.intent,
+                    keywords: kws,
+                    focus: '종합',
+                    explanation: term
+                };
+            } else {
+                const analyzed = await api('analyze',{term, search_strategy: intentResult.intent}).catch(err => {
+                    logSystem(`⚠️ analyze 실패: ${err.message}`);
+                    return null;
+                });
+                analysis = analyzed || {
+                    intent_type: intentResult.intent,
+                    search_keywords: kws,
+                    analyzed_intent_ko: term,
+                    response_language: detectedLang,
+                    intent: intentResult.intent,
+                    keywords: kws,
+                    focus: '종합',
+                    explanation: term
+                };
+                const analyzedKeywords = Array.isArray(analysis.search_keywords) && analysis.search_keywords.length > 0
+                    ? analysis.search_keywords
+                    : (Array.isArray(analysis.keywords) && analysis.keywords.length > 0 ? analysis.keywords : kws);
+                const analyzedIntentKo = analysis.analyzed_intent_ko || analysis.intent_ko || term;
+                gd = await api('graph',{
+                    term,
+                    keywords: JSON.stringify(analyzedKeywords),
+                    intent_ko: analyzedIntentKo,
+                    search_strategy: analysis.intent_type || analysis.intent || intentResult.intent
+                });
+            }
             lastEvidences=gd.evidences||[]; currentNodes=gd.nodes||[]; currentEdges=gd.edges||[];
 
-            // analyze 응답이 있으면 병합, 없으면 router 결과 활용
-            const analysis = (await analyzePromise) || {
-                intent_type: intentResult.intent,
-                search_keywords: kws,
-                analyzed_intent_ko: term,
-                response_language: detectedLang,
-                intent: intentResult.intent,
-                keywords: kws,
-                focus: '종합',
-                explanation: term
-            };
             analysisResult = analysis;
             analysisResult._clientIntent = intentResult;
 

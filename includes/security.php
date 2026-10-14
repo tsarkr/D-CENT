@@ -98,7 +98,7 @@ function docent_sanitize_json_list($value, $max_items = 50, $max_len = 500) {
 }
 
 function docent_valid_identifier($value, $default = '') {
-    $sanitized = preg_replace('/[^A-Za-z0-9_]/', '', (string)($value ?? $default));
+    $sanitized = preg_replace('/[^\p{L}\p{N}_]/u', '', (string)($value ?? $default));
     return $sanitized !== '' ? $sanitized : $default;
 }
 
