@@ -243,7 +243,9 @@ function graphrag_run_multihop(object $client, string $entity_name): array {
         CALL db.index.fulltext.queryNodes('namesIndex', \$lucene_name) YIELD node AS anchor, score
         ORDER BY score DESC
         LIMIT 1
-        MATCH (anchor)-[*1..3]-(p:Person)-[:P14_carried_out_by]-(e:Event)
+        MATCH (anchor)-[*1..2]-(p:Person)
+        WITH DISTINCT anchor, p LIMIT 50
+        MATCH (p)-[:P14_carried_out_by]-(e:Event)
         RETURN
             COALESCE(p.명칭, p.name, '(인물 미상)')               AS 연관인물,
             COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
@@ -395,32 +397,32 @@ function graphrag_serialize_results(array $multihop_rows, string $entity_name, s
  *   'entities'      => array   감지된 개체명 목록,
  * ]
  */
-function graphrag_build_hybrid_context(string $query, string $vector_context, string $lang): array {
-    // Step 1: NER 라우팅
+/**
+ * 질문에서 인물·장소를 감지하고 탐색 틀로 날짜 순 경로 행을 모읍니다(언어 무관).
+ * graph 단계에서 미리 계산해 클라이언트에 넘기고, explain 단계는 그 결과를 재사용합니다.
+ *
+ * @return array ['rows' => array, 'entities' => string[]]
+ */
+function graphrag_collect_rows(string $query): array {
     $ner = graphrag_detect_entities($query);
     if (!$ner['route_graph'] || empty($ner['entities'])) {
-        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => []];
+        return ['rows' => [], 'entities' => []];
     }
-
-    // Neo4j 클라이언트
-    $client = null;
     try {
         $client = get_neo4j();
     } catch (\Throwable $dbErr) {
         error_log('GraphRAG: Neo4j connection failed — ' . $dbErr->getMessage());
-        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $ner['entities']];
+        return ['rows' => [], 'entities' => $ner['entities']];
     }
 
-    // Step 2: 개체별 Multi-hop 탐색 (최대 3개 개체 탐색, 결과 합산)
-    $all_rows  = [];
-    $max_ents  = 3;
-    foreach (array_slice($ner['entities'], 0, $max_ents) as $entity) {
-        $rows = graphrag_run_multihop($client, $entity);
-        $all_rows = array_merge($all_rows, $rows);
-        if (count($all_rows) >= 25) break;
+    // 개체별 탐색 (최대 3개 개체, 결과 25행 또는 15초에서 중단)
+    $all_rows = [];
+    $t0 = microtime(true);
+    foreach (array_slice($ner['entities'], 0, 3) as $entity) {
+        $all_rows = array_merge($all_rows, graphrag_run_multihop($client, $entity));
+        if (count($all_rows) >= 25 || microtime(true) - $t0 > 15.0) break;
     }
 
-    // 중복 제거 (개체 다중 탐색으로 발생 가능)
     $dedup = [];
     $unique_rows = [];
     foreach ($all_rows as $r) {
@@ -430,8 +432,7 @@ function graphrag_build_hybrid_context(string $query, string $vector_context, st
             $unique_rows[] = $r;
         }
     }
-
-    // 최종 반환 시 전체 결과를 발생일자 오름차순(ORDER BY)으로 정렬하여 AI API에 주입
+    // 발생일자 오름차순 (날짜 없는 행은 뒤로)
     usort($unique_rows, function($a, $b) {
         $da = trim((string)($a['발생일자'] ?? ''));
         $db = trim((string)($b['발생일자'] ?? ''));
@@ -440,24 +441,41 @@ function graphrag_build_hybrid_context(string $query, string $vector_context, st
         if ($db === '') return -1;
         return strcmp($da, $db);
     });
+    return ['rows' => array_slice($unique_rows, 0, 25), 'entities' => $ner['entities']];
+}
 
-    // Step 3: 직렬화
-    // 기준 개체명은 첫 번째 감지 개체를 사용
-    $primary_entity = $ner['entities'][0];
-    $graphrag_block = graphrag_serialize_results($unique_rows, $primary_entity, $lang);
+/**
+ * [Action] 서사 경로만 따로 계산합니다. 클라이언트가 graph와 동시에 호출하고,
+ * explain 요청에 결과를 넘겨 해설 단계의 그래프 재조회를 없앱니다.
+ */
+function handle_action_narrative() {
+    $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
+    $t0 = microtime(true);
+    $collected = $term !== '' ? graphrag_collect_rows($term) : ['rows' => [], 'entities' => []];
+    error_log(sprintf('[Docent][timing] narrative action %.2fs (%d rows)', microtime(true) - $t0, count($collected['rows'])));
+    echo json_encode($collected, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+}
 
-    // Step 4: 컨텍스트 주입 (GraphRAG 블록을 Vector 컨텍스트 앞에 강제 삽입)
-    if ($graphrag_block === '') {
-        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $ner['entities']];
+/**
+ * 서사 경로 블록을 생성 컨텍스트 맨 앞에 넣습니다.
+ * $precomputed가 있으면(graph 단계 결과) 그래프를 다시 조회하지 않습니다.
+ */
+function graphrag_build_hybrid_context(string $query, string $vector_context, string $lang, ?array $precomputed = null): array {
+    $collected = $precomputed ?? graphrag_collect_rows($query);
+    $rows = $collected['rows'] ?? [];
+    $entities = $collected['entities'] ?? [];
+    if (empty($rows) || empty($entities)) {
+        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $entities];
     }
-
-    $sep     = ($vector_context !== '') ? "\n\n" : '';
-    $hybrid  = $graphrag_block . $sep . $vector_context;
-
+    $graphrag_block = graphrag_serialize_results($rows, (string)$entities[0], $lang);
+    if ($graphrag_block === '') {
+        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $entities];
+    }
+    $sep = ($vector_context !== '') ? "\n\n" : '';
     return [
-        'context'       => $hybrid,
+        'context'       => $graphrag_block . $sep . $vector_context,
         'graphrag_used' => true,
-        'entities'      => $ner['entities'],
+        'entities'      => $entities,
     ];
 }
 
@@ -1022,22 +1040,31 @@ function handle_action_graph() {
     }
 
     if (!empty($found_ids)) {
+        // 이웃 관계와 공동 참여자를 UNION으로 따로 가져옵니다. 두 서브쿼리를 한 행에
+        // 묶으면 (관계 × 공동참여자) 곱이 생겨 전체 LIMIT에서 가족 관계가 잘려 나갔습니다.
+        // 가족·지인 관계는 노드별 이웃 30개 안에 우선 포함합니다.
         $graph_query = "
             MATCH (n)
             WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title','uid'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN \$search_ids)
             CALL (n) {
                 OPTIONAL MATCH (n)-[r]-(m)
+                WITH r, m ORDER BY CASE WHEN type(r) IN ['P152_has_parent', 'foaf:knows'] THEN 0 ELSE 1 END
                 RETURN r, m, labels(m) as m_labels, r.context as rel_context
                 LIMIT 30
             }
+            RETURN n, labels(n) as n_labels, r, m, m_labels, rel_context, null as e, null as p, [] as e_labels, [] as p_labels
+            LIMIT 400
+            UNION ALL
+            MATCH (n:인물)
+            WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title','uid'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN \$search_ids)
             CALL (n) {
-                OPTIONAL MATCH (n)-[:P14_carried_out_by]-(e:사건)-[:P14_carried_out_by]-(p:인물)
-                WHERE n:인물 AND n <> p
+                MATCH (n)-[:P14_carried_out_by]-(e:사건)-[:P14_carried_out_by]-(p:인물)
+                WHERE n <> p
                 RETURN e, p, labels(e) as e_labels, labels(p) as p_labels
                 LIMIT 20
             }
-            RETURN DISTINCT n, labels(n) as n_labels, r, m, m_labels, rel_context, e, p, e_labels, p_labels
-            LIMIT 60
+            RETURN n, labels(n) as n_labels, null as r, null as m, [] as m_labels, null as rel_context, e, p, e_labels, p_labels
+            LIMIT 200
         ";
 
         $fallback_graph_query = "
@@ -1065,7 +1092,13 @@ function handle_action_graph() {
 
             if ($r && $n_nid && $m_nid) {
                 $rel_type = method_exists($r, 'getType') ? $r->getType() : '연결';
-                $edges[] = ["from" => $n_nid, "to" => $m_nid, "type" => $rel_type, "label" => _get_rel_label($rel_type)];
+                $rel_label = _get_rel_label($rel_type);
+                // Activity 노드는 '기록 안의 인물 언급'이므로, 그 P14는 참여가 아니라 언급으로 표시합니다.
+                $endpoint_labels = array_merge($nodes[$n_nid]['labels'] ?? [], $nodes[$m_nid]['labels'] ?? []);
+                if ($rel_type === 'P14_carried_out_by' && (in_array('Activity', $endpoint_labels, true) || in_array('활동', $endpoint_labels, true))) {
+                    $rel_label = docent_t('언급된 인물', 'Mentioned person');
+                }
+                $edges[] = ["from" => $n_nid, "to" => $m_nid, "type" => $rel_type, "label" => $rel_label];
 
                 $rel_context_text = trim(mb_substr((string)($rel_context ?? ''), 0, 1000));
                 $n_raw_id = $nodes[$n_nid]['raw_id'] ?? $n_nid;
@@ -1084,7 +1117,7 @@ function handle_action_graph() {
                         $rel_type,
                         $rel_context_text
                     ], [
-                        "doc" => "[관계] {$n_raw_id} - " . _get_rel_label($rel_type) . " - {$m_raw_id}",
+                        "doc" => "[관계] {$n_raw_id} - " . $rel_label . " - {$m_raw_id}",
                         "quote" => mb_substr($rel_context_text, 0, 500),
                         "concept" => (string)$n_raw_id,
                         "text" => $rel_context_text
@@ -1229,7 +1262,26 @@ function handle_action_explain() {
 
     // ── [GraphRAG Step 4] NER 감지 → Multi-hop 탐색 → 하이브리드 컨텍스트 주입 ──
     // Vector 희석 방지: DB 확인 사실을 컨텍스트 최상단에 강제 삽입
-    $graphrag_result = graphrag_build_hybrid_context($term, $context_str, $explain_lang);
+    $t_stage = microtime(true);
+    $precomputed = null;
+    $narrative_in = json_decode($_POST['narrative'] ?? '', true);
+    if (is_array($narrative_in) && isset($narrative_in['rows'], $narrative_in['entities'])
+        && is_array($narrative_in['rows']) && is_array($narrative_in['entities'])) {
+        $clean_rows = [];
+        foreach (array_slice($narrative_in['rows'], 0, 25) as $row) {
+            if (!is_array($row)) continue;
+            $clean = [];
+            foreach (['연관인물', '사건이름', '발생일자', '공통사건', '기준인물'] as $k) {
+                $clean[$k] = docent_sanitize_text((string)($row[$k] ?? ''), 200, false);
+            }
+            $clean_rows[] = $clean;
+        }
+        $clean_entities = array_values(array_filter(array_map(
+            fn($e) => docent_sanitize_text((string)$e, 60, false), array_slice($narrative_in['entities'], 0, 5))));
+        $precomputed = ['rows' => $clean_rows, 'entities' => $clean_entities];
+    }
+    $graphrag_result = graphrag_build_hybrid_context($term, $context_str, $explain_lang, $precomputed);
+    error_log(sprintf('[Docent][timing] narrative paths %.2fs', microtime(true) - $t_stage));
     $context_str     = $graphrag_result['context'];
     $graphrag_used   = $graphrag_result['graphrag_used'];
 
@@ -1267,11 +1319,13 @@ function handle_action_explain() {
         flush();
     }
     $fact_prompts = get_fact_extraction_prompts($explain_lang, $context_str);
+    $t_stage = microtime(true);
     try {
         $fact_table = call_gemini([
             ["role" => "system", "content" => $fact_prompts['system']],
             ["role" => "user", "content" => $fact_prompts['user']]
         ], false, 1500, 0.0, 0.8, 50);
+        error_log(sprintf('[Docent][timing] stage 1 fact table %.2fs', microtime(true) - $t_stage));
     } catch (\Throwable $extErr) {
         error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
         $fact_table = '';
@@ -1402,6 +1456,32 @@ function handle_action_node_detail() {
                     $stmt->execute($params);
                     if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                         $fill_from_row($tbl, $row);
+                    }
+                }
+
+                // 인물 노드: 서지·출처·사건 레코드의 TEI(persName 포함)에서 이름을 찾습니다 (trigram 색인).
+                if (!$response_data["found"]) {
+                    $name_cands = [];
+                    foreach ($candidates as $cand) {
+                        // "尹余玉 (윤여옥)" 형태의 라벨은 한자와 독음으로 나눠 둘 다 찾습니다.
+                        if (preg_match('/^(.+?)\s*\((.+)\)$/u', $cand, $pm)) {
+                            $name_cands[] = trim($pm[1]);
+                            $name_cands[] = trim($pm[2]);
+                        } else {
+                            $name_cands[] = trim($cand);
+                        }
+                    }
+                    $name_cands = array_values(array_unique(array_filter($name_cands, fn($v) => mb_strlen($v) >= 2 && mb_strlen($v) <= 30)));
+                    foreach (['raw_bibliography', 'raw_source_info', 'raw_event_info'] as $tbl) {
+                        if ($response_data["found"]) break;
+                        foreach ($name_cands as $cand) {
+                            $stmt = $pdo->prepare("SELECT * FROM \"{$tbl}\" WHERE tei LIKE ? LIMIT 1");
+                            $stmt->execute(['%' . $cand . '%']);
+                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                $fill_from_row($tbl, $row);
+                                break;
+                            }
+                        }
                     }
                 }
 

@@ -129,46 +129,52 @@ function resolve_pg_row_node_id($row, $id_col, $search_cols, $names) {
     return $names[0] ?? '';
 }
 
+// Record tables searched for evidence. Gazetteer and reference tables (administrative
+// regions, repression organizations, event-place links) are reached through the graph
+// and are not searched by name here.
+const DOCENT_RECORD_TABLES = ['raw_bibliography', 'raw_source_info', 'raw_event_info', 'raw_detail_place'];
+
 function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
     $names = array_values(array_filter(array_unique(array_map(fn($n) => trim((string)$n), (array)$names))));
     if (empty($names)) return [];
+    // Substring search only for names of three or more characters: a trigram index
+    // cannot serve a two-character pattern. Shorter names still match by id.
+    $long_names = array_values(array_filter($names, fn($n) => mb_strlen($n) >= 3));
 
     $out = [];
     foreach ($tables_meta as $m) {
         $schema = docent_valid_identifier($m['schema'] ?? '', 'public');
         $table = docent_valid_identifier($m['table'] ?? '', '');
         $id_col = docent_valid_identifier($m['id_col'] ?? '', 'id');
-        if ($table === '') continue;
+        if ($table === '' || !in_array($table, DOCENT_RECORD_TABLES, true)) continue;
 
         $fq = ($schema !== '' && $schema !== 'public') ? "\"{$schema}\".\"{$table}\"" : "\"{$table}\"";
+        // The TEI of a row contains the text of every column, so tei alone covers the
+        // text columns. The id match and the tei search are separate branches of a
+        // UNION ALL: in one WHERE clause the cast on the id column made the planner
+        // scan the whole table instead of using the trigram index on tei.
         $search_cols = [$id_col, 'tei'];
-        foreach ((array)($m['text_cols'] ?? []) as $c) {
-            $safe_col = docent_valid_identifier($c, '');
-            if ($safe_col !== '' && !in_array($safe_col, $search_cols, true)) $search_cols[] = $safe_col;
-        }
-
         $params = [];
-        $in_placeholders = implode(',', array_fill(0, count($names), '?'));
-        $id_match = "\"{$id_col}\"::text IN ({$in_placeholders})";
+        $id_placeholders = implode(',', array_fill(0, count($names), '?'));
+        $branches = ["(SELECT * FROM {$fq} WHERE \"{$id_col}\"::text IN ({$id_placeholders}) LIMIT 25)"];
         foreach ($names as $name) $params[] = $name;
-
-        $like_patterns = array_map(fn($n) => "%{$n}%", $names);
-        $like_placeholders = implode(',', array_fill(0, count($like_patterns), '?'));
-
-        $text_clauses = [];
-        foreach ($search_cols as $c) {
-            if ($c === $id_col) continue;
-            $text_clauses[] = "\"{$c}\"::text ILIKE ANY(ARRAY[{$like_placeholders}])";
-            foreach ($like_patterns as $lp) $params[] = $lp;
+        if (!empty($long_names)) {
+            $likes = implode(' OR ', array_fill(0, count($long_names), 'tei ILIKE ?'));
+            $branches[] = "(SELECT * FROM {$fq} WHERE {$likes} LIMIT 25)";
+            foreach ($long_names as $name) $params[] = "%{$name}%";
         }
-        $text_where = empty($text_clauses) ? '' : " OR (" . implode(" OR ", $text_clauses) . ")";
-        $q = "SELECT * FROM {$fq} WHERE ({$id_match}{$text_where}) LIMIT 25";
+        $q = implode(' UNION ALL ', $branches);
 
         try {
             $stmt = $pdo->prepare($q);
             $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $seen = [];
             foreach ($rows as $row) {
+                $rid = (string)($row['rowid'] ?? $row[$id_col] ?? '');
+                if ($rid !== '' && isset($seen[$rid])) continue;
+                $seen[$rid] = true;
+                if (count($seen) > 25) break;
                 $snippets = [];
                 foreach ($row as $k => $v) if ($k !== $id_col && $k !== 'tei') $snippets[$k] = $v !== null ? strval($v) : '';
                 $out[] = [
@@ -179,7 +185,7 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
                     'node_id' => resolve_pg_row_node_id($row, $id_col, $search_cols, $names)
                 ];
             }
-        } catch (Exception $e) { continue; }
+        } catch (Exception $e) { error_log('pg record search failed for ' . $table . ': ' . $e->getMessage()); continue; }
     }
     return $out;
 }

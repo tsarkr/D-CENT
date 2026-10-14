@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Add romanized name variants to Person nodes for the full-text index.
+"""Add name readings to graph nodes: romanized variants and Hangul readings.
+
+1. Hangul readings for Place and Organization nodes whose name is written in
+   Hanja and that carry no reading yet (e.g. 寬勳洞 -> 관훈동), so that the graph
+   view can label them "寬勳洞 (관훈동)" as it does for persons. Readings use the
+   same conversion as the TEI ruby annotation (scripts.hanja_utils).
+2. Romanized variants of person names for the full-text index (below).
+3. Labels of Activity nodes that state what they are: the mention of a person
+   in one record, in order of mention ("유관순 — 출처정보 #14880 언급 (8번째)").
+   They do not represent an attested action, date, or place.
 
 Questions in English often spell Korean names in different systems
 (Lee/Yi/Rhee Dong-hwi, Yu Gwan-sun/Ryu Kwan-sun). Query analysis converts
@@ -67,6 +76,18 @@ SURNAME_VARIANTS = {
 }
 
 _MR_INITIAL = {"g": "k", "d": "t", "b": "p", "j": "ch"}
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def hanja_reading(name: str) -> str | None:
+    """Hangul reading of a Hanja name, or None if it has no Hanja or cannot be read fully."""
+    name = (name or "").strip()
+    if not name or not _HAN.search(name):
+        return None
+    from scripts.hanja_utils import translate_hanja_name
+
+    reading = translate_hanja_name(name).strip()
+    return reading if reading and not _HAN.search(reading) else None
 
 
 def _syllables(text: str) -> list[tuple[str, str, str]] | None:
@@ -115,6 +136,29 @@ def romanize_name(name: str) -> list[str]:
     return variants
 
 
+MENTION_LABEL_QUERY = """
+MATCH (a:Activity)
+OPTIONAL MATCH (a)-[:P14_carried_out_by]->(p:Person)
+WITH a, head(collect(coalesce(p.한글명칭, p.명칭))) AS actor,
+     toInteger(last(split(a.uid, '_'))) + 1 AS ord,
+     CASE a.source_table
+       WHEN 'raw_source_info' THEN '출처정보'
+       WHEN 'raw_bibliography' THEN '서지'
+       WHEN 'raw_event_info' THEN '사건정보'
+       ELSE coalesce(a.source_table, '기록') END AS src
+WITH a, coalesce(actor, '인물') + ' — ' + src + ' #' + toString(a.source_rowid)
+        + ' 언급 (' + toString(coalesce(ord, 1)) + '번째)' AS label
+SET a.명칭 = label, a.name = label, a.유형 = '기록 내 인물 언급',
+    a.설명 = '해당 기록에서 이 인물이 언급되었다는 사실과 언급 순서만 나타냅니다. 구체적인 행위·일시·장소는 기록 원문을 확인해야 합니다.'
+RETURN count(a) AS n
+"""
+
+
+def relabel_mentions(session) -> int:
+    """Give Activity nodes labels that say they are mentions of a person in a record."""
+    return session.run(MENTION_LABEL_QUERY).single()["n"]
+
+
 def ensure_index_property(session, index_name: str = "namesIndex", prop: str = "romanized") -> bool:
     """Recreate the full-text index with ``prop`` added if it does not already cover it."""
     rows = list(session.run(
@@ -145,12 +189,32 @@ def main() -> int:
     with driver.session() as session:
         rows = session.run(
             "MATCH (p:Person) RETURN elementId(p) AS id, coalesce(p.한글명칭, p.명칭, p.name) AS name").data()
+        place_rows = session.run(
+            "MATCH (n) WHERE (n:Place OR n:Organization) AND coalesce(n.한글독음, '') = '' "
+            "RETURN elementId(n) AS id, coalesce(n.명칭, n.name) AS name, n.한글명칭 AS h_name").data()
+        readings = []
+        for r in place_rows:
+            reading = hanja_reading(r["name"])
+            if reading:
+                fix_h = not r["h_name"] or _HAN.search(r["h_name"] or "")
+                readings.append({"id": r["id"], "reading": reading, "fix_h": bool(fix_h)})
+        print(f"Place/Organization nodes without a reading: {len(place_rows)}, readings added: {len(readings)}")
+        for row in readings[:5]:
+            print("  ", row["reading"])
+
         updates = [{"id": r["id"], "romanized": v} for r in rows if (v := romanize_name(r["name"]))]
         print(f"Person nodes: {len(rows)}, with romanized variants: {len(updates)}")
         for row in updates[:5]:
             print("  ", row["romanized"][:4], "...")
         if args.dry_run:
             return 0
+        print(f"Activity (mention) nodes relabelled: {relabel_mentions(session)}")
+        for start in range(0, len(readings), args.batch_size):
+            session.run(
+                "UNWIND $rows AS row MATCH (n) WHERE elementId(n) = row.id "
+                "SET n.한글독음 = row.reading, "
+                "    n.한글명칭 = CASE WHEN row.fix_h THEN row.reading ELSE n.한글명칭 END",
+                rows=readings[start:start + args.batch_size]).consume()
         for start in range(0, len(updates), args.batch_size):
             session.run(
                 "UNWIND $rows AS row MATCH (p) WHERE elementId(p) = row.id SET p.romanized = row.romanized",

@@ -32,6 +32,7 @@ if str(_ROOT) not in sys.path:
 
 from scripts.config import load_secrets, setting, get_pg_config, get_neo4j_config, SECRETS, ROOT
 from scripts.tei_utils import extract_tei_surface
+from scripts.romanize_names import hanja_reading, relabel_mentions
 
 RELATION_MAPPING = {
     "부친": "P152_has_parent",
@@ -501,6 +502,7 @@ def apply_cidoc_mappings(session, mappings, event_ids=None):
                  rel_p134,
                  batch_size=batch)
 
+    relabel_mentions(session)  # label each Activity as the mention of a person in a record
     print(f"Applied CIDOC mappings (activities: {len(activity_nodes)}, rels: {len(rel_p9)+len(rel_p14)+len(rel_p134)}) "
           f"from {total_rows} rows; skipped {skipped_no_event} rows without an Event")
 
@@ -748,6 +750,7 @@ def build_ultimate_graph():
                 place_records.append({
                     'id': code,
                     'name': name,
+                    'reading': hanja_reading(name),
                     'type': str(row.get('유형') or '').strip(),
                     'type3': str(row.get('유형3') or '').strip(),
                     'x': row.get('x좌표값'),
@@ -763,7 +766,8 @@ def build_ultimate_graph():
                 SET p.place_id = row.id,
                     p.name = row.name,
                     p.명칭 = row.name,
-                    p.한글명칭 = row.name,
+                    p.한글명칭 = coalesce(row.reading, row.name),
+                    p.한글독음 = coalesce(row.reading, p.한글독음),
                     p.type = '장소',
                     p.유형 = row.type,
                     p.유형3 = row.type3,

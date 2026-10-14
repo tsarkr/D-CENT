@@ -245,7 +245,7 @@ function docent_security_gate($action) {
         echo json_encode(['error' => 'Method not allowed.'], JSON_UNESCAPED_UNICODE);
         exit;
     }
-    $allowed_actions = ['analyze', 'graph', 'pg_prefetch', 'explain', 'node_detail'];
+    $allowed_actions = ['analyze', 'graph', 'pg_prefetch', 'explain', 'node_detail', 'narrative'];
     if (!in_array($action, $allowed_actions, true)) {
         http_response_code(400);
         echo json_encode(['error' => '허용되지 않은 요청입니다.'], JSON_UNESCAPED_UNICODE);
@@ -268,5 +268,10 @@ function docent_security_gate($action) {
         header('Retry-After: 60');
         echo json_encode(['error' => '요청이 너무 많습니다. 잠시 후 다시 시도하세요.'], JSON_UNESCAPED_UNICODE);
         exit;
+    }
+    // AJAX 핸들러는 세션에 쓰지 않습니다. 세션 잠금을 풀어야 같은 브라우저의 요청
+    // (analyze·graph·pg_prefetch·node_detail·narrative)이 순서대로 줄 서지 않고 동시에 처리됩니다.
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
     }
 }

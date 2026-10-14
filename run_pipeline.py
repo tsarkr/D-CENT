@@ -9,6 +9,7 @@ RDBMS preprocessing:
 5) scripts/extract_all_entities.py
 6) HITL pause for xlsx review
 7) scripts/generate_cidoc_mappings.py
+8) scripts/apply_pg_indexes.py (trigram indexes for name search)
 
 Neo4j serving:
 1) scripts/graph_builder.py
@@ -45,6 +46,7 @@ RDBMS_STEPS = [
     (ROOT / 'scripts' / 'link_persnames_i815.py', ['--apply']),
     (ROOT / 'scripts' / 'extract_all_entities.py', []),
     (ROOT / 'scripts' / 'generate_cidoc_mappings.py', []),
+    (ROOT / 'scripts' / 'apply_pg_indexes.py', []),
 ]
 
 NEO4J_STEPS = [

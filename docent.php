@@ -62,6 +62,7 @@ if (isset($_GET['ajax'])) {
             'pg_prefetch' => handle_action_pg_prefetch(),
             'explain'     => handle_action_explain(),
             'node_detail' => handle_action_node_detail(),
+            'narrative'   => handle_action_narrative(),
             default       => throw new InvalidArgumentException("Unknown action: {$action}"),
         };
     } catch (\Throwable $e) {

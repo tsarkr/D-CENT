@@ -35,6 +35,11 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
     if (!isset($map[$nid])) {
         $reading = $props['한글독음'] ?? '';
         $base = $props['제목'] ?? $props['명칭'] ?? $props['사건명'] ?? $raw_id;
+        // 한자 명칭에 독음이 없으면 한글 명칭(기관·행정구역의 원천 한글명)을 독음 대신 표시
+        if ($reading === '' && preg_match('/\p{Han}/u', (string)$base)) {
+            $h_name = (string)($props['한글명칭'] ?? '');
+            if ($h_name !== '' && !preg_match('/\p{Han}/u', $h_name)) $reading = $h_name;
+        }
 
         // 유령 개체 필터링
         static $ghost_stopwords = ['대표', '달하', '그러', '총독', '순사', '공판', '십자표', '펼치는데', '연행하', '거행하고'];
@@ -93,7 +98,9 @@ function _get_rel_label($rtype) {
         "P11_had_participant" => "참여 인물", "P108_has_produced" => "생성/저작",
         "P102_has_title" => "명칭/제목", "소속" => "소속",
         "P74_has_current_or_former_residence" => "설치 장소", "P89_falls_within" => "상위 행정구역",
-        "동일인물" => "동일인물", "sameAs" => "동일인물", "owl:sameAs" => "동일인물"
+        "동일인물" => "동일인물", "sameAs" => "동일인물", "owl:sameAs" => "동일인물",
+        "P9_consists_of" => "기록 내 언급", "P134_was_continued_by" => "다음 언급",
+        "P70_documents" => "기록함"
     ];
     $en = [
         "P14_carried_out_by" => "Performed/Participated", "P7_took_place_at" => "Location",
@@ -102,7 +109,9 @@ function _get_rel_label($rtype) {
         "P11_had_participant" => "Participant", "P108_has_produced" => "Created/Produced",
         "P102_has_title" => "Title", "소속" => "Affiliation",
         "P74_has_current_or_former_residence" => "Installed at", "P89_falls_within" => "Falls within",
-        "동일인물" => "Same Person", "sameAs" => "Same As", "owl:sameAs" => "Same As"
+        "동일인물" => "Same Person", "sameAs" => "Same As", "owl:sameAs" => "Same As",
+        "P9_consists_of" => "Mention in record", "P134_was_continued_by" => "Next mention",
+        "P70_documents" => "Documents"
     ];
     return docent_is_english() ? ($en[$rtype] ?? $rtype) : ($ko[$rtype] ?? $rtype);
 }

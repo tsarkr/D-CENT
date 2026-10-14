@@ -18,7 +18,12 @@
     },
     {
       "label": "Activity",
-      "nodes": 26165,
+      "nodes": 30422,
+      "isolated": 0
+    },
+    {
+      "label": "Place",
+      "nodes": 9555,
       "isolated": 0
     },
     {
@@ -27,13 +32,8 @@
       "isolated": 1
     },
     {
-      "label": "Place",
-      "nodes": 8747,
-      "isolated": 0
-    },
-    {
       "label": "Person",
-      "nodes": 4940,
+      "nodes": 7136,
       "isolated": 0
     },
     {
@@ -61,16 +61,16 @@
     "nodes": 2616,
     "isolated": 0,
     "degree_min": 2,
-    "degree_median": 9.0,
-    "degree_mean": 26.75,
-    "degree_p90": 49,
-    "degree_max": 1582,
-    "without_person": 1435,
+    "degree_median": 10.0,
+    "degree_mean": 29.07,
+    "degree_p90": 53,
+    "degree_max": 1683,
+    "without_person": 1402,
     "without_place": 1,
     "relations": [
       {
         "type": "P9_consists_of",
-        "n": 26165
+        "n": 30422
       },
       {
         "type": "P70_documents",
@@ -78,7 +78,7 @@
       },
       {
         "type": "P14_carried_out_by",
-        "n": 12166
+        "n": 13976
       },
       {
         "type": "P7_took_place_at",

@@ -124,6 +124,8 @@
     /* ━━━ State ━━━ */
     let network = null;
     let lastEvidences = [];
+    let lastNarrative = null;        // 서사 경로 결과 (explain에서 재사용)
+    let narrativePromise = null;     // graph와 동시에 시작한 서사 경로 요청
     let pgPrefetchTexts = [];
     let currentNodes = [];
     let currentEdges = [];
@@ -720,7 +722,7 @@
         if ($reasoningSteps) $reasoningSteps.innerHTML=''; 
         if ($sourcesBadges) $sourcesBadges.innerHTML='';
         if ($explanationContent) $explanationContent.innerHTML='<p class="text-ink-400 italic">지식그래프 및 1차 사료를 탐색하고 있습니다...</p>';
-        lastEvidences=[]; pgPrefetchTexts=[]; currentNodes=[]; currentEdges=[]; analysisResult=null;
+        lastEvidences=[]; lastNarrative=null; narrativePromise=null; pgPrefetchTexts=[]; currentNodes=[]; currentEdges=[]; analysisResult=null;
         logSystem(`검색 시작: "${term}"`);
 
         try {
@@ -737,6 +739,11 @@
             const detectedName = langLabels[detectedLang] || `🌐 ${detectedLang.toUpperCase()}`;
             addStep('🌐', `[다국어 감지] 질의 언어 감지: ${detectedName} → 한국어 지식그래프 교차 탐색`, 'done');
             updateExplainLangBadge(detectedLang);
+
+            /* 서사 경로: graph와 동시에 별도 요청으로 계산 (해설 단계에서 재사용) */
+            narrativePromise = api('narrative', {term})
+                .then(r => { lastNarrative = (r && Array.isArray(r.rows) && r.rows.length) ? r : null; return lastNarrative; })
+                .catch(err => { logSystem(`⚠️ narrative 생략: ${err.message}`); return null; });
 
             /* 1. Graph: 외국어는 analyze의 한국어 변환을 먼저 반영 */
             const s2 = addStep('🔍',`지식그래프에서 "${kws.join(', ')}" 탐색 중...`);
@@ -882,10 +889,15 @@
 
         try {
             await ensureCsrf();
+            if (narrativePromise) {
+                // 서사 경로가 아직 계산 중이면 최대 20초까지 기다린 뒤 진행 (없으면 서버가 직접 계산)
+                await Promise.race([narrativePromise, new Promise(r => setTimeout(r, 20000))]);
+            }
             const fd=new FormData();
             fd.append('term',term); fd.append('focus',focus); fd.append('lang',lang);
             fd.append('evidences',JSON.stringify(lastEvidences));
             fd.append('pg_texts',JSON.stringify(pgPrefetchTexts));
+            if(lastNarrative) fd.append('narrative',JSON.stringify(lastNarrative));
             fd.append('stream','1');
             if(csrfToken) { fd.append('csrf_token',csrfToken); }
 
@@ -1010,6 +1022,61 @@
         loadNodePg(node);
     }
 
+    /* ━━━ TEI 렌더링 ━━━
+     * 레코드 TEI를 안전한 HTML로 변환합니다. 허용한 요소만 HTML로 바꾸고
+     * 텍스트는 모두 이스케이프합니다(사료 텍스트가 HTML로 실행되지 않음).
+     *   ruby/rb/rt  → HTML ruby (한자 위에 한글 독음)
+     *   persName    → 인물 표시, 독립유공자 인명사전 URL이 있으면 링크
+     *   placeName   → 장소 표시, orgName → 기관 표시
+     *   p[data-col] → "컬럼명: 내용" 행
+     */
+    const TEI_TRUSTED_HOSTS = ['search.i815.or.kr'];
+
+    function teiSafeUrl(ref) {
+        try {
+            const u = new URL(String(ref || ''));
+            return (u.protocol === 'https:' || u.protocol === 'http:') && TEI_TRUSTED_HOSTS.includes(u.hostname) ? u.href : '';
+        } catch (e) { return ''; }
+    }
+
+    function teiInline(node) {
+        if (node.nodeType === 3) return escapeHtml(node.nodeValue);
+        if (node.nodeType !== 1) return '';
+        const name = node.localName;
+        const inner = () => Array.from(node.childNodes).map(teiInline).join('');
+        switch (name) {
+            case 'ruby': return `<ruby class="tei-ruby">${inner()}</ruby>`;
+            case 'rb': return inner();
+            case 'rt': return `<rt>${escapeHtml(node.textContent)}</rt>`;
+            case 'persName': {
+                const ref = node.getAttribute('ref') || '';
+                const url = teiSafeUrl(ref);
+                if (url) return `<a class="tei-pers tei-linked" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="독립유공자 인명사전">${inner()}</a>`;
+                return `<span class="tei-pers" title="인물${ref ? ' ' + escapeHtml(ref) : ''}">${inner()}</span>`;
+            }
+            case 'placeName': return `<span class="tei-place" title="장소">${inner()}</span>`;
+            case 'orgName': return `<span class="tei-org" title="기관">${inner()}</span>`;
+            case 'lb': return '<br>';
+            default: return inner();
+        }
+    }
+
+    function renderTeiHtml(tei) {
+        if (!tei) return '';
+        let doc = new DOMParser().parseFromString(String(tei), 'application/xml');
+        if (doc.getElementsByTagName('parsererror').length) return '';
+        const scope = doc.getElementsByTagName('body')[0] || doc.documentElement;
+        const rows = [];
+        for (const p of Array.from(scope.getElementsByTagName('p'))) {
+            const html = Array.from(p.childNodes).map(teiInline).join('').trim();
+            if (!html) continue;
+            const col = p.getAttribute('data-col');
+            rows.push(`<tr class="border-b border-ink-50">${col ? `<td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap align-top">${escapeHtml(col)}</td>` : '<td></td>'}<td class="py-1.5 text-ink-700 break-all tei-text" style="white-space:pre-wrap">${html}</td></tr>`);
+        }
+        if (!rows.length) return '';
+        return `<div class="tei-legend text-[11px] text-ink-400 mb-1"><span class="tei-pers">인물</span> <span class="tei-place">장소</span> <span class="tei-org">기관</span> · 한자 위 작은 글씨는 한글 독음</div><table class="w-full text-xs">${rows.join('')}</table>`;
+    }
+
     async function loadNodePg(node){
         const box=$('node-pg-source-box'); if(!box) return;
         const p=node.props||{}, tbl=p['원천테이블']||p['source_table']||'', rid=p['원천rowid']||p['rowid']||'';
@@ -1020,6 +1087,7 @@
                 let rh=`<h4 class="text-xs font-semibold text-green-600 mb-2">📋 원천 사료 [${escapeHtml(d.table)} #${d.rowid}]</h4><div class="max-h-[200px] overflow-y-auto"><table class="w-full text-xs">`;
                 for(let c in d.columns){const v=d.columns[c];if(v==null||v==='')continue;rh+=`<tr class="border-b border-ink-50"><td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap">${escapeHtml(c)}</td><td class="py-1.5 text-ink-700 break-all" style="white-space:pre-wrap">${escapeHtml(v)}</td></tr>`;}
                 rh+=`</table></div>`;
+                if(d.tei){const teiHtml=renderTeiHtml(d.tei); if(teiHtml) rh+=`<details class="mt-2" open><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 TEI 주석 보기</summary><div class="mt-1 bg-ink-50 p-3 rounded-lg overflow-auto max-h-[260px]">${teiHtml}</div></details>`;}
                 if(d.tei) rh+=`<details class="mt-2"><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 TEI XML 원문</summary><pre class="mt-1 text-xs bg-ink-50 p-3 rounded-lg overflow-auto max-h-[160px] font-mono text-ink-600" style="white-space:pre-wrap">${escapeHtml(d.tei)}</pre></details>`;
                 box.innerHTML=rh;
             } else { box.innerHTML=`<div class="text-xs text-ink-300">원천 DB에 직접 대응 데이터 없음.</div>`; }

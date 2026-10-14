@@ -86,7 +86,7 @@ class CidocTimelineGenerator:
 
             # 개별 인스턴스 관계 선언
             target_graph.add((act_uri, RDF.type, self.CRM.E7_Activity))
-            target_graph.add((act_uri, RDFS.label, Literal(f"{pure_name} 관련 하위 액티비티 ({idx+1})", lang="ko")))
+            target_graph.add((act_uri, RDFS.label, Literal(f"{pure_name} — {table} #{rowid} 언급 ({idx+1}번째)", lang="ko")))
             
             target_graph.add((event_uri, self.CRM.P9_consists_of, act_uri))
 
@@ -115,7 +115,7 @@ class CidocTimelineGenerator:
         self.g.add((self.CRM.E5_Event, RDFS.label, Literal("Event (사건 통합체)", lang="ko")))
         
         self.g.add((self.CRM.E7_Activity, RDF.type, OWL.Class))
-        self.g.add((self.CRM.E7_Activity, RDFS.label, Literal("Activity (하위 액티비티)", lang="ko")))
+        self.g.add((self.CRM.E7_Activity, RDFS.label, Literal("Activity (기록 내 인물 언급)", lang="ko")))
         self.g.add((self.CRM.E7_Activity, RDFS.subClassOf, self.CRM.E5_Event))  # 상속 관계 명시
         
         self.g.add((self.CRM.E39_Actor, RDF.type, OWL.Class))
