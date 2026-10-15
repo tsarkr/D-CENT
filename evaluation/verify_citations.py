@@ -3,8 +3,9 @@
 
 An answer may cite three kinds of things:
 
-  record id       raw_bib_123 / raw_bibliography-123. Valid only if that record
-                  is part of the evidence passed to the generator.
+  record id       raw_bib_123 / raw_bibliography-123 / raw_event_info-45 (table
+                  and row of a record table). Valid only if that record is part
+                  of the evidence passed to the generator.
   internal label  relation types (P70_documents, P106i...), block tags
                   (GRAPH_TOPOLOGY, GRAPH_3, S1, "블록 3"), "Graph DB", ...
                   These are never valid: a reader cannot follow them to a source.
@@ -35,8 +36,22 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-ID_RE = re.compile(r"raw_bib(?:liography)?[_\-\s]?(\d+)", re.IGNORECASE)
-CONTEXT_ID_RE = re.compile(r"raw_bib(?:liography)?[_\-](\d+)|raw_bibliography row (\d+)", re.IGNORECASE)
+# raw_<table>[-_ ]<rowid>; the controlled harness writes raw_bib_<rowid>, the deployed
+# system raw_<table>-<rowid> (e.g. raw_event_info-45), so records are keyed by table and row.
+ID_RE = re.compile(r"(?<![A-Za-z])raw_([a-z]+(?:_[a-z]+)*?)[_\-\s]?(\d+)\b", re.IGNORECASE)
+ROW_PHRASE_RE = re.compile(r"(?<![A-Za-z])raw_([a-z]+(?:_[a-z]+)*) row (\d+)\b", re.IGNORECASE)
+
+
+def record_key(table_suffix: str, rowid: str) -> str:
+    table = table_suffix.lower()
+    if table in ("bib", "bibliography"):
+        table = "bibliography"
+    return f"{table}:{int(rowid)}"
+
+
+def _id_key(part: str) -> str | None:
+    m = ID_RE.search(part)
+    return record_key(m.group(1), m.group(2)) if m else None
 
 # Things that look like citations but point at the system's own structure.
 LABEL_RE = re.compile(
@@ -78,8 +93,9 @@ def _norm(text: str) -> str:
 def context_ids(contexts: list[str]) -> set[str]:
     ids: set[str] = set()
     for ctx in contexts:
-        for a, b in CONTEXT_ID_RE.findall(ctx):
-            ids.add(a or b)
+        for pattern in (ID_RE, ROW_PHRASE_RE):
+            for table, rowid in pattern.findall(ctx):
+                ids.add(record_key(table, rowid))
     return ids
 
 
@@ -97,9 +113,9 @@ def verify_answer(answer: str, contexts: list[str]) -> list[dict[str, Any]]:
         parts = _split(group)
         has_pointer = any(ID_RE.search(p) or is_label(p) for p in parts)
         for part in parts:
-            id_match = ID_RE.search(part)
-            if id_match:
-                found.append({"text": part, "kind": "record_id", "valid": id_match.group(1) in ids,
+            key = _id_key(part)
+            if key:
+                found.append({"text": part, "kind": "record_id", "valid": key in ids,
                               "span": m.span()})
             elif is_label(part):
                 found.append({"text": part, "kind": "internal_label", "valid": False, "span": m.span()})
@@ -114,9 +130,9 @@ def clean_answer(answer: str, contexts: list[str]) -> str:
     ids = context_ids(contexts)
 
     def keep(part: str) -> bool:
-        id_match = ID_RE.search(part)
-        if id_match:
-            return id_match.group(1) in ids
+        key = _id_key(part)
+        if key:
+            return key in ids
         return not is_label(part)
 
     def fix(m: re.Match) -> str:

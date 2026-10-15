@@ -3,7 +3,7 @@
 
 Runs:
 1. Historical NER & Relation Extraction Benchmark (P, R, F1 across Baseline 1, 2, and Proposed Hybrid)
-2. Vector RAG vs. GraphRAG vs. Docent Hybrid RAG Comparative Experiment (Fact Recall, Hallucination Rate, Token Efficiency, Latency)
+2. Baselines vs. D-CENT (end-to-end and controlled) comparative experiment (Fact Recall, Hallucination Rate, Token Efficiency, Latency)
 
 Outputs:
 - evaluation/results/table_ner_performance.tex
@@ -84,7 +84,7 @@ def main() -> int:
     if args.models:
         rag_cmd.extend(["--models", args.models])
 
-    ok_rag = run_command(rag_cmd, "2단계: Vector RAG vs. GraphRAG vs. Docent Hybrid RAG 비교 실험 실행")
+    ok_rag = run_command(rag_cmd, "2단계: 기준 시스템 vs. D-CENT(엔드투엔드·통제 조건) 비교 실험 실행")
     if not ok_rag:
         return 1
 

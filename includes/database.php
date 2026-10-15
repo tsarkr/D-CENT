@@ -190,6 +190,46 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
     return $out;
 }
 
+/**
+ * Fetch the records that document nodes point to (P70_documents → 원천테이블, 원천rowid).
+ * This is the primary, identifier-based record lookup (design principle P1);
+ * fetch_pg_rows_for_names() is the name-based fallback.
+ */
+function fetch_pg_rows_for_refs($pdo, $refs, $tables_meta) {
+    $by_table = [];
+    foreach ((array)$refs as $ref) {
+        $table = (string)($ref['table'] ?? '');
+        $rowid = (int)($ref['rowid'] ?? 0);
+        if ($rowid > 0 && in_array($table, DOCENT_RECORD_TABLES, true)) {
+            $by_table[$table][$rowid] = (string)($ref['node_id'] ?? '');
+        }
+    }
+    $id_cols = [];
+    foreach ($tables_meta as $m) $id_cols[$m['table'] ?? ''] = docent_valid_identifier($m['id_col'] ?? '', 'rowid');
+    $out = [];
+    foreach ($by_table as $table => $rowids) {
+        $id_col = $id_cols[$table] ?? 'rowid';
+        $placeholders = implode(',', array_fill(0, count($rowids), '?'));
+        try {
+            $stmt = $pdo->prepare("SELECT * FROM \"{$table}\" WHERE rowid IN ({$placeholders}) LIMIT 25");
+            $stmt->execute(array_keys($rowids));
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $snippets = [];
+                foreach ($row as $k => $v) if ($k !== $id_col && $k !== 'tei') $snippets[$k] = $v !== null ? strval($v) : '';
+                $out[] = [
+                    'table' => $table, 'schema' => 'public',
+                    'rowid' => $row[$id_col] ?? null, 'id_col' => $id_col,
+                    'match_cols' => ['rowid'], 'tei' => $row['tei'] ?? null,
+                    'snippets' => $snippets,
+                    'node_id' => $rowids[(int)($row['rowid'] ?? 0)] ?? '',
+                    'via' => 'document',
+                ];
+            }
+        } catch (Exception $e) { error_log('pg document lookup failed for ' . $table . ': ' . $e->getMessage()); }
+    }
+    return $out;
+}
+
 function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
     return fetch_pg_rows_for_names($pdo, [$name], $tables_meta);
 }

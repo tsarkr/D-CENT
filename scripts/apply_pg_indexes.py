@@ -68,6 +68,10 @@ def main() -> int:
         index = f"{table}_id_text"
         print(f"  index {index} on {table}.{row[0]}::text", flush=True)
         cur.execute(f'CREATE INDEX CONCURRENTLY IF NOT EXISTS "{index}" ON "{table}" (("{row[0]}"::text))')
+        # rowid: document nodes point to records by (table, rowid)
+        if _column_exists(cur, table, "rowid"):
+            print(f"  index {table}_rowid on {table}.rowid", flush=True)
+            cur.execute(f'CREATE INDEX CONCURRENTLY IF NOT EXISTS "{table}_rowid" ON "{table}" (rowid)')
     cur.close()
     conn.close()
     print(f"Trigram indexes ensured: {len(targets)}")

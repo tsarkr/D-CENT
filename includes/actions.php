@@ -1176,6 +1176,30 @@ function handle_action_graph() {
         }
     }
 
+    // 그래프에 나온 사건을 기록한 문서 노드(P70_documents)의 원천 기록 위치
+    $record_refs = [];
+    $event_ids = [];
+    foreach ($nodes as $node_item) {
+        $lbls = $node_item['labels'] ?? [];
+        $eid = $node_item['props']['id'] ?? null;
+        if ($eid !== null && (in_array('Event', $lbls, true) || in_array('사건', $lbls, true))) $event_ids[] = (string)$eid;
+    }
+    if (!empty($event_ids)) {
+        try {
+            $doc_res = $client->run("
+                MATCH (d:Document)-[:P70_documents]->(e:Event)
+                WHERE e.id IN \$ids AND d.원천테이블 IS NOT NULL AND d.원천rowid IS NOT NULL
+                RETURN d.원천테이블 AS t, d.원천rowid AS r, e.id AS eid
+                LIMIT 25
+            ", ['ids' => array_values(array_unique(array_slice($event_ids, 0, 30)))]);
+            foreach ($doc_res as $rec) {
+                $record_refs[] = ['table' => (string)$rec->get('t'), 'rowid' => (int)$rec->get('r'), 'node_id' => (string)$rec->get('eid')];
+            }
+        } catch (\Throwable $docErr) {
+            error_log('document lookup failed: ' . $docErr->getMessage());
+        }
+    }
+
     echo json_encode([
         "nodes" => array_values($nodes),
         "edges" => array_values($unique_edges),
@@ -1189,6 +1213,7 @@ function handle_action_graph() {
         }, array_values($unique_edges)),
         "evidences" => array_values($evidences),
         "prefetch_names" => $prefetch_names,
+        "record_refs" => $record_refs,
         "generated_cypher" => $generated_cypher,
         "cypher_executed" => ($cypher_count > 0),
         "cypher_record_count" => $cypher_count
@@ -1218,8 +1243,28 @@ function handle_action_pg_prefetch() {
         if (count($filtered_names) >= 15) break;
     }
 
-    if (!empty($filtered_names)) {
-        $all_rows = fetch_pg_rows_for_names($pdo, $filtered_names, $tables_meta);
+    // 1) 문서 노드가 가리키는 기록을 식별자로 조회 (P1), 2) 남는 자리를 이름 검색으로 보충
+    $refs_in = json_decode($_POST['refs'] ?? '[]', true);
+    $refs = [];
+    foreach (array_slice(is_array($refs_in) ? $refs_in : [], 0, 25) as $ref) {
+        if (!is_array($ref)) continue;
+        $refs[] = [
+            'table' => docent_valid_identifier($ref['table'] ?? '', ''),
+            'rowid' => (int)($ref['rowid'] ?? 0),
+            'node_id' => docent_sanitize_text((string)($ref['node_id'] ?? ''), 200, false),
+        ];
+    }
+    if (!empty($refs)) {
+        $all_rows = fetch_pg_rows_for_refs($pdo, $refs, $tables_meta);
+    }
+    if (!empty($filtered_names) && count($all_rows) < 25) {
+        $seen_rows = [];
+        foreach ($all_rows as $r) $seen_rows[$r['table'] . '#' . $r['rowid']] = true;
+        foreach (fetch_pg_rows_for_names($pdo, $filtered_names, $tables_meta) as $r) {
+            if (isset($seen_rows[$r['table'] . '#' . $r['rowid']])) continue;
+            $r['via'] = 'name';
+            $all_rows[] = $r;
+        }
     }
 
     echo json_encode($all_rows, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -1239,7 +1284,18 @@ function handle_action_explain() {
     if (!is_array($evidences)) $evidences = [];
     if (!is_array($pg_texts)) $pg_texts = [];
 
-    $is_stream = isset($_GET['stream']) || isset($_POST['stream']);
+    // 평가 모드(DOCENT_EVAL_MODE=1인 서버에서 eval=1로 요청): 동기 JSON 응답에 생성기가 받은 문맥과
+    // 팩트 표를 함께 돌려주고, 생성 조건(temperature, top_p, 최대 출력 토큰)을 평가 하네스와 맞춥니다.
+    // 검색·문맥 구성·두 단계 생성은 배포 경로와 동일합니다.
+    $eval_mode = get_cfg('DOCENT_EVAL_MODE', '0') === '1' && (string)($_POST['eval'] ?? '') === '1';
+    $gen_temperature = null; $gen_top_p = null; $gen_max_tokens = 8192;
+    if ($eval_mode) {
+        if (isset($_POST['temperature']) && is_numeric($_POST['temperature'])) $gen_temperature = max(0.0, min(1.0, (float)$_POST['temperature']));
+        if (isset($_POST['top_p']) && is_numeric($_POST['top_p'])) $gen_top_p = max(0.0, min(1.0, (float)$_POST['top_p']));
+        if (isset($_POST['max_tokens']) && is_numeric($_POST['max_tokens'])) $gen_max_tokens = max(256, min(8192, (int)$_POST['max_tokens']));
+    }
+
+    $is_stream = !$eval_mode && (isset($_GET['stream']) || isset($_POST['stream']));
     if ($is_stream) {
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_write_close();
@@ -1255,35 +1311,45 @@ function handle_action_explain() {
         flush();
     }
 
-    // 1. 입력 사료 컨텍스트 구성 (핵심 사료 중심 예산 최적화)
-    $evidence_context = build_budgeted_evidence_context($evidences, $explain_lang, 20, 250, 600, 5000, $term, $focus);
-    $pg_context = build_budgeted_pg_context($pg_texts, $explain_lang, 25, 180, 450, 6000, $term, $focus);
-    $context_str = trim($evidence_context . ($evidence_context && $pg_context ? "\n\n" : "") . $pg_context);
-
-    // ── [GraphRAG Step 4] NER 감지 → Multi-hop 탐색 → 하이브리드 컨텍스트 주입 ──
-    // Vector 희석 방지: DB 확인 사실을 컨텍스트 최상단에 강제 삽입
+    // ── 1. 서사 경로 (graph 단계와 동시에 계산된 결과를 재사용, 없으면 여기서 계산) ──
+    // 평가 모드의 no_narrative=1은 서사 경로를 빼는 비교 조건입니다.
     $t_stage = microtime(true);
     $precomputed = null;
-    $narrative_in = json_decode($_POST['narrative'] ?? '', true);
-    if (is_array($narrative_in) && isset($narrative_in['rows'], $narrative_in['entities'])
-        && is_array($narrative_in['rows']) && is_array($narrative_in['entities'])) {
-        $clean_rows = [];
-        foreach (array_slice($narrative_in['rows'], 0, 25) as $row) {
-            if (!is_array($row)) continue;
-            $clean = [];
-            foreach (['연관인물', '사건이름', '발생일자', '공통사건', '기준인물'] as $k) {
-                $clean[$k] = docent_sanitize_text((string)($row[$k] ?? ''), 200, false);
+    if ($eval_mode && (string)($_POST['no_narrative'] ?? '') === '1') {
+        $precomputed = ['rows' => [], 'entities' => []];
+    } else {
+        $narrative_in = json_decode($_POST['narrative'] ?? '', true);
+        if (is_array($narrative_in) && isset($narrative_in['rows'], $narrative_in['entities'])
+            && is_array($narrative_in['rows']) && is_array($narrative_in['entities'])) {
+            $clean_rows = [];
+            foreach (array_slice($narrative_in['rows'], 0, 25) as $row) {
+                if (!is_array($row)) continue;
+                $clean = [];
+                foreach (['연관인물', '사건이름', '발생일자', '공통사건', '기준인물'] as $k) {
+                    $clean[$k] = docent_sanitize_text((string)($row[$k] ?? ''), 200, false);
+                }
+                $clean_rows[] = $clean;
             }
-            $clean_rows[] = $clean;
+            $clean_entities = array_values(array_filter(array_map(
+                fn($e) => docent_sanitize_text((string)$e, 60, false), array_slice($narrative_in['entities'], 0, 5))));
+            $precomputed = ['rows' => $clean_rows, 'entities' => $clean_entities];
         }
-        $clean_entities = array_values(array_filter(array_map(
-            fn($e) => docent_sanitize_text((string)$e, 60, false), array_slice($narrative_in['entities'], 0, 5))));
-        $precomputed = ['rows' => $clean_rows, 'entities' => $clean_entities];
     }
-    $graphrag_result = graphrag_build_hybrid_context($term, $context_str, $explain_lang, $precomputed);
+    $graphrag_result = graphrag_build_hybrid_context($term, '', $explain_lang, $precomputed);
     error_log(sprintf('[Docent][timing] narrative paths %.2fs', microtime(true) - $t_stage));
-    $context_str     = $graphrag_result['context'];
-    $graphrag_used   = $graphrag_result['graphrag_used'];
+    $graphrag_used = $graphrag_result['graphrag_used'];
+
+    // ── 2. 하나의 문맥 예산(기본 11,000자)을 서사 경로 → 그래프 사료(최대 5,000자) → 원천 기록 순으로 나눔 ──
+    // 서사 경로는 생성 문맥의 맨 앞에 놓여 사건의 시간 순서를 먼저 전달합니다.
+    $total_budget = max(2000, (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'));
+    $narrative_block = mb_substr((string)$graphrag_result['context'], 0, $total_budget);
+    $remaining = $total_budget - mb_strlen($narrative_block);
+    $evidence_context = $remaining > 0
+        ? build_budgeted_evidence_context($evidences, $explain_lang, 20, 250, 600, min(5000, $remaining), $term, $focus) : '';
+    $remaining -= mb_strlen($evidence_context);
+    $pg_context = $remaining > 0
+        ? build_budgeted_pg_context($pg_texts, $explain_lang, 25, 180, 450, $remaining, $term, $focus) : '';
+    $context_str = trim(implode("\n\n", array_filter([$narrative_block, $evidence_context, $pg_context], fn($b) => $b !== '')));
 
     if ($is_stream && $graphrag_used) {
         // 클라이언트에 GraphRAG 주입 여부 알림 (SSE 메타 코멘트)
@@ -1308,7 +1374,8 @@ function handle_action_explain() {
             flush();
             return;
         }
-        echo json_encode(["text" => $no_info_text], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        echo json_encode(["text" => $no_info_text] + ($eval_mode ? ["context" => "", "fact_table" => "", "graphrag_used" => false, "prompt_chars" => 0] : []),
+            JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
         return;
     }
 
@@ -1324,7 +1391,7 @@ function handle_action_explain() {
         $fact_table = call_gemini([
             ["role" => "system", "content" => $fact_prompts['system']],
             ["role" => "user", "content" => $fact_prompts['user']]
-        ], false, 1500, 0.0, 0.8, 50);
+        ], false, 1500, $gen_temperature ?? 0.0, $gen_top_p ?? 0.8, 50);
         error_log(sprintf('[Docent][timing] stage 1 fact table %.2fs', microtime(true) - $t_stage));
     } catch (\Throwable $extErr) {
         error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
@@ -1335,6 +1402,10 @@ function handle_action_explain() {
     $explain_prompts = get_explain_prompts($explain_lang, $term, $context_str, $fact_table);
     $sys_prompt = $explain_prompts['system'];
     $user_prompt = $explain_prompts['user'];
+    if ($eval_mode) {
+        // 평가 구성: 주장마다 근거를 표시하게 하여 인용 검증(verify_citations.py)을 적용할 수 있게 합니다.
+        $sys_prompt .= "\n\n" . get_citation_rule($explain_lang);
+    }
 
     if ($is_stream) {
         stream_gemini([
@@ -1353,12 +1424,24 @@ function handle_action_explain() {
     }
 
     // Fallback: 동기식 JSON 응답
+    $t_stage = microtime(true);
     $res = call_gemini([
         ["role" => "system", "content" => $sys_prompt],
         ["role" => "user", "content" => $user_prompt]
-    ], false, 8192, 0.1, 0.85);
+    ], false, $gen_max_tokens, $gen_temperature ?? 0.1, $gen_top_p ?? 0.85, $eval_mode ? 120 : 60);
 
-    echo json_encode(["text" => $res], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+    $out = ["text" => $res];
+    if ($eval_mode) {
+        $out += [
+            "context" => $context_str,
+            "fact_table" => $fact_table,
+            "graphrag_used" => $graphrag_used,
+            "narrative_chars" => mb_strlen($narrative_block),
+            "prompt_chars" => mb_strlen($fact_prompts['system'] . $fact_prompts['user'] . $sys_prompt . $user_prompt),
+            "generation_seconds" => round(microtime(true) - $t_stage, 3),
+        ];
+    }
+    echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 }
 
 /**

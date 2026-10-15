@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Quantitative Evaluation: Vector RAG vs. GraphRAG vs. Docent Hybrid RAG.
+"""Quantitative Evaluation: passage, hybrid and graph-only baselines vs. D-CENT.
 
 Evaluates:
-1. Model 1: Vanilla Vector RAG (Text chunks Top-K retrieval)
-2. Model 2: Hybrid Vector RAG (BM25 + dense, RRF fusion, cross-encoder rerank)
-3. Model 3: Standard GraphRAG (Neo4j Graph triples traversal without scoping)
-4. Model 4: Microsoft GraphRAG reference implementation (opt-in, needs a built index)
-5. Model 5: Proposed Docent Hybrid RAG (Graph + PostgreSQL Scoping Envelopes + 2-Stage In-Context Knowledge Pipeline)
-6. Ablations (opt-in via --models): docent_1stage (Docent evidence, one generation call) and
-   hybrid_2stage (hybrid-baseline evidence, Docent's fact table -> answer generation)
+1. Passage baseline ("vector"): records whose TEI contains an entity string
+2. Hybrid baseline: BM25 + dense, RRF fusion, cross-encoder rerank
+3. Graph-only baseline: Neo4j triples without record text
+4. Microsoft GraphRAG reference implementation (opt-in, needs a built index)
+5. D-CENT end-to-end ("dcent"): the deployed system called over HTTP (docent.php) with the
+   question text only: generated Cypher, full-text cross-check, narrative paths, record
+   retrieval by document identifiers, two-stage generation. The server must run with
+   DOCENT_EVAL_MODE=1 so that explain returns the context it generated from.
+6. Ablation without narrative paths ("dcent_no_paths"): the same requests, explain told to
+   leave the narrative paths out; the freed budget goes to record text.
+7. D-CENT controlled evidence ("docent"): name-matched triples and bibliographic records
+   assembled by this harness, answered with the two-stage generation.
+8. Ablations of the generation procedure: docent_1stage (controlled D-CENT evidence, one call)
+   and hybrid_2stage (hybrid-baseline evidence, fact table -> answer).
 
 Metrics:
 - Faithfulness / Fact Recall (%)
@@ -55,13 +62,16 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 # the pipelines and not from their settings. All are set from the CLI in main().
 GEN_TEMPERATURE = 0.0
 GEN_TOP_P = 0.8
-CONTEXT_CHARS = 2400          # retrieved-context budget per question; 0 = each pipeline's legacy size
+CONTEXT_CHARS = 11000         # retrieved-context budget per question (the deployed system's); 0 = legacy sizes
+ANSWER_MAX_TOKENS = 1500      # output limit of every answer-generation call
 RETRIEVAL_INPUT = "question"  # "question": entities extracted from the question / "entities": gold target_entities
+DCENT_URL = ""                # docent.php of a server running with DOCENT_EVAL_MODE=1 (--dcent-url / DOCENT_URL)
 
 
-def call_llm(messages: list[dict[str, str]], max_tokens: int = 1500) -> str:
+def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> str:
     """Call Google Gemini API using configured key."""
     temperature, top_p = GEN_TEMPERATURE, GEN_TOP_P
+    max_tokens = max_tokens or ANSWER_MAX_TOKENS
     secrets = load_secrets()
     api_key = setting("GEMINI_API_KEY", "", secrets)
     model = setting("GEMINI_MODEL", "gemini-flash-lite-latest", secrets)
@@ -179,12 +189,17 @@ def retrieve_vector_chunks(query: str, target_entities: list[str], top_k: int = 
 
 def run_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     t0 = time.time()
-    chunks = retrieve_vector_chunks(query_item["query"], query_item["target_entities"], top_k=12 if CONTEXT_CHARS > 0 else 4)
+    chunks = retrieve_vector_chunks(query_item["query"], query_item["target_entities"], top_k=candidate_count(400))
     return _answer_from_chunks("Vector RAG", query_item, pack_context(chunks, CHUNK_SEPARATOR), time.time() - t0)
 
 
 RERANKER = "cross-encoder"
 CHUNK_SEPARATOR = "\n---\n"
+
+
+def candidate_count(item_chars: int, legacy: int = 4) -> int:
+    """Enough ranked items of about `item_chars` characters to fill the shared budget."""
+    return CONTEXT_CHARS // item_chars + 1 if CONTEXT_CHARS > 0 else legacy
 
 
 def run_hybrid_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
@@ -196,7 +211,7 @@ def run_hybrid_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     if RETRIEVAL_INPUT == "entities":
         # Same information the other pipelines receive in this condition.
         search_text += " " + " ".join(query_item["target_entities"])
-    chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=12 if CONTEXT_CHARS > 0 else 4, reranker=RERANKER)]
+    chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker=RERANKER)]
     return _answer_from_chunks("Hybrid Vector RAG (BM25+Dense+Rerank)", query_item, pack_context(chunks, CHUNK_SEPARATOR), time.time() - t0)
 
 
@@ -265,7 +280,7 @@ def retrieve_graph_triples(target_entities: list[str], limit: int = 15) -> list[
 
 def run_graph_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     t0 = time.time()
-    triples = pack_context(retrieve_graph_triples(query_item["target_entities"], limit=80 if CONTEXT_CHARS > 0 else 15), "\n")
+    triples = pack_context(retrieve_graph_triples(query_item["target_entities"], limit=candidate_count(30, legacy=15)), "\n")
     t_retrieval = time.time() - t0
 
     context_str = "\n".join(triples)
@@ -331,7 +346,7 @@ def run_ms_graphrag(query_item: dict[str, Any]) -> dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Pipeline 3: Proposed Docent Hybrid RAG
+# 3. Pipeline 3: D-CENT with controlled evidence assembly
 # ─────────────────────────────────────────────────────────────────────────────
 def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
     """Retrieve Neo4j graph triples + PostgreSQL primary sources wrapped in <SOURCE_EVIDENCE> envelopes."""
@@ -362,7 +377,7 @@ def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
         envelopes.append(f"<GRAPH_TOPOLOGY>\n" + "\n".join(triples) + "\n</GRAPH_TOPOLOGY>")
 
     # 2. Scoped PostgreSQL primary sources (more candidates when a shared budget decides the cut-off)
-    n_entities, per_entity = (3, 4) if CONTEXT_CHARS > 0 else (2, 2)
+    n_entities, per_entity = (3, max(4, CONTEXT_CHARS // 1500)) if CONTEXT_CHARS > 0 else (2, 2)
     for ent in target_entities[:n_entities]:
         cur.execute("""
             SELECT rowid, tei FROM raw_bibliography WHERE tei LIKE %s LIMIT %s
@@ -383,7 +398,7 @@ def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
 
 def run_docent_hybrid_rag(
     query_item: dict[str, Any],
-    model_name: str = "Docent Hybrid RAG (Proposed)",
+    model_name: str = "D-CENT (controlled evidence)",
     scoped_context: str | None = None,
     two_stage: bool = True,
 ) -> dict[str, Any]:
@@ -442,7 +457,7 @@ def run_docent_hybrid_rag(
         answer = call_llm([
             {"role": "system", "content": synth_sys},
             {"role": "user", "content": synth_user}
-        ], max_tokens=1500)
+        ])
     except Exception as exc:
         answer = f"[Synthesis Error: {exc}]"
     t_generation = time.time() - t_gen_start
@@ -467,7 +482,7 @@ def run_docent_hybrid_rag(
 
 def run_docent_1stage(query_item: dict[str, Any]) -> dict[str, Any]:
     """Ablation: Docent's evidence, answered with the synthesis prompt only (no fact-table call)."""
-    return run_docent_hybrid_rag(query_item, "Docent 1-Stage (Ablation)", two_stage=False)
+    return run_docent_hybrid_rag(query_item, "D-CENT controlled, 1-stage (Ablation)", two_stage=False)
 
 
 def run_hybrid_2stage(query_item: dict[str, Any]) -> dict[str, Any]:
@@ -478,7 +493,7 @@ def run_hybrid_2stage(query_item: dict[str, Any]) -> dict[str, Any]:
     search_text = query_item["query"]
     if RETRIEVAL_INPUT == "entities":
         search_text += " " + " ".join(query_item["target_entities"])
-    chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=12 if CONTEXT_CHARS > 0 else 4, reranker=RERANKER)]
+    chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker=RERANKER)]
     evidence = "\n\n".join(
         f'<SOURCE_EVIDENCE id="chunk_{n}">\n  [사료 원문: {chunk}]\n</SOURCE_EVIDENCE>'
         for n, chunk in enumerate(pack_context(chunks, CHUNK_SEPARATOR), 1)
@@ -487,7 +502,151 @@ def run_hybrid_2stage(query_item: dict[str, Any]) -> dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Metric Evaluation Harness
+# 4. D-CENT end-to-end: the deployed system over HTTP
+# ─────────────────────────────────────────────────────────────────────────────
+class DcentClient:
+    """Calls docent.php the way static/docent.js does (CSRF token, form posts, retries on 403/429/5xx)."""
+
+    def __init__(self, url: str):
+        if not url:
+            raise RuntimeError("D-CENT 서버 주소가 없습니다: --dcent-url 또는 DOCENT_URL을 설정하세요 (예: http://localhost:8000/docent.php)")
+        self.url = url
+        self.cookies: dict[str, str] = {}
+        self.token = ""
+
+    def _refresh_token(self) -> None:
+        resp = requests.get(self.url, params={"csrf": "1"}, cookies=self.cookies, timeout=30)
+        resp.raise_for_status()
+        self.cookies.update(resp.cookies.get_dict())
+        self.token = resp.json()["csrf_token"]
+
+    def call(self, action: str, data: dict[str, Any], timeout: float = 180.0) -> Any:
+        if not self.token:
+            self._refresh_token()
+        last = ""
+        for _ in range(5):
+            resp = requests.post(self.url, params={"ajax": action}, data={**data, "csrf_token": self.token},
+                                 headers={"X-CSRF-Token": self.token}, cookies=self.cookies, timeout=timeout)
+            if resp.status_code == 200:
+                return resp.json()
+            last = f"{resp.status_code} {resp.text[:160]}"
+            if resp.status_code == 403:
+                self._refresh_token()
+            elif resp.status_code == 429:
+                wait = int(resp.headers.get("Retry-After", "60") or 60)
+                print(f" (D-CENT {action} 요청 제한, {wait}초 대기)...", end="", flush=True)
+                time.sleep(wait)
+            elif resp.status_code >= 500:
+                time.sleep(10)
+            else:
+                break
+        raise RuntimeError(f"D-CENT {action} 실패: {last}")
+
+
+_DCENT: DcentClient | None = None
+_KNOWN_ENTITIES: list[str] | None = None
+_CLIENT_STOP = {"무엇", "어떤", "누구", "알려줘", "설명해줘", "있습니까", "있는가", "관련"}
+
+
+def client_keywords(question: str) -> list[str]:
+    """Search keywords as static/docent.js derives them for a Korean question (classifyIntent)."""
+    global _KNOWN_ENTITIES
+    if _KNOWN_ENTITIES is None:
+        js = (ROOT / "static" / "docent.js").read_text(encoding="utf-8")
+        block = re.search(r"const KNOWN_ENTITIES = \[(.*?)\];", js, flags=re.DOTALL)
+        _KNOWN_ENTITIES = re.findall(r"'([^']+)'", block.group(1)) if block else []
+    q = question.strip()
+    found = [e for e in _KNOWN_ENTITIES if e in q]
+    tokens = [re.sub(r"(?:의|은|는|이|가|을|를|과|와|도|에서|에게|으로|로|에|란|이란)$", "", t).strip()
+              for t in re.split(r"[\s,·.?!~]+", q)]
+    tokens = [t for t in tokens if len(t) >= 2 and t not in _CLIENT_STOP]
+    keywords = list(dict.fromkeys(found + tokens))[:5]
+    return keywords or [q]
+
+
+def _pg_text(row: dict[str, Any]) -> str:
+    """Same string static/docent.js builds from a pg_prefetch row."""
+    snippets = "; ".join(f"{k}: {v}" for k, v in (row.get("snippets") or {}).items() if v)
+    return f"[{row.get('schema')}.{row.get('table')}] node={row.get('node_id')} rowid={row.get('rowid')} :: {snippets}"
+
+
+def run_dcent_e2e(query_item: dict[str, Any], use_paths: bool = True) -> dict[str, Any]:
+    """Deployed D-CENT pipeline: narrative (in parallel), analyze, graph, pg_prefetch, explain.
+
+    Only the question text is sent; the retrieval-input condition does not apply. explain
+    waits at most 20 s for the narrative request, as the web client does.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+    global _DCENT
+    if _DCENT is None:
+        _DCENT = DcentClient(DCENT_URL)
+    client = _DCENT
+    question = query_item["query"]
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        narrative_future = pool.submit(client.call, "narrative", {"term": question}) if use_paths else None
+        analysis = client.call("analyze", {"term": question})
+        keywords = client_keywords(question)
+        graph = client.call("graph", {"term": question, "keywords": json.dumps(keywords, ensure_ascii=False),
+                                      "intent_ko": question})
+        names = graph.get("prefetch_names") or [n.get("raw_id") for n in graph.get("nodes", []) if n.get("raw_id")]
+        refs = graph.get("record_refs") or []
+        rows = client.call("pg_prefetch", {"names": json.dumps(names, ensure_ascii=False),
+                                           "refs": json.dumps(refs, ensure_ascii=False)}) if (names or refs) else []
+        narrative = None
+        if narrative_future is not None:
+            try:
+                result = narrative_future.result(timeout=max(0.0, 20.0 - (time.time() - t0)) + 0.01)
+                narrative = result if result and result.get("rows") else None
+            except FutureTimeout:
+                narrative = None  # the client proceeds without it; explain then computes the paths itself
+            except Exception as exc:
+                print(f" (narrative 생략: {exc})", end="", flush=True)
+    t_retrieval = time.time() - t0
+
+    data = {
+        "term": question, "focus": (analysis or {}).get("focus", ""), "lang": "ko",
+        "evidences": json.dumps(graph.get("evidences", []), ensure_ascii=False),
+        "pg_texts": json.dumps([_pg_text(r) for r in rows], ensure_ascii=False),
+        "eval": "1", "temperature": str(GEN_TEMPERATURE), "top_p": str(GEN_TOP_P), "max_tokens": str(ANSWER_MAX_TOKENS),
+    }
+    if narrative:
+        data["narrative"] = json.dumps(narrative, ensure_ascii=False)
+    if not use_paths:
+        data["no_narrative"] = "1"
+    t_gen = time.time()
+    out = client.call("explain", data, timeout=300)
+    if "context" not in out:
+        raise RuntimeError("explain이 문맥을 반환하지 않았습니다: 서버에 DOCENT_EVAL_MODE=1이 설정되어 있는지 확인하세요")
+    t_generation = time.time() - t_gen
+    context = out.get("context", "")
+    answer = out.get("text") or "[Error: empty answer]"
+    fact_table = out.get("fact_table", "")
+    return {
+        "model": "D-CENT (end-to-end)" if use_paths else "D-CENT without narrative paths (Ablation)",
+        "answer": answer,
+        "contexts": [context] if context else [],
+        # The server skips the fact table silently when that call fails; count it as a failed run.
+        "fact_table": fact_table if (fact_table or not context) else "[Fact Extraction Error: empty]",
+        "context_chars": len(context),
+        "prompt_tokens": int(out.get("prompt_chars", 0)) // 3,
+        "output_tokens": len(answer) // 3,
+        "cypher_record_count": graph.get("cypher_record_count", 0),
+        "narrative_used": bool(out.get("graphrag_used")),
+        "retrieval_time": round(t_retrieval, 3),
+        "generation_time": round(t_generation, 3),
+        "total_time": round(t_retrieval + t_generation, 3),
+    }
+
+
+def run_dcent_no_paths(query_item: dict[str, Any]) -> dict[str, Any]:
+    """Ablation: the deployed pipeline without narrative paths."""
+    return run_dcent_e2e(query_item, use_paths=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Metric Evaluation Harness
 # ─────────────────────────────────────────────────────────────────────────────
 def is_generation_failure(answer: str) -> bool:
     """True when the pipeline produced no answer (API error), as opposed to a wrong one."""
@@ -665,21 +824,24 @@ MODEL_REGISTRY = {
     "hybrid": ("Hybrid Vector RAG (BM25+Dense+Rerank)", run_hybrid_vector_rag),
     "graph": ("Standard GraphRAG", run_graph_rag),
     "msgraphrag": ("Microsoft GraphRAG", run_ms_graphrag),
-    "docent": ("Docent Hybrid RAG (Proposed)", run_docent_hybrid_rag),
-    "docent_1stage": ("Docent 1-Stage (Ablation)", run_docent_1stage),
+    "dcent": ("D-CENT (end-to-end)", run_dcent_e2e),
+    "dcent_no_paths": ("D-CENT without narrative paths (Ablation)", run_dcent_no_paths),
+    "docent": ("D-CENT (controlled evidence)", run_docent_hybrid_rag),
+    "docent_1stage": ("D-CENT controlled, 1-stage (Ablation)", run_docent_1stage),
     "hybrid_2stage": ("Hybrid + 2-Stage (Ablation)", run_hybrid_2stage),
 }
+DEFAULT_MODELS = "vector,hybrid,graph,dcent,dcent_no_paths,docent,docent_1stage,hybrid_2stage"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Evaluate Vector RAG vs GraphRAG vs Docent Hybrid RAG.")
+    parser = argparse.ArgumentParser(description="Evaluate passage, hybrid and graph-only baselines against D-CENT.")
     parser.add_argument("--quick", action="store_true", help="Run on 3 representative queries (1 Multi-hop, 1 Spatial, 1 Trap)")
     parser.add_argument("--single", action="store_true", help="Run single query (Q_MH_01) and display full response_text for each model")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries to evaluate")
     parser.add_argument("--delay", type=float, default=15.0, help="Delay in seconds between API calls to prevent 429 rate limit (default: 15.0)")
     parser.add_argument("--ragas", action="store_true", help="Run RAGAS metrics after generating benchmark responses")
-    parser.add_argument("--models", default="vector,hybrid,graph,docent",
-                        help=f"Comma-separated pipelines to run. Choices: {','.join(MODEL_REGISTRY)} (default: vector,hybrid,graph,docent)")
+    parser.add_argument("--models", default=DEFAULT_MODELS,
+                        help=f"Comma-separated pipelines to run. Choices: {','.join(MODEL_REGISTRY)} (default: {DEFAULT_MODELS})")
     parser.add_argument("--reranker", choices=["cross-encoder", "none"], default="cross-encoder",
                         help="Reranker for the hybrid baseline (default: cross-encoder)")
     parser.add_argument("--retrieval-input", choices=["question", "entities"], default="question",
@@ -687,8 +849,12 @@ def main() -> int:
                              "or the benchmark's gold target_entities")
     parser.add_argument("--temperature", type=float, default=0.0, help="Generation temperature for every LLM call (default: 0.0)")
     parser.add_argument("--top-p", type=float, default=0.8, help="Generation top_p for every LLM call (default: 0.8)")
-    parser.add_argument("--context-chars", type=int, default=2400,
-                        help="Retrieved-context character budget shared by all pipelines (default: 2400; 0 = legacy per-pipeline sizes)")
+    parser.add_argument("--context-chars", type=int, default=11000,
+                        help="Retrieved-context character budget shared by all pipelines (default: 11000, the deployed system's; "
+                             "0 = legacy per-pipeline sizes). The deployed system reads its budget from DOCENT_CONTEXT_CHARS on the server")
+    parser.add_argument("--max-output-tokens", type=int, default=1500, help="Output limit of every answer call (default: 1500)")
+    parser.add_argument("--dcent-url", default=setting("DOCENT_URL", ""),
+                        help="docent.php of a D-CENT server started with DOCENT_EVAL_MODE=1 (default: DOCENT_URL)")
     parser.add_argument("--retries", type=int, default=2, help="Extra attempts for a failed generation (default: 2)")
     parser.add_argument("--dataset", type=Path, default=DATASET_PATH,
                         help="Benchmark JSON to evaluate (default: dataset/multihop_benchmark_dataset.json)")
@@ -696,10 +862,11 @@ def main() -> int:
                         help="Directory for all result files, so runs can be kept apart (default: evaluation/results)")
     args = parser.parse_args()
 
-    global RERANKER, RETRIEVAL_INPUT, GEN_TEMPERATURE, GEN_TOP_P, CONTEXT_CHARS
+    global RERANKER, RETRIEVAL_INPUT, GEN_TEMPERATURE, GEN_TOP_P, CONTEXT_CHARS, ANSWER_MAX_TOKENS, DCENT_URL
     RERANKER = args.reranker
     RETRIEVAL_INPUT = args.retrieval_input
     GEN_TEMPERATURE, GEN_TOP_P, CONTEXT_CHARS = args.temperature, args.top_p, args.context_chars
+    ANSWER_MAX_TOKENS, DCENT_URL = args.max_output_tokens, args.dcent_url
     model_keys = [k.strip() for k in args.models.split(",") if k.strip()]
     unknown = [k for k in model_keys if k not in MODEL_REGISTRY]
     if unknown:
@@ -732,6 +899,13 @@ def main() -> int:
           f"문맥 예산={CONTEXT_CHARS or '제한 없음'}자, 재시도={args.retries}회")
 
     models = [MODEL_REGISTRY[k] for k in model_keys]
+    if any(k.startswith("dcent") for k in model_keys):
+        if not DCENT_URL:
+            parser.error("dcent 조건에는 --dcent-url 또는 DOCENT_URL이 필요합니다 (DOCENT_EVAL_MODE=1로 실행 중인 docent.php)")
+        if CONTEXT_CHARS not in (0, 11000):
+            print(f"   ⚠️ 배포 시스템의 문맥 예산은 서버의 DOCENT_CONTEXT_CHARS(기본 11000)로 정해집니다: 서버도 {CONTEXT_CHARS}로 맞추세요")
+        if RETRIEVAL_INPUT == "entities":
+            print("   ⚠️ dcent 조건은 질문 원문만 받으므로 --retrieval-input entities가 적용되지 않습니다")
 
     detailed_records = []
     ragas_records = []
@@ -784,6 +958,8 @@ def main() -> int:
                 "output_tokens": res["output_tokens"],
                 "latency_sec": res["total_time"],
                 "answer_snippet": res["answer"].replace("\n", " ")[:120],
+                "cypher_record_count": res.get("cypher_record_count", ""),
+                "narrative_used": res.get("narrative_used", ""),
                 "generation_failed": failed,
                 "trap_flagged_text": trap_flagged,
                 **evaluate_retrieval_direct(item, res.get("contexts", [])),

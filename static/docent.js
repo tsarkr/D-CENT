@@ -829,9 +829,9 @@
 
             /* 3. PG prefetch */
             const pn = (Array.isArray(gd.prefetch_names)&&gd.prefetch_names.length>0) ? gd.prefetch_names : currentNodes.map(n=>n.raw_id);
-            if (pn.length>0) {
+            if (pn.length>0 || (gd.record_refs||[]).length>0) {
                 const s3=addStep('📚','PostgreSQL 사료 원문 연동 중...');
-                const rows = await api('pg_prefetch',{names:JSON.stringify(pn)});
+                const rows = await api('pg_prefetch',{names:JSON.stringify(pn), refs:JSON.stringify(gd.record_refs||[])});
                 pgPrefetchTexts=rows.map(r=>{let s=[];for(let k in r.snippets){if(r.snippets[k])s.push(`${k}: ${r.snippets[k]}`);}return`[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${s.join('; ')}`;});
                 doneStep(s3,'✅',`PostgreSQL 사료 ${pgPrefetchTexts.length}건 연동 완료`);
                 logSystem(`PG 사료: ${pgPrefetchTexts.length}건`);

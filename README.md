@@ -326,8 +326,13 @@ The compared systems are:
 - **Standard GraphRAG**: graph triple/context retrieval
 - **Microsoft GraphRAG** (opt-in): the reference implementation, queried through
   its CLI
-- **Docent Hybrid RAG**: combined graph and source retrieval with strict
-  evidence-grounded prompting
+- **D-CENT (end-to-end)**: the deployed system called over HTTP with the
+  question text (generated Cypher, full-text cross-check, narrative paths,
+  record retrieval by document identifiers, two-stage generation)
+- **D-CENT without narrative paths**: the same, with the paths left out
+- **D-CENT (controlled evidence)**: name-matched triples and bibliographic
+  records assembled by the harness, two-stage generation; with the
+  `docent_1stage` and `hybrid_2stage` ablations of the generation procedure
 
 Run the complete RAG comparison:
 
@@ -420,14 +425,30 @@ All pipelines run under the same conditions, set by these flags:
 |---|---|---|
 | `--retrieval-input` | `question` | Every pipeline retrieves with entities extracted from the question text (one shared LLM call per question). `entities` gives every pipeline the gold `target_entities` instead. |
 | `--temperature`, `--top-p` | `0.0`, `0.8` | Used for every generation call. |
-| `--context-chars` | `2400` | Retrieved-context budget shared by all pipelines (`0` restores the old per-pipeline sizes). |
+| `--context-chars` | `11000` | Retrieved-context budget shared by all pipelines, equal to the deployed system's (`DOCENT_CONTEXT_CHARS` on the server; narrative paths count against it). `0` restores the old per-pipeline sizes. |
+| `--max-output-tokens` | `1500` | Output limit of every answer call, including the deployed system's in evaluation mode. |
 | `--retries` | `2` | Extra attempts when a generation fails (rate limits). |
 
 Docent still issues two generation calls (fact table, then synthesis), so its
 total prompt is larger than the baselines' even with the same retrieved
 context; `context_chars` and `prompt_tokens` are reported per question.
 
-Select pipelines with `--models` (default `vector,hybrid,graph,docent`). The
+Select pipelines with `--models` (default
+`vector,hybrid,graph,dcent,dcent_no_paths,docent,docent_1stage,hybrid_2stage`).
+
+The `dcent` conditions call a running D-CENT server. Start it with
+`DOCENT_EVAL_MODE=1` so that `explain` accepts `eval=1`, answers as JSON with
+the context and fact table it generated from, applies the shared generation
+settings, and asks for record citations; then pass its address:
+
+```bash
+DOCENT_EVAL_MODE=1 php -S localhost:8000          # in the project root
+.venv3.14/bin/python evaluation/eval_rag_comparison.py --delay 15 \
+  --dcent-url http://localhost:8000/docent.php
+```
+
+`explain` allows five requests per minute per client, so keep `--delay` at 15
+seconds or more. The
 hybrid baseline builds its dense index once under `vector_store/baselines/`;
 set `BASELINE_EMBED_MODEL` / `BASELINE_RERANK_MODEL` to change models.
 

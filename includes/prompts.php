@@ -276,3 +276,19 @@ function _explain_prompts_zh(string $term, string $context, string $fact_table):
 
     return ['system' => $sys, 'user' => $user];
 }
+
+/**
+ * 평가 구성에서 해설 시스템 프롬프트 끝에 붙이는 근거 표기 규칙.
+ * 기록 식별자는 build_budgeted_pg_context()가 붙이는 "테이블-rowid" 형식입니다.
+ */
+function get_citation_rule(string $lang): string {
+    if ($lang === 'en') {
+        return "[Citations] After each key claim, give its source in parentheses: either a record identifier exactly as written in "
+             . "<SOURCE_EVIDENCE id=\"...\"> (e.g., raw_bibliography-123) or an incident name exactly as it appears in the evidence. "
+             . "Do not cite relation names, block labels (such as g_1), or terms such as 'knowledge graph'. "
+             . "If the evidence does not support a premise of the question, reject it or state that the records do not confirm it.";
+    }
+    return "[근거 표기] 각 핵심 주장 뒤에 근거를 괄호로 표시하십시오. 괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 적힌 기록 식별자"
+         . "(예: raw_bibliography-123) 또는 문맥에 그대로 적힌 사건명만 쓰십시오. 관계 이름, 블록 이름(g_1 등), "
+         . "'지식그래프' 같은 표기는 근거로 쓰지 마십시오. 근거가 없는 질문의 전제는 부정하거나 '자료에서 확인되지 않음'이라고 답하십시오.";
+}

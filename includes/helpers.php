@@ -349,10 +349,12 @@ function build_budgeted_pg_context($pg_texts, $lang, $max_items, $min_chars, $ma
         $text = normalize_whitespace_text($t);
         if ($text === '') continue;
 
-        $node_id = ''; $rowid = '';
+        $node_id = ''; $rowid = ''; $table = '';
         if (preg_match('/node=([^\s]+)/u', $text, $nm)) $node_id = trim($nm[1]);
         if (preg_match('/rowid=([^\s]+)/u', $text, $rm)) $rowid = trim($rm[1]);
-        $id_attr = $rowid ? "pg_{$rowid}" : "pg_" . ($idx + 1);
+        if (preg_match('/^\[[^\].]*\.([A-Za-z0-9_]+)\]/u', $text, $tm)) $table = $tm[1];
+        // 기록 식별자는 "테이블-rowid" (예: raw_bibliography-123): 테이블이 다르면 rowid가 겹칠 수 있습니다.
+        $id_attr = $rowid ? (($table !== '' ? $table : 'pg') . "-{$rowid}") : "pg_" . ($idx + 1);
         $entity_attr = htmlspecialchars($node_id ?: "기록_{$idx}", ENT_QUOTES, 'UTF-8');
 
         $region = ''; $event = '';

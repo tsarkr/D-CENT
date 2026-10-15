@@ -319,7 +319,11 @@ MCP 클라이언트에는 `mcp_client_config.json`의 절대경로를 현재 환
   ([evaluation/baselines.py](./evaluation/baselines.py)). 질문 텍스트만으로 검색
 - **Standard GraphRAG**: 그래프 triple/context 기반 검색
 - **Microsoft GraphRAG** (선택): 원형 구현을 CLI로 호출
-- **Docent Hybrid RAG**: 그래프·원문을 결합한 검색 및 엄격 모드 해설
+- **D-CENT (엔드투엔드)**: 배포 시스템을 질문 원문으로 HTTP 호출(생성 Cypher, 전문 검색 교차 확인,
+  서사 경로, 문서 식별자 기반 기록 조회, 2단계 생성)
+- **D-CENT 서사 경로 제외**: 위와 같고 서사 경로만 뺀 비교 조건
+- **D-CENT (통제 조건)**: 하네스가 이름 일치 triple과 서지 기록으로 구성한 근거, 2단계 생성.
+  생성 절차 비교 조건 `docent_1stage`, `hybrid_2stage` 포함
 
 기본 전체 평가:
 
@@ -409,14 +413,29 @@ RAGAS parser와 별도로 Ollama JSON API를 직접 사용하는 Judge가 있습
 |---|---|---|
 | `--retrieval-input` | `question` | 모든 파이프라인이 질문 문장에서 추출한 개체로 검색합니다(질문당 LLM 호출 1회를 공유). `entities`는 모든 파이프라인에 정답 `target_entities`를 줍니다. |
 | `--temperature`, `--top-p` | `0.0`, `0.8` | 모든 생성 호출에 적용됩니다. |
-| `--context-chars` | `2400` | 모든 파이프라인이 공유하는 검색 문맥 문자 수 예산(`0`이면 예전의 파이프라인별 크기). |
+| `--context-chars` | `11000` | 모든 파이프라인이 공유하는 검색 문맥 문자 수 예산. 배포 시스템의 예산(서버의 `DOCENT_CONTEXT_CHARS`, 서사 경로 포함)과 같습니다. `0`이면 예전의 파이프라인별 크기. |
+| `--max-output-tokens` | `1500` | 모든 답변 생성 호출의 출력 한도(평가 모드의 배포 시스템 포함). |
 | `--retries` | `2` | 생성 실패(요청 제한) 시 추가 시도 횟수. |
 
 Docent는 생성 호출을 두 번(팩트 표, 종합) 하므로 검색 문맥이 같아도 전체
 프롬프트는 베이스라인보다 큽니다. 질문별 `context_chars`와 `prompt_tokens`가
 CSV에 기록됩니다.
 
-`--models`로 실행할 파이프라인을 고릅니다(기본값 `vector,hybrid,graph,docent`).
+`--models`로 실행할 파이프라인을 고릅니다(기본값
+`vector,hybrid,graph,dcent,dcent_no_paths,docent,docent_1stage,hybrid_2stage`).
+
+`dcent`(배포 시스템 엔드투엔드)와 `dcent_no_paths`(서사 경로 제외) 조건은 실행 중인
+D-CENT 서버를 HTTP로 호출합니다. 서버를 `DOCENT_EVAL_MODE=1`로 띄우면 `explain`이
+`eval=1` 요청에 대해 생성에 쓴 문맥과 팩트 표를 JSON으로 함께 돌려주고, 공통 생성
+조건을 적용하며, 기록 식별자 인용을 요구합니다.
+
+```bash
+DOCENT_EVAL_MODE=1 php -S localhost:8000          # 프로젝트 루트에서
+.venv3.14/bin/python evaluation/eval_rag_comparison.py --delay 15 \
+  --dcent-url http://localhost:8000/docent.php
+```
+
+`explain`은 클라이언트당 분당 5회로 제한되므로 `--delay`는 15초 이상으로 두십시오.
 하이브리드 베이스라인은 dense 인덱스를 `vector_store/baselines/`에 한 번만
 만듭니다. 모델은 `BASELINE_EMBED_MODEL`, `BASELINE_RERANK_MODEL`로 바꿉니다.
 
