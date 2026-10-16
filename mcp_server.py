@@ -1,29 +1,10 @@
-import os
 import asyncio
-import psycopg2
 from psycopg2.extras import RealDictCursor
-from neo4j import GraphDatabase
 import mcp.server.stdio
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
-from scripts.config import load_secrets, SECRETS
-
-# Connection helpers
-def get_pg_connection():
-    return psycopg2.connect(
-        host=SECRETS.get("PG_HOST", "localhost"),
-        port=int(SECRETS.get("PG_PORT", 5432)),
-        dbname=SECRETS.get("PG_DATABASE", "postgres"),
-        user=SECRETS.get("PG_USER", "postgres"),
-        password=SECRETS.get("PG_PASSWORD", "")
-    )
-
-def get_neo4j_driver():
-    return GraphDatabase.driver(
-        SECRETS.get("NEO4J_URI", "bolt://localhost:7687"),
-        auth=(SECRETS.get("NEO4J_USER", "neo4j"), SECRETS.get("NEO4J_PASSWORD", ""))
-    )
+from pipeline.config import get_neo4j_driver, get_pg_connection
 
 # Initialize MCP Server
 server = Server("docent-mcp-server")

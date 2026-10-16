@@ -1,80 +1,53 @@
-# Docent
+# D-CENT
 
-Docent is a research data and retrieval-augmented generation (RAG) repository
-for connecting March 1st Movement historical sources with PostgreSQL, TEI/XML,
-CIDOC-CRM, and Neo4j.
+A research repository that links the records of the March First Movement through PostgreSQL, TEI,
+CIDOC-CRM, and Neo4j, and reconstructs for each question a dated narrative of incidents with citations
+to the records. 한국어: [README_ko.md](./README_ko.md).
 
-The repository has four layers:
+## Layout
 
-1. **Preprocessing** loads CSV/XLSX source files into PostgreSQL `raw_*` tables
-   and creates and refines row-level TEI.
-2. **Ontology processing** converts TEI entities into CIDOC-CRM activities and
-   actors, then loads the resulting nodes and relationships into Neo4j.
-3. **Serving** uses [docent.php](./docent.php) to search Neo4j and PostgreSQL
-   and generate evidence-grounded multilingual explanations. The
-   [mcp_server.py](./mcp_server.py) process exposes read-only database tools to
-   IDE and desktop MCP clients.
-4. **Evaluation** compares Vector RAG, Standard GraphRAG, and Docent Hybrid RAG
-   and produces RAGAS and retrieval-diagnostic metrics.
-
-There is no `app.py` or Streamlit application in the current repository. The
-web entry points are [index.html](./index.html) and
-[docent.php](./docent.php).
-
-## Architecture
+| Path | Function | Run |
+|---|---|---|
+| [pipeline/](./pipeline/) | Data build: source files → PostgreSQL/TEI → Neo4j graph | `python -m pipeline` |
+| [docent.php](./docent.php), [includes/](./includes/), [static/](./static/) | Web docent (query analysis, Cypher generation, narrative paths, two-stage generation) | PHP server |
+| [evaluation/](./evaluation/) | Evaluation: benchmark, system comparison, expert judgment, report | `python -m evaluation` |
+| [mcp_server.py](./mcp_server.py) | Read-only database tools for MCP clients | `python mcp_server.py` |
+| [docent_cli.php](./docent_cli.php) | The docent's processing of one question in the terminal (debugging) | `php docent_cli.php "question" en` |
+| [Latex/](./Latex/) | Manuscript | |
 
 ```text
-data/*.csv, data/*.xlsx
-        │
-        ▼
-upload_data.py
-        │  PostgreSQL raw_* tables
-        ▼
-scripts/pg_to_pg_with_tei.py
-        │  rowid + TEI/XML
-        ▼
-scripts/tag_tei_with_dict.py
-        │  dictionary/LLM-based TEI refinement
-        ▼
-scripts/link_persnames_i815.py
-scripts/extract_all_entities.py
-        │
-        ├── Extracted_Historical_Entities.csv/.xlsx
-        └── scripts/generate_cidoc_mappings.py
-                    │
-                    ├── tei_cidoc_mappings
-                    └── CIDOC_Timeline_Mappings.ttl
-                                │
-                                ▼
-                    scripts/graph_builder.py
-                                │
-                                ▼
-                    Neo4j graph
-                    (thesaurus_to_neo4j.py, romanize_names.py)
-                                │
-                                ▼
-                    PHP Docent / MCP
+pipeline/
+  __main__.py   commands: build, check, inspect
+  config.py     settings (environment → .streamlit/secrets.toml), paths, database connections
+  text.py       Hanja readings (initial-sound law), TEI ruby helpers
+  ingest.py     1  source files → raw_* tables, TEI per row
+  entities.py   2  person-name tagging (Hanja readings as ruby, persName), entity list for review
+  authority.py  3  links to the biographical dictionary (i815)
+  cidoc.py      4  CIDOC-CRM mappings
+  indexes.py    5  PostgreSQL search indexes
+  graph.py      6  Neo4j graph
+  thesaurus.py  7  Korean History Thesaurus
+  names.py      8  name readings, romanized variants, labels of mention (Activity) nodes
+  inspect.py    read-only diagnostics
+  check.py      offline self-test
+evaluation/
+  __main__.py   commands: dataset, run, report, judge, expert, rate
+  common.py     paths, statistics (bootstrap, permutation test, Holm, kappa), Excel workbooks
+  benchmark.py  generation and validation of the benchmark
+  systems.py    compared systems and shared conditions
+  metrics.py    automatic measures, citation verification, paired comparison
+  run.py        running and scoring, context-precision judge
+  human.py      expert validation of the graph, blind rating of answers
+  report.py     report (report.md, LaTeX tables, console summary)
+  dataset/      questions.json (candidates), benchmark.json (validated), third_party/ (external questions)
+  annotation/   workbooks for historians (expert/, rating/, rating_key/)
+  results/      one folder per run; graph/ (graph size, expert validation)
 ```
 
-## Requirements
+## Installation and settings
 
-- Python 3.11 or newer
-- PostgreSQL
-- Neo4j 5.x
-- Ollama
-  - Not required for the data pipeline or the query path
-  - Evaluation only: an embedding model for the hybrid baseline
-    (`BASELINE_EMBED_MODEL`, e.g. `bge-m3`) and `gemma4:26b` for the
-    context-precision judge
-- PHP and Composer
-  - `laudis/neo4j-php-client`
-  - `vlucas/phpdotenv`
-- Internet access for the first i815 person-linking run
-
-Python dependencies are listed in [requirements.txt](./requirements.txt).
-PHP dependencies are defined in [composer.json](./composer.json).
-
-## Installation
+- Python 3.11+, PostgreSQL, Neo4j 5.x, PHP and Composer
+- For the evaluation only: Ollama (embedding `nomic-embed-text` for the hybrid baseline, judge `gemma4:26b`)
 
 ```bash
 python3 -m venv .venv3.14
@@ -82,26 +55,7 @@ python3 -m venv .venv3.14
 composer install
 ```
 
-The pipeline searches for Python in this order:
-`.venv3.14/bin/python`, `.venv/bin/python3`, and `.venv/bin/python`.
-Replace the executable path in the examples if you use another environment.
-
-Prepare the Ollama models separately:
-
-```bash
-ollama pull qwen3.6
-ollama pull nomic-embed-text
-ollama pull gemma4:26b       # required for local RAGAS/Judge runs
-```
-
-## Configuration
-
-Python code gives precedence to environment variables and then reads
-`.streamlit/secrets.toml` through [scripts/config.py](./scripts/config.py).
-The PHP layer reads environment variables, `.env`, and
-`.streamlit/secrets.toml`.
-
-Never commit passwords or API keys.
+Settings are read from environment variables, then from `.streamlit/secrets.toml`. Do not commit secrets.
 
 ```toml
 PG_HOST = "localhost"
@@ -109,591 +63,160 @@ PG_PORT = "5432"
 PG_DATABASE = "historical"
 PG_USER = "postgres"
 PG_PASSWORD = "change-me"
-
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "change-me"
-
 GEMINI_API_KEY = "..."
 GEMINI_MODEL = "gemini-flash-lite-latest"
+
+# Evaluation (only when needed)
+DOCENT_URL = "http://localhost:8000/docent.php"   # server called by the dcent system
+EVAL_DELAY = "15"                                 # seconds between calls
 ```
 
-Important optional settings:
+Optional web-server settings: `DOCENT_CONTEXT_CHARS` (generation context budget, default 11000),
+`DOCENT_EVAL_MODE=1` (allow evaluation mode), `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `TEI_TABLE_PREFIX` | `raw_` | Prefix for TEI source tables |
-| `TEI_TABLES` | all `raw_*` tables | Comma-separated TEI table selection |
-| `TEI_COMMIT_BATCH_SIZE` | `50` | TEI database commit batch size |
-| `USE_PROCESS_POOL` | `1` | Enable the TEI tagging process pool |
-| `MAX_WORKERS` | CPU-dependent | Number of TEI workers |
-| `CHUNK_SIZE` | `200` | TEI tagging batch size |
-| `SKIP_HITL_PAUSE` | unset | Skip the human-review pause when set to `1`, `true`, `yes`, or `on` |
-| `PIPELINE_STAGE` | `all` | Select `all`, `rdbms`, or `neo4j` |
-| `OLLAMA_HOST` | Ollama default | Ollama endpoint used by the evaluation scripts |
-| `BASELINE_EMBED_MODEL` | `OLLAMA_EMBED_MODEL` or `nomic-embed-text` | Dense model of the hybrid evaluation baseline |
-| `GEMINI_TEMPERATURE` | `0.1` | PHP Gemini temperature |
-| `GEMINI_TOP_P` | `0.85` | PHP Gemini top-p |
-| `RAGAS_PROVIDER` | `ollama` | Select `ollama` or `gemini` |
-
-## Full data pipeline
-
-Check the plan before running a database-changing pipeline:
+## Building the data
 
 ```bash
-.venv3.14/bin/python run_pipeline.py --dry-run
+.venv3.14/bin/python -m pipeline build          # everything (PostgreSQL/TEI → Neo4j)
+.venv3.14/bin/python -m pipeline build rdbms    # steps 1-5 only
+.venv3.14/bin/python -m pipeline build graph    # steps 6-8 only (from existing PostgreSQL data)
+.venv3.14/bin/python -m pipeline build --yes    # without the pause for the entity-list review
+.venv3.14/bin/python -m pipeline check          # self-test without databases
 ```
 
-Run all stages:
+Each step runs in its own process, and the build stops at the first failure. After step 2 it pauses so
+that `data/output/Extracted_Historical_Entities.xlsx` can be reviewed; press Enter to continue.
+The pipeline creates no embeddings.
+
+- Step 1 drops and recreates the `raw_*` tables; check backups before running it on a production database.
+- Steps 6-8 rebuild the Neo4j graph.
+- The i815 dictionary index is cached in `data/i815_person_index.json`; delete it to download it again.
+- The thesaurus CSV is the default file in `data/` or `THESAURUS_CSV`.
+
+Diagnostics (read-only):
 
 ```bash
-.venv3.14/bin/python run_pipeline.py
+.venv3.14/bin/python -m pipeline inspect names "question"     # namesIndex lookup
+.venv3.14/bin/python -m pipeline inspect family 유관순          # kinship data of a person
+.venv3.14/bin/python -m pipeline inspect search 유관순 아우내   # record search timing and index use
+.venv3.14/bin/python -m pipeline inspect counts                 # graph size → evaluation/results/graph/
+.venv3.14/bin/python -m pipeline inspect sparsity               # Event-layer sparsity → evaluation/results/graph/
 ```
 
-[run_pipeline.py](./run_pipeline.py) executes these stages:
-
-1. [upload_data.py](./upload_data.py) loads CSV/XLSX files from `data/` into
-   PostgreSQL `raw_*` tables and writes column mappings.
-2. [scripts/pg_to_pg_with_tei.py](./scripts/pg_to_pg_with_tei.py) creates
-   `rowid` and TEI columns for source rows.
-3. [scripts/tag_tei_with_dict.py](./scripts/tag_tei_with_dict.py) refines
-   Chinese characters, names, places, and dates and adds TEI tags.
-4. [scripts/link_persnames_i815.py](./scripts/link_persnames_i815.py) links
-   person candidates with exactly one i815 match.
-5. [scripts/extract_all_entities.py](./scripts/extract_all_entities.py)
-   extracts TEI entities into `Extracted_Historical_Entities.csv`.
-6. The default run pauses for a human review of the generated XLSX file.
-7. [scripts/generate_cidoc_mappings.py](./scripts/generate_cidoc_mappings.py)
-   creates `tei_cidoc_mappings` and
-   [CIDOC_Timeline_Mappings.ttl](./CIDOC_Timeline_Mappings.ttl).
-8. [scripts/graph_builder.py](./scripts/graph_builder.py) builds the Neo4j
-   nodes and relationships.
-9. [thesaurus_to_neo4j.py](./thesaurus_to_neo4j.py) loads the thesaurus.
-10. [scripts/romanize_names.py](./scripts/romanize_names.py) adds romanized
-    name variants (e.g. Lee/Yi/Rhee Dong-hwi) to Person nodes and to the
-    `namesIndex` full-text index.
-
-Skip the human-review pause:
+## Web docent
 
 ```bash
-.venv3.14/bin/python run_pipeline.py --skip-hitl
+php -S 127.0.0.1:8000      # in the repository root
 ```
 
-Run only one pipeline stage:
+Open <http://127.0.0.1:8000/docent.php>. One question is answered through these requests:
 
-```bash
-# PostgreSQL/TEI/CIDOC preprocessing
-.venv3.14/bin/python run_pipeline.py --stage rdbms --skip-hitl
-
-# Neo4j graph, thesaurus, and romanized names from existing RDBMS output
-.venv3.14/bin/python run_pipeline.py --stage neo4j
-```
-
-The pipeline creates no embeddings: retrieval uses Cypher, the full-text
-index, and traversal templates only.
-
-Re-running `upload_data.py` drops and recreates target tables, so derived
-columns such as `tei` and `tei_status` are removed. After reloading source data,
-run the TEI and later stages again. [graph_builder.py](./scripts/graph_builder.py)
-also changes the graph and is not needed for read-only search or UI work.
-
-### Individual preprocessing commands
-
-```bash
-# Load source files
-.venv3.14/bin/python upload_data.py
-
-# Process selected tables
-TEI_TABLES=raw_event_info,raw_bibliography \
-  .venv3.14/bin/python scripts/pg_to_pg_with_tei.py
-
-# Refine TEI
-.venv3.14/bin/python scripts/tag_tei_with_dict.py --limit 100 --skip-hitl
-.venv3.14/bin/python scripts/tag_tei_with_dict.py --all --skip-hitl
-
-# Preview i815 linking before applying changes
-.venv3.14/bin/python scripts/link_persnames_i815.py --dry-run --limit 20
-.venv3.14/bin/python scripts/link_persnames_i815.py --apply
-
-# Extract entities and generate CIDOC mappings
-.venv3.14/bin/python scripts/extract_all_entities.py
-.venv3.14/bin/python scripts/generate_cidoc_mappings.py
-```
-
-`upload_data.py` and graph-building scripts modify databases. Verify the target
-and make a backup before running them against operational data.
-
-## PHP Docent
-
-[docent.php](./docent.php) provides the web UI/API and applies CSRF, Origin, and
-rate-limit checks to AJAX requests. Start a local PHP server from the repository
-root:
-
-```bash
-php -S 127.0.0.1:8000
-```
-
-Open <http://127.0.0.1:8000/docent.php> or
-[index.html](./index.html).
-
-The CLI debugging entry point is
-[scripts/run_docent_pipeline.php](./scripts/run_docent_pipeline.php):
-
-```bash
-php scripts/run_docent_pipeline.php "Suwon Sagang-ri protest process" en
-```
-
-Available AJAX actions:
-
-| Action | Purpose |
+| Action | Function |
 |---|---|
-| `analyze` | Analyze language, focus, search keywords, and intent |
-| `graph` | Generate Text-to-Cypher, query Neo4j, and build graph evidence |
-| `pg_prefetch` | Retrieve PostgreSQL source records for graph candidates |
-| `explain` | Build fact evidence and generate the final explanation |
-| `node_detail` | Retrieve source details for a graph node |
+| `narrative` | dated narrative paths from the persons and places in the question (in parallel with graph) |
+| `analyze` | language, focus, and keywords of the question |
+| `graph` | Text-to-Cypher (read-only guard) with a full-text cross-check; record identifiers of document nodes |
+| `pg_prefetch` | record text by identifier, remaining slots by name |
+| `explain` | context budget (paths → graph evidence → record text) → fact table → answer |
+| `node_detail` | records behind a graph node |
 
-The search and generation flow is:
+Generated Cypher and step timings are written to the PHP error log with the prefix `[Docent]`. Incident dates
+are properties of Event nodes; validity periods of relations are not modeled.
 
-```text
-query
-  │
-  ├─ analyze: Gemini JSON intent/keyword analysis
-  │            local token fallback on failure
-  │
-  ├─ graph: Text-to-Cypher generation, read-only validation, Neo4j execution
-  │         namesIndex and CONTAINS fallback when needed
-  │
-  ├─ pg_prefetch: PostgreSQL source retrieval
-  │
-  └─ explain:
-       evidence budget
-       → GraphRAG entity/multi-hop enrichment
-       → Stage 1 fact table
-       → Stage 2 multilingual historical explanation
+## Evaluation
+
+```bash
+.venv3.14/bin/python -m evaluation dataset              # validate questions → dataset/benchmark.json
+.venv3.14/bin/python -m evaluation run --quick          # three questions, as a check
+.venv3.14/bin/python -m evaluation run                  # full run → results/<date_time>/report.md
+.venv3.14/bin/python -m evaluation run --resume         # continue an interrupted run
+.venv3.14/bin/python -m evaluation report               # report of the latest run
+.venv3.14/bin/python -m evaluation report RUN1 RUN2     # several runs combined
+.venv3.14/bin/python -m evaluation judge                # context precision (secondary, Ollama)
 ```
 
-Generated Cypher is written to the PHP `error_log` with these prefixes:
+`run` takes only `--quick`, `--limit N`, `--systems`, and `--resume`. The generation conditions are those of
+the paper and fixed: temperature 0, top-p 0.8, 1,500 output tokens per answer, 11,000 characters of evidence
+per question, retrieval with entities extracted once from the question (no system sees the gold entities),
+and two retries of a failed generation.
 
-```text
-[Docent][Text-to-Cypher] generated query ...
-[Docent][Neo4j] executing dynamic Cypher:
-[Docent][Neo4j] dynamic Cypher returned N record(s)
+| `--systems` key | System |
+|---|---|
+| `passage` | Passage baseline: bibliographic records containing an entity string |
+| `hybrid` | Hybrid baseline: BM25 + dense → RRF → cross-encoder rerank |
+| `graph` | Graph-only baseline: triples found by entity name |
+| `dcent` | D-CENT end to end: the deployed system over HTTP |
+| `controlled` | D-CENT with controlled evidence: name-matched triples and records, two-stage generation |
+| `no-paths` | Ablation A: end to end without narrative paths |
+| `one-stage` | Ablation B: controlled evidence answered in one call |
+| `hybrid-two-stage` | Ablation C: hybrid evidence with the two-stage generation |
+
+Choose `main` (the first four), `ablations` (the last four), `all` (default), or a comma-separated list.
+`dcent` and `no-paths` call a running web docent: start the server in evaluation mode and set `DOCENT_URL`.
+
+```bash
+DOCENT_EVAL_MODE=1 php -S localhost:8000     # in another terminal
 ```
 
-Read-only validation accepts queries beginning with `MATCH`, `OPTIONAL MATCH`,
-`WITH`, or `CALL` and blocks mutation keywords such as `DELETE`, `CREATE`,
-`MERGE`, `SET`, and `DROP`.
+In evaluation mode, `explain` returns the context and fact table it generated from, applies the shared
+generation conditions, and asks for record citations; retrieval and context assembly are those of the
+deployed system. `explain` allows five requests per minute, so keep `EVAL_DELAY` at 15 seconds or more.
 
-### Temporal-query limitation
+### Run results
 
-Event dates are represented by static Event-node properties such as `날짜` and
-`발생일자`. Relationship validity intervals such as `valid_from` and `valid_to`
-are not implemented. A query such as “membership before March 1919” therefore
-cannot be answered as an exact temporal relationship query. The system must
-limit the answer to an event-date approximation or state that the information
-is not confirmed by the available sources.
+`results/<date_time>/` holds `config.json` (conditions, model, code version), `answers.json` (answers and
+evidence), `scores.csv` (scores per question and system), `report.md`, `table_main.tex`, and
+`table_by_category.tex`.
+
+The report contains per-system measures (mean and 95% bootstrap CI), the planned comparisons (RQ1: D-CENT
+against the baselines; RQ2: contributions of the narrative paths, query generation, two-stage generation,
+and evidence; paired permutation tests, Holm correction per measure), results by category and by question
+source, citation verification, context precision, expert judgments, graph size, and items to check by hand
+(failed generations, sentences flagged as trap endorsements). Combined runs are averaged per question before
+testing, and run-to-run variation is shown.
+
+### Benchmark
+
+`dataset` validates `dataset/questions.json` and writes the questions that pass (with particle corrections)
+to `dataset/benchmark.json`; the validation workbook with a 30% review sample goes to `dataset/validation/`.
+`dataset --generate` first regenerates the template questions from the event register (curated and
+third-party questions are kept) and merges external questions from `dataset/third_party/*.json`, in the
+format of [third_party_template.json](./evaluation/dataset/third_party_template.json) with `author` filled in.
+
+### Expert judgments
+
+```bash
+.venv3.14/bin/python -m evaluation expert export       # one workbook per annotator in annotation/expert/ (150 records)
+.venv3.14/bin/python -m evaluation expert score        # → results/graph/expert.json
+.venv3.14/bin/python -m evaluation rate export [RUN] [--n 40]   # one workbook per rater in annotation/rating/
+.venv3.14/bin/python -m evaluation rate score          # → results/<RUN>/rating.json
+```
+
+Rating covers the answers of the four RQ1 systems (passage, hybrid, graph, dcent), shuffled and without system
+names. Give raters only `annotation/rating/`; the blinding key in `annotation/rating_key/` stays with you.
 
 ## MCP server
 
-[mcp_server.py](./mcp_server.py) provides these read-oriented tools:
+[mcp_server.py](./mcp_server.py) provides `query_postgres` (SELECT/WITH), `get_postgres_schema`, `query_neo4j`,
+and `get_neo4j_schema`. Adjust the paths in [mcp_client_config.json](./mcp_client_config.json) and keep secrets in
+environment variables or secrets.toml, not in the client configuration.
 
-- `query_postgres`: execute `SELECT`/`WITH` queries
-- `get_postgres_schema`: inspect PostgreSQL tables and columns
-- `query_neo4j`: execute a Cypher query
-- `get_neo4j_schema`: inspect Neo4j labels and relationship types
-
-Run the server with:
+## Checks
 
 ```bash
-.venv3.14/bin/python mcp_server.py
+.venv3.14/bin/python -m pipeline check
+php -l docent.php && php -l includes/actions.php
 ```
 
-Register the command from [mcp_client_config.json](./mcp_client_config.json)
-after updating absolute paths for your environment. Keep credentials in
-environment variables or `.streamlit/secrets.toml`, not in client configuration.
-
-## RAG evaluation
-
-The benchmark dataset is
-[evaluation/dataset/multihop_benchmark_dataset.json](./evaluation/dataset/multihop_benchmark_dataset.json).
-The compared systems are:
-
-- **Vector RAG**: PostgreSQL source-chunk retrieval
-- **Hybrid Vector RAG**: BM25 + dense retrieval, RRF fusion, cross-encoder
-  rerank ([evaluation/baselines.py](./evaluation/baselines.py)); retrieves from
-  the question text only
-- **Standard GraphRAG**: graph triple/context retrieval
-- **Microsoft GraphRAG** (opt-in): the reference implementation, queried through
-  its CLI
-- **D-CENT (end-to-end)**: the deployed system called over HTTP with the
-  question text (generated Cypher, full-text cross-check, narrative paths,
-  record retrieval by document identifiers, two-stage generation)
-- **D-CENT without narrative paths**: the same, with the paths left out
-- **D-CENT (controlled evidence)**: name-matched triples and bibliographic
-  records assembled by the harness, two-stage generation; with the
-  `docent_1stage` and `hybrid_2stage` ablations of the generation procedure
-
-Run the complete RAG comparison:
-
-```bash
-.venv3.14/bin/python evaluation/eval_rag_comparison.py --delay 15
-```
-
-Useful modes:
-
-```bash
-# Three representative queries
-.venv3.14/bin/python evaluation/eval_rag_comparison.py --quick --delay 0
-
-# One query and full response text
-.venv3.14/bin/python evaluation/eval_rag_comparison.py --single --delay 0
-
-# First N queries
-.venv3.14/bin/python evaluation/eval_rag_comparison.py --limit 10 --delay 0
-```
-
-The unified runner executes NER/relation evaluation and RAG comparison:
-
-```bash
-.venv3.14/bin/python evaluation/run_benchmark.py --quick --delay 0
-.venv3.14/bin/python evaluation/run_benchmark.py --quick --ragas --delay 0
-```
-
-Regenerate the benchmark only when the resulting questions and ground truth
-will be manually reviewed:
-
-```bash
-.venv3.14/bin/python evaluation/generate_benchmark_dataset.py \
-  --target-count 30 --out evaluation/dataset/benchmark_new.json --validate
-```
-
-Without `--out` the generator refuses to overwrite the existing default
-dataset; pass `--force` only when that is intended.
-
-### RAGAS
-
-[eval_rag_comparison.py](./evaluation/eval_rag_comparison.py) writes questions,
-responses, retrieved contexts, and references to
-[evaluation/results/ragas_dataset.json](./evaluation/results/ragas_dataset.json).
-The RAGAS report is written to
-[evaluation/results/ragas_results.json](./evaluation/results/ragas_results.json).
-The standard metrics are Faithfulness, Context Precision with Reference, and
-Context Recall.
-
-Local Ollama evaluation:
-
-```bash
-RAGAS_PROVIDER=ollama \
-.venv3.14/bin/python evaluation/eval_ragas.py
-```
-
-Gemini evaluation requires `GEMINI_API_KEY`:
-
-```bash
-RAGAS_PROVIDER=gemini \
-GEMINI_RAGAS_MODEL=gemini-flash-lite-latest \
-GEMINI_EMBEDDING_MODEL=models/gemini-embedding-001 \
-.venv3.14/bin/python evaluation/eval_ragas.py
-```
-
-Items with `evaluation_type=abstention` are evaluated for Faithfulness only,
-because Context Precision and Context Recall are not well-defined for negative
-verification prompts. A RAGAS parser failure must not be replaced with a zero;
-the evaluation should fail explicitly.
-
-### Direct context-precision Judge
-
-The repository also includes a separate Ollama JSON Judge:
-
-```bash
-.venv3.14/bin/python evaluation/eval_context_precision_judge.py \
-  --input evaluation/results/ragas_dataset.json \
-  --output evaluation/results/context_precision_judge_results.json \
-  --model gemma4:26b \
-  --host http://localhost:11434 \
-  --workers 3
-```
-
-This is a supplementary metric, not a replacement for the RAGAS score.
-
-### Baselines, categories, and significance
-
-All pipelines run under the same conditions, set by these flags:
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--retrieval-input` | `question` | Every pipeline retrieves with entities extracted from the question text (one shared LLM call per question). `entities` gives every pipeline the gold `target_entities` instead. |
-| `--temperature`, `--top-p` | `0.0`, `0.8` | Used for every generation call. |
-| `--context-chars` | `11000` | Retrieved-context budget shared by all pipelines, equal to the deployed system's (`DOCENT_CONTEXT_CHARS` on the server; narrative paths count against it). `0` restores the old per-pipeline sizes. |
-| `--max-output-tokens` | `1500` | Output limit of every answer call, including the deployed system's in evaluation mode. |
-| `--retries` | `2` | Extra attempts when a generation fails (rate limits). |
-
-Docent still issues two generation calls (fact table, then synthesis), so its
-total prompt is larger than the baselines' even with the same retrieved
-context; `context_chars` and `prompt_tokens` are reported per question.
-
-Select pipelines with `--models` (default
-`vector,hybrid,graph,dcent,dcent_no_paths,docent,docent_1stage,hybrid_2stage`).
-
-The `dcent` conditions call a running D-CENT server. Start it with
-`DOCENT_EVAL_MODE=1` so that `explain` accepts `eval=1`, answers as JSON with
-the context and fact table it generated from, applies the shared generation
-settings, and asks for record citations; then pass its address:
-
-```bash
-DOCENT_EVAL_MODE=1 php -S localhost:8000          # in the project root
-.venv3.14/bin/python evaluation/eval_rag_comparison.py --delay 15 \
-  --dcent-url http://localhost:8000/docent.php
-```
-
-`explain` allows five requests per minute per client, so keep `--delay` at 15
-seconds or more. The
-hybrid baseline builds its dense index once under `vector_store/baselines/`;
-set `BASELINE_EMBED_MODEL` / `BASELINE_RERANK_MODEL` to change models.
-
-Microsoft GraphRAG needs its own index, which is a long, paid LLM job and is
-therefore not run automatically:
-
-```bash
-.venv3.14/bin/python evaluation/baselines.py export-graphrag --root ./graphrag_root --dry-run
-.venv3.14/bin/python evaluation/baselines.py export-graphrag --root ./graphrag_root
-graphrag init --root ./graphrag_root && graphrag index --root ./graphrag_root
-GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_comparison.py \
-  --models vector,hybrid,graph,msgraphrag,docent
-```
-
-Every run also writes per-category results and paired significance tests
-(sign-flip permutation test with Holm correction, bootstrap 95% CIs). Questions
-where any pipeline failed to generate an answer are excluded from the tests.
-To recompute them from an existing CSV:
-
-```bash
-.venv3.14/bin/python evaluation/analyze_rag_results.py
-```
-
-### Datasets, run folders, question sources, and ablations
-
-`--dataset` selects the benchmark file and `--out-dir` the folder that receives
-every output of the run, so earlier results are not overwritten. The dataset
-file name is recorded in the `dataset` column of the CSV and in each record of
-`ragas_dataset.json`.
-
-```bash
-.venv3.14/bin/python evaluation/eval_rag_comparison.py --quick --delay 0 \
-  --dataset evaluation/dataset/benchmark_v1_tagged.json \
-  --out-dir evaluation/results_run3
-```
-
-[evaluation/dataset/benchmark_v1_tagged.json](./evaluation/dataset/benchmark_v1_tagged.json)
-is the 30-question benchmark with a `source` field added (first 13 `curated`,
-the rest `template`). When the dataset has `source`, the results carry a
-`source` column and the analysis additionally reports Overall / `curated` /
-`template` / `third_party` means with the same paired tests
-(`rag_source_results.csv`, `rag_source_significance.csv`). For a CSV written
-before the column existed, pass the tagged dataset:
-
-```bash
-.venv3.14/bin/python evaluation/analyze_rag_results.py \
-  --input evaluation/results/rag_evaluation_results.csv \
-  --dataset evaluation/dataset/benchmark_v1_tagged.json \
-  --out-dir evaluation/results_by_source
-```
-
-Two opt-in ablation pipelines separate the effect of the evidence from the
-effect of two-stage generation. Both use the shared conditions above.
-
-| `--models` key | Evidence | Generation |
-|---|---|---|
-| `docent_1stage` | Same as Docent (`retrieve_docent_scoped_context`) | Answer prompt only, no fact-table call |
-| `hybrid_2stage` | Same as the hybrid baseline (`hybrid_retrieve`), each chunk wrapped as `<SOURCE_EVIDENCE id="chunk_N">` | Docent's fact table, then answer |
-
-```bash
-.venv3.14/bin/python evaluation/eval_rag_comparison.py \
-  --models vector,hybrid,graph,docent,docent_1stage,hybrid_2stage \
-  --dataset evaluation/dataset/benchmark_v1_tagged.json --out-dir evaluation/results_ablation
-```
-
-`hallucination_rate` is a keyword heuristic over each question's
-`negative_traps`. A trap counts only when one answer sentence contains a person
-name or proper noun from the trap together with a second keyword (years, dates,
-and province/county/city names alone never match), and the answer contains no
-rejection phrase (`확인되지 않`, `사실이 아니`, `허구`, `근거가 없`, ...). The
-sentences that triggered it are saved in the `trap_flagged_text` column and
-must be checked by a person before the rate is reported.
-
-### Benchmark size and third-party questions
-
-```bash
-.venv3.14/bin/python evaluation/generate_benchmark_dataset.py --target-count 120 \
-  --third-party path/to/external_questions.json
-```
-
-Each question carries `source` (`curated`, `third_party`, `template`).
-External authors start from
-[evaluation/dataset/third_party_template.json](./evaluation/dataset/third_party_template.json).
-Template questions are filled in from `raw_event_info` and their gold facts
-must be reviewed before they are reported.
-
-Validate template questions before using them
-([evaluation/validate_benchmark.py](./evaluation/validate_benchmark.py); reads
-`raw_event_info`, makes no LLM calls, never modifies the input file):
-
-```bash
-.venv3.14/bin/python evaluation/validate_benchmark.py evaluation/dataset/benchmark_v2.json
-# options: --out-dir DIR  --seed 42  --save-passed evaluation/dataset/benchmark_v2_passed.json
-```
-
-It writes to `evaluation/validation/`: `<name>_validation.xlsx` (PASS/FAIL per
-question with reasons, the particle fixes, and a `human_review` sheet holding a
-seeded random 30% of the passed questions) and
-`<name>_validation_summary.json`. `--save-passed PATH` additionally writes the
-questions that did not fail, for use with `--dataset`. Only `template`
-questions are checked; other sources are checked for duplicates only. A
-question fails when a person name is shorter than two
-characters, a romanised fragment, or a title/common noun; when the event name
-and date in the question disagree with `raw_event_info`, with the date in the
-event name, or with the period the question states; when the trap person is a
-recorded participant of that event; when a trap compares a place with itself;
-or when it duplicates an earlier question. Wrong particles after names
-(`김상열가`) are corrected and listed, not failed. `generate_benchmark_dataset.py
---validate` runs the same check on the file it just wrote.
-
-### Human evaluation
-
-Extraction quality, judged by historians on a seeded random sample of records:
-
-```bash
-.venv3.14/bin/python evaluation/expert_validation.py export --n 150
-.venv3.14/bin/python evaluation/expert_validation.py score \
-  evaluation/expert_validation/annotation_A.xlsx evaluation/expert_validation/annotation_B.xlsx
-```
-
-`--n` sets the sample size (default 150, split evenly over the four source
-tables; e.g. `--n 80 --out-dir evaluation/expert_validation_80` for a smaller
-round). `export` overwrites the workbooks in its output folder, so use a new
-`--out-dir` once annotation has started. `score` reports the sample size and
-precision/recall per source table in addition to the per-type scores.
-
-Final answers, rated blind:
-
-```bash
-.venv3.14/bin/python evaluation/human_answer_eval.py export
-.venv3.14/bin/python evaluation/human_answer_eval.py score \
-  evaluation/human_eval/rating_A.xlsx evaluation/human_eval/rating_B.xlsx
-
-# only hand-written questions; --dataset supplies `source` for older answer files
-.venv3.14/bin/python evaluation/human_answer_eval.py export --source curated,third_party \
-  --dataset evaluation/dataset/benchmark_v1_tagged.json
-```
-
-Raters fill in, per answer: `declined` (Y/N), `decline_justified`
-(Y/N/해당없음), `accuracy` (1-5, 해당없음 for a pure refusal), `completeness`
-(1-5), `unsupported_claims` (count, whether or not a citation is attached), and
-`usefulness` (1-5). The instruction sheet gives examples for each and tells
-raters not to judge by answer length. `score` prints per-item means with
-bootstrap CIs, pairwise permutation tests (Holm), weighted kappa between
-raters, citation accuracy, and the correlation of `accuracy`/`completeness`
-with answer length as a length-bias check.
-
-`blinding_key.json` maps the shuffled answer labels back to models. It is
-written to `evaluation/human_eval_key/` (`--key-dir`), apart from the rater
-workbooks in `evaluation/human_eval/`; send raters only the latter.
-
-### Graph sparsity
-
-An `Event` node is one `raw_event_info` row. To report how many `Event` nodes
-are isolated and where they come from (read-only; `--cleanup` lists removable
-artifact nodes and deletes them only with `--apply`):
-
-```bash
-.venv3.14/bin/python scripts/graph_sparsity_report.py --cleanup
-```
-
-### Evaluation outputs
-
-| File | Contents |
-|---|---|
-| `evaluation/results/rag_evaluation_results.csv` | Per-query, per-model details |
-| `evaluation/results/table_rag_comparison.tex` | Paper-ready RAG comparison table |
-| `evaluation/results/rag_category_results.csv` | Per-category means with 95% CIs |
-| `evaluation/results/rag_significance.csv` | Paired significance tests between pipelines |
-| `evaluation/results/rag_source_results.csv`, `rag_source_significance.csv` | The same two tables by question source (only when `source` is recorded) |
-| `evaluation/validation/<name>_validation.xlsx` | Benchmark validation: PASS/FAIL, fixes, human-review sample |
-| `evaluation/results/table_rag_by_category.tex` | Per-category LaTeX table |
-| `evaluation/results/expert_validation_results.json` | Expert-judged extraction precision/recall |
-| `evaluation/results/human_eval_results.json` | Human answer ratings and citation accuracy |
-| `evaluation/results/graph_sparsity_report.json` | Event-layer sparsity report |
-| `evaluation/results/ragas_dataset.json` | RAGAS input records |
-| `evaluation/results/ragas_results.json` | RAGAS metric results |
-| `evaluation/results/context_precision_judge_results.json` | Direct Judge results |
-| `evaluation/results/table_ner_performance.tex` | NER/RE LaTeX table |
-| `evaluation/results/ner_evaluation_results.csv` | NER/RE details |
-
-`entity_hit_rate_at_k` and `entity_mrr` are LLM-independent diagnostic
-retrieval metrics. The current MRR implementation measures the first context
-containing at least one target entity; it does not measure complete target
-coverage or semantic correctness. An MRR of `1.0000` must therefore be reported
-with Context Precision, source/event-ID Hit@K, and query-type analysis.
-
-The current benchmark has `N=30`. This is useful for system verification and
-effect-size exploration, but is too small by itself for broad population-level
-significance or generalization claims. Report per-query results, bootstrap
-confidence intervals, query-type results, and the template/entity-anchor bias.
-
-### Name-search index (optional, not applied automatically)
-
-[migrations/001_pg_trgm_name_search.sql](./migrations/001_pg_trgm_name_search.sql)
-adds `pg_trgm` GIN indexes for the `LIKE '%name%'` lookups in
-[includes/](./includes/). Review it and run it by hand; the file lists the
-prerequisites, the `EXPLAIN` checks, and the rollback statements.
-
-## Validation
-
-These checks do not intentionally rebuild the databases:
-
-```bash
-php -l includes/actions.php
-php -l docent.php
-.venv3.14/bin/python -m py_compile run_pipeline.py mcp_server.py
-.venv3.14/bin/python run_pipeline.py --dry-run
-.venv3.14/bin/python scripts/verify_pipeline.py
-```
-
-Database connectivity checks require valid `PG_*` and `NEO4J_*` settings. When
-working with a remote database, verify the target with read-only queries and
-`--dry-run` before running `upload_data.py`, `graph_builder.py`, or
-`romanize_names.py`.
-
-## Important paths
-
-| Path | Role |
-|---|---|
-| [data/](./data/) | Source files, i815 index, and mappings |
-| [scripts/](./scripts/) | PostgreSQL, TEI, CIDOC, and Neo4j processing |
-| [includes/](./includes/) | PHP configuration, database, security, prompts, and actions |
-| [evaluation/](./evaluation/) | Benchmarks, RAGAS, and NER/RE evaluation |
-| [vector_store/baselines/](./vector_store/) | Dense index cache of the hybrid evaluation baseline |
-| [Latex/](./Latex/) | Manuscript and LaTeX build artifacts |
-| [run_pipeline.py](./run_pipeline.py) | Full preprocessing orchestrator |
-| [docent.php](./docent.php) | PHP web/API entry point |
-| [mcp_server.py](./mcp_server.py) | PostgreSQL/Neo4j MCP server |
-
-## Operational safety
-
-- `upload_data.py` drops and recreates target tables; use it cautiously in
-  operational environments.
-- `graph_builder.py`, `thesaurus_to_neo4j.py`, and `romanize_names.py` modify Neo4j.
-- Confirm the target and take a backup before destructive or reset operations.
-- Keep source evidence, TEI, ground truth, and retrieved context conceptually
-  separate. Do not modify ground truth to match a model response.
-- Do not infer temporal relationship validity from static edges.
-- Do not expose API keys, database passwords, or remote connection details in
-  logs or commits.
-
-## Korean documentation
-
-See [README_ko.md](./README_ko.md) for the Korean version of this documentation.
+## Operational notes
+
+- `pipeline build` recreates PostgreSQL tables and the Neo4j graph. Confirm the target and backups.
+- Source records, TEI, reference facts, and retrieved context are different layers of evidence. Do not adjust
+  reference facts to model answers; check the records and the graph first.
+- Keep API keys, database passwords, and remote connection details out of logs and commits.
 
 ## License
 

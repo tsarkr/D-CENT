@@ -1,21 +1,19 @@
-streamlit>=1.35
+# Data pipeline (python -m pipeline)
 psycopg2-binary
-neo4j>=5.20
-streamlit-agraph>=0.0.45
-ollama>=0.3
-tomli>=2.0
-openpyxl>=3.0
-mcp>=1.2.0
-requests>=2.31
-beautifulsoup4>=4.12
-numpy>=1.26
-hanja>=0.14
-langchain-ollama>=0.1
-langchain-core>=0.2
-rdflib>=7.0
 sqlalchemy>=2.0
 pandas>=2.0
+openpyxl>=3.0
+neo4j>=5.20
+hanja>=0.14
+beautifulsoup4>=4.12
 lxml>=5.0
-ragas>=0.2.15
-langchain-google-genai>=2.0
-sentence-transformers>=3.0
+rdflib>=7.0
+requests>=2.31
+tomli>=2.0; python_version < "3.11"
+
+# Evaluation (python -m evaluation)
+numpy>=1.26
+sentence-transformers>=3.0   # cross-encoder of the hybrid baseline
+
+# MCP server (mcp_server.py)
+mcp>=1.2.0

@@ -1,0 +1,583 @@
+"""Judgments by historians, through Excel workbooks.
+
+  expert export   seeded random sample of 150 records; one workbook per annotator (A, B) listing
+                  everything the pipeline extracted, to be marked O/X, plus what it missed
+  expert score    precision / recall / F1 with bootstrap intervals and Cohen's kappa
+                  -> results/graph/expert.json
+  rate export     blind rating of a run's answers: one workbook per rater, system names replaced
+                  by shuffled labels; the key goes to annotation/rating_key/, never to raters
+  rate score      per-system means with intervals, paired tests, citation accuracy, agreement,
+                  and the correlation of ratings with answer length -> <run>/rating.json
+
+Citation accuracy backs the provenance claim: for every sentence that cites a record,
+the rater reads the record and marks whether it supports the sentence.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import random
+import re
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from pipeline.config import get_pg_connection
+from pipeline.text import extract_ruby_parts
+
+from evaluation.common import (
+    EXPERT_DIR, GRAPH_RESULTS, RATING_DIR, RATING_KEY_DIR,
+    add_sheet, bootstrap_ci, cohen_kappa, holm_adjust, new_workbook, paired_permutation_test, prf, read_json, read_sheet, write_json,
+)
+from evaluation.metrics import ID_RE, record_key
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Expert validation of extracted entities and relations
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+# table -> column holding the event id of the row (None: no event link, entities only)
+SAMPLE_TABLES = {
+    "raw_event_info": "아이디",
+    "raw_source_info": "사건아이디",
+    "raw_bibliography": None,
+    "raw_detail_place": None,
+}
+TYPES = ["Person", "Place", "P14_carried_out_by", "P7_took_place_at"]
+ENTITY_TYPES = {"Person", "Place"}
+VERDICT_OK, VERDICT_WRONG = "O", "X"
+
+INSTRUCTIONS = [
+    "개체·관계 추출 전문가 검증 시트",
+    "",
+    "1. [records] 시트에서 사료 원문(text)을 읽습니다.",
+    "2. [extracted] 시트는 파이프라인이 해당 사료에서 추출한 인명·지명·관계입니다. 각 행의 verdict에 O(맞음) 또는 X(틀림)를 기입합니다.",
+    "   - Person: 실제 사람 이름이면 O. 기관·직책·지명·일반명사이거나 이름의 경계가 틀리면 X.",
+    "   - Place: 실제 지명이면 O.",
+    "   - P14_carried_out_by: 그 인물이 해당 사건의 행위자·참여자로 사료에 기록되어 있으면 O. 단순 언급(수신자, 재판관 등)이면 X.",
+    "   - P7_took_place_at: 그 사건이 해당 장소에서 일어난 것으로 사료에 기록되어 있으면 O.",
+    "   - X인 경우 corrected에 올바른 값을 적어 주시면 오류 유형 분석에 사용합니다 (선택).",
+    "3. [missed] 시트에는 사료에 있는데 파이프라인이 놓친 인명·지명·관계를 한 행에 하나씩 추가합니다 (record_id, type, value).",
+    "4. 다른 검증자와 상의하지 말고 독립적으로 판정해 주십시오. item_id와 record_id는 수정하지 마십시오.",
+]
+
+
+def _surface(inner: str) -> str:
+    """Readable form of a tagged span, e.g. '金容圭 (김용규)'."""
+    foreign, gloss = extract_ruby_parts(inner)
+    if foreign and gloss:
+        return f"{foreign} ({gloss})"
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", inner)).strip()
+
+
+def _body_text(tei: str) -> str:
+    body = re.search(r"<body>(.*?)</body>", tei, flags=re.DOTALL)
+    # Drop glosses so the annotator reads the source as written.
+    text = re.sub(r"<rt[^>]*>[^<]*</rt>", "", body.group(1) if body else tei)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).strip()
+
+
+def sample_records(n: int, seed: int) -> list[dict[str, Any]]:
+    conn = get_pg_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT "아이디", "사건명" FROM raw_event_info')
+    event_titles = {str(i): str(t or "").strip() for i, t in cur.fetchall()}
+
+    per_table = -(-n // len(SAMPLE_TABLES))
+    records = []
+    for table, event_col in SAMPLE_TABLES.items():
+        event_expr = f'"{event_col}"' if event_col else "NULL"
+        cur.execute(
+            f'SELECT rowid, tei, {event_expr} FROM "{table}" WHERE tei IS NOT NULL '
+            f"ORDER BY md5(rowid::text || %s) LIMIT %s",
+            (str(seed), per_table),
+        )
+        for rowid, tei, event_id in cur.fetchall():
+            event_id = str(event_id).strip() if event_id else ""
+            records.append({
+                "record_id": f"{table}:{rowid}",
+                "table": table,
+                "event_id": event_id,
+                "event_title": event_titles.get(event_id, ""),
+                "tei": tei,
+            })
+    cur.close()
+    conn.close()
+    return records[:n]
+
+
+def extract_items(record: dict[str, Any]) -> list[dict[str, str]]:
+    """Entities tagged in the TEI and the event relations the graph builder derives from them."""
+    tei = record["tei"]
+    persons = list(dict.fromkeys(_surface(m) for m in re.findall(r"<persName[^>]*>(.*?)</persName>", tei, flags=re.DOTALL)))
+    places = list(dict.fromkeys(_surface(m) for m in re.findall(r"<placeName[^>]*>(.*?)</placeName>", tei, flags=re.DOTALL)))
+    items = [{"type": "Person", "value": p} for p in persons if p]
+    items += [{"type": "Place", "value": p} for p in places if p]
+    if record["event_id"]:
+        event = record["event_title"] or record["event_id"]
+        items += [{"type": "P14_carried_out_by", "value": f"[{event}] → {p}"} for p in persons if p]
+        items += [{"type": "P7_took_place_at", "value": f"[{event}] → {p}"} for p in places if p]
+    return items
+
+
+def expert_export(n: int = 150, seed: int = 42, annotators: tuple[str, ...] = ("A", "B")) -> int:
+    """Write one annotation workbook per annotator to annotation/expert/."""
+    out_dir = EXPERT_DIR
+    records = sample_records(n, seed)
+    record_rows, item_rows = [], []
+    for record in records:
+        record_rows.append({
+            "record_id": record["record_id"], "table": record["table"],
+            "event_title": record["event_title"], "text": _body_text(record["tei"]),
+        })
+        for n, item in enumerate(extract_items(record), 1):
+            item_rows.append({
+                "item_id": f"{record['record_id']}/{n}", "record_id": record["record_id"],
+                "kind": "entity" if item["type"] in ENTITY_TYPES else "relation", **item,
+            })
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for annotator in annotators:
+        wb = new_workbook(INSTRUCTIONS)
+        add_sheet(wb, "records", ["record_id", "table", "event_title", "text"], record_rows,
+                  widths={"record_id": 26, "event_title": 34, "text": 110})
+        add_sheet(wb, "extracted", ["item_id", "record_id", "kind", "type", "value", "verdict", "corrected", "note"], item_rows,
+                  widths={"item_id": 28, "record_id": 26, "type": 22, "value": 46, "corrected": 30, "note": 30},
+                  choices={"verdict": [VERDICT_OK, VERDICT_WRONG]})
+        add_sheet(wb, "missed", ["record_id", "type", "value", "note"], [],
+                  widths={"record_id": 26, "type": 22, "value": 46, "note": 30}, choices={"type": TYPES})
+        path = out_dir / f"annotation_{annotator}.xlsx"
+        wb.save(path)
+        print(f"📝 {path}")
+
+    manifest = {
+        "seed": seed, "n_records": len(records), "n_items": len(item_rows),
+        "records_without_extraction": sum(1 for r in records if not extract_items(r)),
+        "record_ids": [r["record_id"] for r in records],
+    }
+    (out_dir / "sample_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"✅ 사료 {len(records)}건, 추출 항목 {len(item_rows)}개 (추출 0건인 사료 {manifest['records_without_extraction']}건 포함)")
+    return 0
+
+
+def _load_annotation(path: Path) -> dict[str, Any]:
+    verdicts = {}
+    unjudged = 0
+    counts: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0}))
+    for row in read_sheet(path, "extracted"):
+        verdict = row["verdict"].upper()
+        if verdict not in (VERDICT_OK, VERDICT_WRONG):
+            unjudged += 1
+            continue
+        verdicts[row["item_id"]] = verdict
+        counts[row["type"]][row["record_id"]]["tp" if verdict == VERDICT_OK else "fp"] += 1
+    for row in read_sheet(path, "missed"):
+        if row["type"] not in TYPES:
+            raise ValueError(f"{path} [missed]: 알 수 없는 type '{row['type']}' (record {row['record_id']})")
+        counts[row["type"]][row["record_id"]]["fn"] += 1
+    records = [r["record_id"] for r in read_sheet(path, "records")]
+    return {"verdicts": verdicts, "counts": counts, "records": records, "unjudged": unjudged}
+
+
+def _score_type(per_record: dict[str, dict[str, int]], records: list[str], n_boot: int = 5000) -> dict[str, Any]:
+    """Micro P/R/F1 with a bootstrap CI that resamples source records."""
+    table = np.asarray([[per_record[r]["tp"], per_record[r]["fp"], per_record[r]["fn"]] if r in per_record else [0, 0, 0]
+                        for r in records])
+    tp, fp, fn = (int(x) for x in table.sum(axis=0))
+    precision, recall, f1 = prf(tp, fp, fn)
+    rng = np.random.default_rng(0)
+    sums = table[rng.integers(0, len(records), size=(n_boot, len(records)))].sum(axis=1).astype(float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        boot_p = sums[:, 0] / (sums[:, 0] + sums[:, 1])
+        boot_r = sums[:, 0] / (sums[:, 0] + sums[:, 2])
+
+    def interval(samples: np.ndarray) -> list[float | None]:
+        samples = samples[~np.isnan(samples)]
+        return [round(float(q), 4) for q in np.quantile(samples, [0.025, 0.975])] if samples.size else [None, None]
+
+    def clean(value: float) -> float | None:
+        return None if value != value else round(value, 4)
+
+    return {"tp": tp, "fp": fp, "fn": fn, "precision": clean(precision), "precision_ci95": interval(boot_p),
+            "recall": clean(recall), "recall_ci95": interval(boot_r), "f1": clean(f1)}
+
+
+def expert_score(files: list[Path]) -> int:
+    """Score completed annotation workbooks (default: every annotation_*.xlsx in annotation/expert/)."""
+    files = files or sorted(EXPERT_DIR.glob("annotation_*.xlsx"))
+    if not files:
+        raise SystemExit(f"채점할 워크북이 없습니다: {EXPERT_DIR}")
+    output = GRAPH_RESULTS / "expert.json"
+    annotations = {path.stem: _load_annotation(path) for path in files}
+    report: dict[str, Any] = {"annotators": {}, "agreement": {}}
+    fmt = lambda v: "   n/a" if v is None else f"{v * 100:6.1f}"
+    for name, ann in annotations.items():
+        merged = {"Entity (all)": defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0}),
+                  "Relation (all)": defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})}
+        for type_name in TYPES:
+            group = "Entity (all)" if type_name in ENTITY_TYPES else "Relation (all)"
+            for record_id, c in ann["counts"][type_name].items():
+                for key in c:
+                    merged[group][record_id][key] += c[key]
+        per_type = {**{t: ann["counts"][t] for t in TYPES}, **merged}
+        scores = {t: _score_type(per_record, ann["records"]) for t, per_record in per_type.items()}
+
+        # The same scores restricted to the records of one source table.
+        tables = list(dict.fromkeys(r.rsplit(":", 1)[0] for r in ann["records"]))
+        by_table = {}
+        for table in tables:
+            table_records = [r for r in ann["records"] if r.rsplit(":", 1)[0] == table]
+            by_table[table] = {"n_records": len(table_records),
+                               "scores": {t: _score_type(per_record, table_records) for t, per_record in per_type.items()}}
+
+        report["annotators"][name] = {
+            "n_records": len(ann["records"]),
+            "n_records_by_table": {t: by_table[t]["n_records"] for t in tables},
+            "n_items_judged": len(ann["verdicts"]),
+            "n_items_missed_added": sum(c["fn"] for per_record in ann["counts"].values() for c in per_record.values()),
+            "unjudged_items": ann["unjudged"],
+            "scores": scores,
+            "by_table": by_table,
+        }
+
+        print(f"\n■ {name} — 표본: 사료 {len(ann['records'])}건 ("
+              + ", ".join(f"{t} {by_table[t]['n_records']}" for t in tables)
+              + f"), 판정 항목 {len(ann['verdicts'])}개, 미판정 {ann['unjudged']}개")
+        print(f"  {'type':<22} {'P':>7} {'R':>7} {'F1':>7}   TP/FP/FN")
+        for type_name, s in scores.items():
+            print(f"  {type_name:<22} {fmt(s['precision'])} {fmt(s['recall'])} {fmt(s['f1'])}   {s['tp']}/{s['fp']}/{s['fn']}")
+        print(f"  사료 유형(table)별 — {'table':<18} {'n':>4}  {'Entity P':>8} {'Entity R':>8}  {'Rel. P':>7} {'Rel. R':>7}")
+        for table in tables:
+            e, r = by_table[table]["scores"]["Entity (all)"], by_table[table]["scores"]["Relation (all)"]
+            print(f"                      {table:<18} {by_table[table]['n_records']:>4}  "
+                  f"{fmt(e['precision']):>8} {fmt(e['recall']):>8}  {fmt(r['precision']):>7} {fmt(r['recall']):>7}")
+        if ann["unjudged"]:
+            print(f"  ⚠️ verdict가 비어 있는 {ann['unjudged']}개 항목은 계산에서 제외했습니다.")
+
+    names = list(annotations)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = annotations[names[i]]["verdicts"], annotations[names[j]]["verdicts"]
+            shared = sorted(set(a) & set(b))
+            kappa = cohen_kappa([a[k] for k in shared], [b[k] for k in shared])
+            raw = sum(a[k] == b[k] for k in shared) / len(shared) if shared else float("nan")
+            report["agreement"][f"{names[i]} vs {names[j]}"] = {
+                "n_items": len(shared), "raw_agreement": None if raw != raw else round(raw, 4),
+                "cohen_kappa": None if kappa != kappa else round(kappa, 4),
+            }
+            print(f"\n🤝 {names[i]} vs {names[j]}: 공통 {len(shared)}개, 단순 일치율 {raw:.3f}, Cohen's κ {kappa:.3f}")
+            print("   (missed 시트는 자유 기입이라 κ에 포함되지 않습니다. 재현율 차이로 확인하세요.)")
+
+    write_json(output, report)
+    print(f"\n💾 {output}")
+    return 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Blind rating of answers
+# ═════════════════════════════════════════════════════════════════════════════
+
+SCALE = ["1", "2", "3", "4", "5"]
+NA = "해당없음"
+YES, NO = "Y", "N"
+# Columns the rater fills in, with the values offered in the dropdown (None = free integer).
+RATING_CHOICES: dict[str, list[str] | None] = {
+    "declined": [YES, NO],
+    "decline_justified": [YES, NO, NA],
+    "accuracy": [*SCALE, NA],
+    "completeness": SCALE,
+    "unsupported_claims": None,
+    "usefulness": SCALE,
+    "narrative_order": [*SCALE, NA],
+    "narrative_attribution": [*SCALE, NA],
+}
+RATING_COLUMNS = list(RATING_CHOICES)
+SCALE_METRICS = ["accuracy", "completeness", "usefulness", "narrative_order", "narrative_attribution"]          # 1-5, higher is better
+NUMERIC_METRICS = [*SCALE_METRICS, "unsupported_claims", "declined"]  # compared between systems
+LENGTH_BIAS_METRICS = ["accuracy", "completeness"]
+SUPPORT_VALUES = {"O": 1.0, "△": 0.5, "X": 0.0}
+RATED_SYSTEMS = ("passage", "hybrid", "graph", "dcent")  # the systems compared for RQ1; ablations are not rated
+
+INSTRUCTIONS = [
+    "최종 답변 전문가 평가 시트 (블라인드)",
+    "",
+    "[answers] 시트: 같은 질문에 대한 여러 시스템의 답변이 무작위 순서로 섞여 있습니다. 어느 시스템인지는 표시하지 않습니다.",
+    "",
+    "※ 답변의 길이로 판단하지 마십시오. 긴 답변이 더 정확하거나 더 완전한 것은 아닙니다.",
+    "   짧아도 질문에 필요한 내용을 틀림없이 담았으면 높은 점수를, 길어도 틀린 내용이나 근거 없는 서술이 있으면 그만큼 낮은 점수를 주십시오.",
+    "   소제목·서론·결론 같은 형식이나 문장의 유려함도 점수에 반영하지 않습니다.",
+    "",
+    "1) declined (Y/N): 답변이 질문에 답하기를 거절(유보)했는가.",
+    "   예) Y: \"자료에서 확인되지 않음\", \"제공된 사료만으로는 답할 수 없습니다\"가 답변의 결론인 경우.",
+    "   예) N: 일부 내용에 '확인되지 않는다'는 단서를 달았더라도 질문에 대한 답을 실제로 제시한 경우.",
+    "2) decline_justified (Y/N/해당없음): 거절이 타당한가. declined=N이면 '해당없음'.",
+    "   예) Y: 이동휘가 아우내 장터 시위를 지휘했는지 묻는 질문처럼 전제가 사실이 아니어서, 확인되지 않는다고 답한 경우.",
+    "   예) N: 사료에 답이 분명히 있는 질문(예: 특정 시위의 날짜와 주도 인물)인데도 확인되지 않는다고 답한 경우.",
+    "3) accuracy (1~5): 답변에 틀린 내용이 있는가. 1=핵심 내용이 틀림, 3=핵심은 맞으나 세부 오류 있음, 5=틀린 내용 없음.",
+    "   답변 전체가 거절뿐이면 '해당없음'을 고릅니다 (거절의 타당성은 2번에서 평가).",
+    "   예) 5: 서술한 인물·날짜·장소가 모두 맞음. 내용이 적더라도 틀린 것이 없으면 5.",
+    "   예) 2: 시위 날짜는 맞지만 주도 인물을 다른 지역 사건의 인물로 잘못 서술함.",
+    "4) completeness (1~5): 질문에 답하는 데 필요한 내용을 담았는가. 1=필요한 내용이 거의 없음, 3=절반 정도, 5=빠진 것 없음.",
+    "   예) 5: '누가, 언제, 어디서'를 물은 질문에 세 가지를 모두 답함 (두세 문장이어도 5).",
+    "   예) 2: 긴 배경 설명은 있으나 질문이 물은 인물의 역할은 언급하지 않음.",
+    "   타당한 거절(decline_justified=Y)은 거절 이유를 밝혔으면 5, 부당한 거절은 1로 채점합니다.",
+    "5) unsupported_claims (0 이상의 정수): 사료로 뒷받침되지 않는 주장의 개수. 인용 표시가 붙어 있는지와 무관하게 셉니다.",
+    "   예) 인용 없이 \"이 시위에는 약 3,000명이 참여했다\"고 썼고 사료에서 확인되지 않으면 1개.",
+    "   예) (raw_bibliography-123)을 인용했지만 그 사료에 해당 내용이 없으면 이것도 1개. 사료로 확인되는 주장은 인용이 없어도 세지 않습니다.",
+    "6) usefulness (1~5): 질문한 연구자·관람객에게 실제로 도움이 되는가. 1=쓸모없음, 5=그대로 활용 가능.",
+    "   예) 5: 답과 근거 사료를 바로 확인해 인용할 수 있음.",
+    "   예) 2: 틀린 내용은 없으나 질문과 관련이 적은 일반적 서술이 대부분임.",
+    "7) narrative_order (1~5/해당없음): 여러 사건의 경과·확산을 묻는 질문에서 사건이 올바른 시간 순서로 배열되었는가.",
+    "   1=순서가 대부분 틀림, 3=일부 뒤바뀜, 5=모두 올바름. 한 사건만 묻는 질문이거나 거절한 답변이면 '해당없음'.",
+    "   예) 2: 3월 26일 시위를 3월 1일 서울 시위보다 앞선 사건으로 서술함.",
+    "8) narrative_attribution (1~5/해당없음): 서사에 등장하는 인물·장소·행위가 올바른 사건과 사료에 귀속되었는가.",
+    "   1=다른 사건·지역의 인물이나 행위가 섞임, 3=일부 잘못 귀속, 5=모두 올바름. 7번과 같은 경우 '해당없음'.",
+    "   예) 2: 이웃 면의 시위 주도자를 질문한 시위의 주도자로 서술함.",
+    "",
+    "[citations] 시트: 답변 문장(claim)과 그 문장이 인용한 사료 원문(source_text)입니다.",
+    "  - supports: O=사료가 문장을 뒷받침함, △=일부만 뒷받침함, X=뒷받침하지 않거나 무관함.",
+    "다른 평가자와 상의하지 말고 독립적으로 채점해 주십시오. item_id와 cite_id는 수정하지 마십시오.",
+]
+
+
+def _is_failed(record: dict[str, Any]) -> bool:
+    answer = str(record.get("response", "")).strip()
+    return bool(record.get("generation_failed")) or not answer or bool(re.match(r"\[[A-Za-z ]*Error", answer))
+
+
+RECORD_TABLES = {"bibliography", "source_info", "event_info", "detail_place"}
+
+
+def _source_texts(keys: set[str]) -> dict[str, str]:
+    """Record text for citation keys "table:rowid" (see metrics.record_key)."""
+    by_table: dict[str, list[int]] = defaultdict(list)
+    for key in keys:
+        table, rowid = key.split(":")
+        if table in RECORD_TABLES:
+            by_table[table].append(int(rowid))
+    if not by_table:
+        return {}
+    conn = get_pg_connection()
+    cur = conn.cursor()
+    out = {}
+    for table, rowids in by_table.items():
+        cur.execute(f'SELECT rowid, tei FROM "raw_{table}" WHERE rowid = ANY(%s)', (sorted(rowids),))
+        for rowid, tei in cur.fetchall():
+            body = re.search(r"<body>(.*?)</body>", tei or "", flags=re.DOTALL)
+            out[f"{table}:{int(rowid)}"] = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body.group(1) if body else tei or "")).strip()
+    cur.close()
+    conn.close()
+    return out
+
+
+def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tuple[str, ...] = ("A", "B")) -> int:
+    """Blind rating workbooks for a run's answers (systems in RATED_SYSTEMS only)."""
+    out_dir, key_dir = RATING_DIR, RATING_KEY_DIR
+    records = [r for r in read_json(run_dir / "answers.json") if r.get("system") in RATED_SYSTEMS]
+    if not records:
+        raise SystemExit(f"평가할 답변이 없습니다 ({', '.join(RATED_SYSTEMS)} 시스템의 답변이 {run_dir}에 없음).")
+    n_models = len({r["model"] for r in records})
+    by_question: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_question[record["query_id"]].append(record)
+
+    usable = {q: rs for q, rs in by_question.items() if len(rs) == n_models and not any(_is_failed(r) for r in rs)}
+    skipped = len(by_question) - len(usable)
+
+    rng = random.Random(seed)
+    question_ids = sorted(usable)
+    if n_questions and n_questions < len(question_ids):
+        # Sample evenly across categories so every category is rated.
+        by_category: dict[str, list[str]] = defaultdict(list)
+        for q in question_ids:
+            by_category[usable[q][0].get("category", "")].append(q)
+        for ids in by_category.values():
+            rng.shuffle(ids)
+        picked = [q for group in itertools.zip_longest(*by_category.values()) for q in group if q]
+        question_ids = sorted(picked[:n_questions])
+
+    answer_rows, citation_rows, key = [], [], {}
+    for query_id in question_ids:
+        answers = list(usable[query_id])
+        rng.shuffle(answers)
+        for label, record in zip("ABCDEFGH", answers):
+            item_id = f"{query_id}-{label}"
+            key[item_id] = {"run": run_dir.name, "query_id": query_id, "model": record["model"], "category": record.get("category", ""),
+                            "source": record.get("source", ""), "answer_chars": len(record["response"])}
+            answer_rows.append({"item_id": item_id, "query_id": query_id, "question": record["user_input"],
+                                "answer_label": f"답변 {label}", "answer": record["response"]})
+            for sentence in re.split(r"(?<=[.!?。])\s+|\n+", record["response"]):
+                cited = {record_key(m.group(1), m.group(2)): m.group(0) for m in ID_RE.finditer(sentence)}
+                for cite_key, cite_text in cited.items():
+                    citation_rows.append({"cite_id": f"{item_id}#{len(citation_rows) + 1}", "item_id": item_id,
+                                          "claim": sentence.strip(), "cited_source": cite_text, "_key": cite_key})
+
+    sources = _source_texts({row["_key"] for row in citation_rows})
+    for row in citation_rows:
+        row["source_text"] = sources.get(row.pop("_key"), "[해당 사료 없음: 존재하지 않는 ID 인용]")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for rater in raters:
+        wb = new_workbook(INSTRUCTIONS)
+        add_sheet(wb, "answers", ["item_id", "query_id", "question", "answer_label", "answer", *RATING_COLUMNS, "note"], answer_rows,
+                  widths={"item_id": 14, "question": 50, "answer": 100, "note": 30},
+                  choices={c: values for c, values in RATING_CHOICES.items() if values})
+        add_sheet(wb, "citations", ["cite_id", "item_id", "claim", "cited_source", "source_text", "supports", "note"], citation_rows,
+                  widths={"cite_id": 16, "item_id": 14, "claim": 60, "source_text": 100, "note": 30},
+                  choices={"supports": list(SUPPORT_VALUES)})
+        path = out_dir / f"rating_{rater}.xlsx"
+        wb.save(path)
+        print(f"📝 {path}")
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key_path = key_dir / "blinding_key.json"
+    key_path.write_text(json.dumps(key, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"🔑 {key_path}  (평가자에게 전달하지 마세요. 평가자에게는 {out_dir} 폴더만 전달합니다)")
+    print(f"✅ 질문 {len(question_ids)}건 × 모델 {n_models}개 = 답변 {len(answer_rows)}개, 인용 검증 {len(citation_rows)}건")
+    if skipped:
+        print(f"⚠️ 생성 실패 답변이 있어 제외한 질문: {skipped}건")
+    cited_models = {key[row["item_id"]]["model"] for row in citation_rows}
+    uncited = sorted({v["model"] for v in key.values()} - cited_models)
+    if uncited:
+        print(f"ℹ️ 사료 ID를 인용하지 않는 모델(인용 정확성 산출 불가): {uncited}")
+    return 0
+
+
+def _fmt(value: float) -> str:
+    return "  n/a" if value != value else f"{value:5.2f}"
+
+
+def rate_score(files: list[Path]) -> int:
+    """Score completed rating workbooks (default: every rating_*.xlsx in annotation/rating/)."""
+    files = files or sorted(RATING_DIR.glob("rating_*.xlsx"))
+    key_path = RATING_KEY_DIR / "blinding_key.json"
+    if not files or not key_path.exists():
+        raise SystemExit(f"채점할 워크북 또는 블라인드 키가 없습니다: {RATING_DIR}, {key_path}")
+    key = read_json(key_path)
+    run_names = {v.get("run") for v in key.values()}
+    from evaluation.common import RESULTS_DIR
+    output = (RESULTS_DIR / run_names.pop() / "rating.json") if len(run_names) == 1 and None not in run_names \
+        else RESULTS_DIR / "rating.json"
+    raters = {path.stem: path for path in files}
+
+    # ratings[metric][rater][item_id]
+    ratings: dict[str, dict[str, dict[str, float]]] = {m: defaultdict(dict) for m in RATING_COLUMNS}
+    supports: dict[str, dict[str, str]] = defaultdict(dict)
+    cite_item: dict[str, str] = {}
+    answer_chars: dict[str, int] = {item_id: v["answer_chars"] for item_id, v in key.items() if "answer_chars" in v}
+    invalid_cells = 0
+    for rater, path in raters.items():
+        for row in read_sheet(path, "answers"):
+            answer_chars.setdefault(row["item_id"], len(row.get("answer", "")))
+            for metric in RATING_COLUMNS:
+                cell = row.get(metric, "").upper()
+                if metric in ("declined", "decline_justified"):
+                    value = {YES: 1.0, NO: 0.0}.get(cell)
+                else:
+                    low, high = (0, 10**6) if metric == "unsupported_claims" else (1, 5)
+                    value = float(cell) if re.fullmatch(r"\d+(\.0+)?", cell) and low <= float(cell) <= high else None
+                if value is not None:
+                    ratings[metric][rater][row["item_id"]] = value
+                elif cell and cell != NA:
+                    invalid_cells += 1
+        for row in read_sheet(path, "citations"):
+            cite_item[row["cite_id"]] = row["item_id"]
+            if row["supports"] in SUPPORT_VALUES:
+                supports[rater][row["cite_id"]] = row["supports"]
+
+    models = list(dict.fromkeys(v["model"] for v in key.values()))
+    report: dict[str, Any] = {"n_raters": len(raters), "n_items": len(key), "n_questions": len({v["query_id"] for v in key.values()}),
+                              "models": {}, "significance": [], "agreement": {}, "length_bias": {}}
+
+    # Per-question score of a model = mean over raters.
+    per_question: dict[str, dict[str, dict[str, float]]] = {m: defaultdict(dict) for m in RATING_COLUMNS}
+    for metric in RATING_COLUMNS:
+        collected: dict[tuple[str, str], list[float]] = defaultdict(list)
+        for rater_scores in ratings[metric].values():
+            for item_id, score in rater_scores.items():
+                collected[(key[item_id]["model"], key[item_id]["query_id"])].append(score)
+        for (model, query_id), values in collected.items():
+            per_question[metric][model][query_id] = sum(values) / len(values)
+
+    print(f"평가자 {len(raters)}명, 질문 {report['n_questions']}건, 답변 {len(key)}개")
+    print("declined·decline_justified는 비율(0~1), unsupported_claims는 답변당 개수, 나머지는 1~5점 평균입니다.")
+    print(f"{'model':<42} {'metric':<18} {'n':>4} {'mean':>6}  95% CI")
+    for model in models:
+        report["models"][model] = {}
+        for metric in RATING_COLUMNS:
+            values = list(per_question[metric][model].values())
+            mean, lo, hi = bootstrap_ci(values)
+            report["models"][model][metric] = {"n": len(values), "mean": mean, "ci95": [lo, hi]}
+            print(f"{model:<42} {metric:<18} {len(values):>4} {_fmt(mean)}  [{_fmt(lo)}, {_fmt(hi)}]")
+
+        strict, lenient = [], []
+        for rater_supports in supports.values():
+            for cite_id, value in rater_supports.items():
+                if key[cite_item[cite_id]]["model"] == model:
+                    strict.append(1.0 if value == "O" else 0.0)
+                    lenient.append(SUPPORT_VALUES[value])
+        report["models"][model]["citation_accuracy"] = {
+            "n_judgements": len(strict),
+            "strict": sum(strict) / len(strict) if strict else None,
+            "lenient": sum(lenient) / len(lenient) if lenient else None,
+        }
+        if strict:
+            print(f"{model:<42} {'citation_accuracy':<18} {len(strict):>4} {_fmt(sum(strict) / len(strict))}  (△ 0.5점 포함 시 {_fmt(sum(lenient) / len(lenient))})")
+        else:
+            print(f"{model:<42} {'citation_accuracy':<18} {0:>4}   n/a  (인용 없음)")
+
+    print("\n쌍대 유의성 검정 (sign-flip permutation, Holm 보정)")
+    for metric in NUMERIC_METRICS:
+        rows = []
+        for model_a, model_b in itertools.combinations(models, 2):
+            shared = sorted(set(per_question[metric][model_a]) & set(per_question[metric][model_b]))
+            a = [per_question[metric][model_a][q] for q in shared]
+            b = [per_question[metric][model_b][q] for q in shared]
+            diff, lo, hi = bootstrap_ci([x - y for x, y in zip(a, b)])
+            rows.append({"metric": metric, "model_a": model_a, "model_b": model_b, "n_pairs": len(shared),
+                         "mean_diff_a_minus_b": diff, "ci95": [lo, hi], "p_permutation": paired_permutation_test(a, b)})
+        for row, adjusted in zip(rows, holm_adjust([r["p_permutation"] for r in rows])):
+            row["p_holm"] = adjusted
+            print(f"  {metric:<18} {row['model_a']} vs {row['model_b']}: Δ={_fmt(row['mean_diff_a_minus_b'])} (n={row['n_pairs']}), p_holm={adjusted:.4f}")
+        report["significance"].extend(rows)
+
+    for rater_a, rater_b in itertools.combinations(raters, 2):
+        entry: dict[str, Any] = {}
+        for metric in RATING_COLUMNS:
+            shared = sorted(set(ratings[metric][rater_a]) & set(ratings[metric][rater_b]))
+            # Ordinal scales and counts: quadratic-weighted kappa. Y/N columns: plain kappa.
+            weights = None if metric in ("declined", "decline_justified") else "quadratic"
+            entry[metric] = {"n": len(shared), "weighted_kappa" if weights else "kappa": cohen_kappa(
+                [int(ratings[metric][rater_a][i]) for i in shared], [int(ratings[metric][rater_b][i]) for i in shared], weights=weights)}
+        shared = sorted(set(supports[rater_a]) & set(supports[rater_b]))
+        entry["citation_supports"] = {"n": len(shared), "kappa": cohen_kappa(
+            [supports[rater_a][i] for i in shared], [supports[rater_b][i] for i in shared])}
+        report["agreement"][f"{rater_a} vs {rater_b}"] = entry
+        print(f"\n🤝 {rater_a} vs {rater_b}: " + ", ".join(
+            f"{name} κ={_fmt(v.get('weighted_kappa', v.get('kappa')))} (n={v['n']})" for name, v in entry.items()))
+
+    # Length bias: do longer answers get higher ratings? (item score = mean over raters)
+    print("\n📏 길이 편향 점검: 답변 길이(글자 수)와 점수의 상관계수")
+    for metric in LENGTH_BIAS_METRICS:
+        by_item: dict[str, list[float]] = defaultdict(list)
+        for rater_scores in ratings[metric].values():
+            for item_id, score in rater_scores.items():
+                by_item[item_id].append(score)
+        items = sorted(i for i in by_item if i in answer_chars)
+        lengths = [float(answer_chars[i]) for i in items]
+        scores = [sum(by_item[i]) / len(by_item[i]) for i in items]
+        defined = len(items) >= 3 and len(set(lengths)) > 1 and len(set(scores)) > 1
+        pearson = float(np.corrcoef(lengths, scores)[0, 1]) if defined else float("nan")
+        report["length_bias"][metric] = {"n": len(items), "pearson_r": pearson}
+        print(f"  {metric:<14} Pearson r={_fmt(pearson)} (n={len(items)})")
+    print("  (|r|이 크면 점수가 길이에 좌우되고 있다는 신호입니다. 시스템별 평균 길이가 다르면 해석에 유의하세요.)")
+    if invalid_cells:
+        print(f"\n⚠️ 허용되지 않는 값이 들어 있어 무시한 칸: {invalid_cells}개")
+        report["invalid_cells"] = invalid_cells
+
+    write_json(output, report)  # NaN is stored as null
+    print(f"\n💾 {output}")
+    return 0
