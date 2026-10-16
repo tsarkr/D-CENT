@@ -95,6 +95,25 @@ def _unfinished_run() -> Path:
     return runs[-1]
 
 
+def _check_server(keys: list[str]) -> None:
+    """The dcent systems call a running docent.php in evaluation mode; stop early if it is not set up."""
+    if not any(k in ("dcent", "no-paths") for k in keys):
+        return
+    url = setting("DOCENT_URL", "")
+    if not url:
+        raise SystemExit(
+            "dcent·no-paths 시스템은 실행 중인 웹 도슨트를 호출합니다.\n"
+            "  1) 다른 터미널에서:  DOCENT_EVAL_MODE=1 php -S localhost:8000\n"
+            "  2) secrets.toml에:   DOCENT_URL = \"http://localhost:8000/docent.php\"\n"
+            "  또는 기준 시스템만:  --systems passage,hybrid,graph")
+    try:
+        import requests
+        requests.get(url, params={"csrf": "1"}, timeout=10).raise_for_status()
+    except Exception as exc:
+        raise SystemExit(f"DOCENT_URL({url})에 연결할 수 없습니다: {exc}\n"
+                         "서버를 DOCENT_EVAL_MODE=1 php -S localhost:8000 으로 띄웠는지 확인하세요.")
+
+
 def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Path | None = None, resume: bool = False) -> Path:
     if resume:
         run_dir = _unfinished_run()
@@ -103,11 +122,13 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
         quick, limit = config["quick"], config["limit"]
         answers = [a for a in read_json(run_dir / "answers.json") if not a.get("generation_failed")]
         print(f"↩️  {run_dir.name} 이어서 실행 (완료된 답변 {len(answers)}개)")
+        _check_server(keys)
     else:
         dataset = dataset or BENCHMARK
         if not dataset.exists():
             raise SystemExit(f"{dataset}가 없습니다. 먼저 `python -m evaluation dataset`을 실행하세요.")
         keys = systems.resolve(selection)
+        _check_server(keys)
         run_dir = _new_run_dir(quick, limit)
         answers = []
         config = {
@@ -123,9 +144,6 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
         }
         write_json(run_dir / "config.json", config)
 
-    if any(k in ("dcent", "no-paths") for k in keys) and not setting("DOCENT_URL", ""):
-        raise SystemExit("dcent·no-paths 시스템에는 DOCENT_URL이 필요합니다 "
-                         "(DOCENT_EVAL_MODE=1로 실행 중인 docent.php 주소, secrets.toml 또는 환경변수).")
     delay = float(setting("EVAL_DELAY", "15"))
     questions = _select_questions(read_json(dataset), quick, limit)
     done = {(a["query_id"], a["system"]) for a in answers}

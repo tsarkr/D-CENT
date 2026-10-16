@@ -394,6 +394,22 @@ def load_third_party(path: Path) -> list[dict[str, Any]]:
 def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[Path] | None = None) -> list[dict[str, Any]]:
     events = load_events_from_pg()
     ev_by_id = {e["id"]: e for e in events}
+    # Every generated question is checked with the validation rules before it is kept,
+    # so that `dataset --generate` yields questions that pass validation.
+    event_index = load_event_index()
+    seen_pairs: set[tuple[str, ...]] = set()
+    rejected: Counter = Counter()
+
+    def accept(item: dict[str, Any], pair: tuple[str, ...]) -> bool:
+        if pair in seen_pairs:
+            rejected["같은 사건 조합"] += 1
+            return False
+        reasons, _, _ = check_item(item, event_index)
+        if reasons:
+            rejected[re.split(r"[:(]", reasons[0])[0]] += 1
+            return False
+        seen_pairs.add(pair)
+        return True
 
     # 1. Keep hand-written questions (authors' and third-party); template items are regenerated.
     existing = []
@@ -445,6 +461,11 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             target_ev = ev_by_id.get(r_id)
             if not target_ev or not target_ev["persons"] or target_ev["id"] == ev["id"]:
                 continue
+            # Trap subjects must not be recorded participants of the event the trap places them in.
+            outsider_a = next((p for p in ev["persons"] if p not in target_ev["persons"]), None)
+            outsider_b = next((p for p in target_ev["persons"] if p not in ev["persons"]), None)
+            if not outsider_a or not outsider_b or ev["title"] == target_ev["title"]:
+                continue
 
             # Multi-hop between ev and target_ev
             p1_str = ", ".join(ev["persons"][:3])
@@ -470,10 +491,12 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
                     f"두 사건은 {ev['place']}와 {target_ev['place']} 간의 연계망을 통해 순차적으로 발생함"
                 ],
                 "negative_traps": [
-                    f"{with_josa(ev['persons'][0])} {target_ev['place']}의 {target_ev['title']} 현장을 직접 지휘했다",
-                    f"{with_josa(target_ev['persons'][0])} {ev['place']} 사건의 총책임자로 체포되었다"
+                    f"{with_josa(outsider_a)} {target_ev['place']}의 {target_ev['title']} 현장을 직접 지휘했다",
+                    f"{with_josa(outsider_b)} {ev['place']} 사건의 총책임자로 체포되었다"
                 ]
             }
+            if not accept(item, tuple(sorted((ev["title"], target_ev["title"])))):
+                continue
             generated.append(item)
             seen_queries.add(query_text)
             mh_count += 1
@@ -505,12 +528,17 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
     for prov, e1, e2 in st_pairs:
         if st_count >= target_st:
             break
-        if e1["start_date"] == e2["start_date"] or not e1["persons"] or not e2["persons"]:
+        if e1["start_date"] == e2["start_date"] or not e1["persons"] or not e2["persons"] or e1["place"] == e2["place"]:
             continue
+        mover = next((p for p in e1["persons"] if p not in e2["persons"]), None)
+        if not mover:
+            continue
+        m1, m2 = int(e1["start_date"][5:7]), int(e2["start_date"][5:7])
+        period = f"1919년 {m1}월" if m1 == m2 else "1919년"
 
         q_id = f"Q_ST_{len(generated) + 1:02d}"
         query_text = (
-            f"1919년 3월 {prov} 지역에서 '{e1['title']}'({e1['start_date']})부터 '{e2['title']}'({e2['start_date']})로 "
+            f"{period} {prov} 지역에서 '{e1['title']}'({e1['start_date']})부터 '{e2['title']}'({e2['start_date']})로 "
             f"만세 운동이 확산되어 나간 경로와 각 시위의 주동 세력은 누구인가?"
         )
         if query_text in seen_queries:
@@ -531,10 +559,12 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
                 f"{prov} 내에서 초기 거점에서 점차 인근 읍·면 지역으로 시위가 파급됨"
             ],
             "negative_traps": [
-                f"{with_josa(e1['persons'][0])} {e2['start_date']} {e2['place']} 시위까지 직접 이동하여 주동했다",
+                f"{with_josa(mover)} {e2['start_date']} {e2['place']} 시위까지 직접 이동하여 주동했다",
                 f"{e2['place']} 시위가 {e1['place']}보다 먼저 발생한 발원지이다"
             ]
         }
+        if not accept(item, (e1["title"], e2["title"])):
+            continue
         generated.append(item)
         seen_queries.add(query_text)
         st_count += 1
@@ -591,11 +621,15 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
                 f"{with_josa(fig_name)} {ev['title']}의 격문을 직접 작성하여 배포하였다"
             ]
         }
+        if not accept(item, (fig_name, ev["title"])):
+            continue
         generated.append(item)
         seen_queries.add(query_text)
         zc_count += 1
 
     print(f"✅ 총 {len(generated)}건의 정량 평가 벤치마크 데이터셋 구축 완료!")
+    if rejected:
+        print("   검증 규칙에 걸려 버린 후보: " + ", ".join(f"{k} {v}" for k, v in rejected.most_common()))
     duplicate_ids = [i for i, n in Counter(item["id"] for item in generated).items() if n > 1]
     if duplicate_ids:
         raise ValueError(f"문항 id가 중복됩니다: {duplicate_ids}")
