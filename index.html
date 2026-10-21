@@ -37,7 +37,8 @@
     <script>
         const frame = document.getElementById('docent-frame');
         const search = window.location.search || '';
-        frame.src = 'https://11e.kr/index.html' + search;
+        // 매번 새 주소로 불러와 브라우저에 남은 옛 페이지를 쓰지 않게 함
+        frame.src = 'https://11e.kr/index.html' + (search ? search + '&' : '?') + '_=' + Date.now();
     </script>
 </body>
 

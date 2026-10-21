@@ -57,7 +57,7 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
     <!-- Custom CSS -->
-    <link rel="stylesheet" href="static/docent.css">
+    <link rel="stylesheet" href="static/docent.css?v=dev">
 </head>
 <body class="bg-ink-50 text-ink-900 font-sans min-h-screen">
 
@@ -149,16 +149,46 @@
                     <span>수원 사강리 시위 과정</span>
                 </button>
                 <!-- 추가 질문: 기본은 숨김, '더보기' 칩으로 펼침 -->
-                <button type="button" onclick="setQuery('태화관 독립선언과 경성 시내 시위')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">태화관 독립선언과 경성 시내 시위</button>
-                <button type="button" onclick="setQuery('남대문역 학생 만세시위의 주도 세력')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">남대문역 학생 만세시위의 주도 세력</button>
-                <button type="button" onclick="setQuery('유관순 일가의 아우내 장터 시위 피해')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">유관순 일가의 아우내 장터 시위 피해</button>
-                <button type="button" onclick="setQuery('발안장 시위와 제암리 학살 사건')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">발안장 시위와 제암리 학살 사건</button>
-                <button type="button" onclick="setQuery('사강리 시위의 확대와 순사 참살')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">사강리 시위의 확대와 순사 참살</button>
-                <button type="button" onclick="setQuery('손병희와 천도교 인물들의 활동')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">손병희와 천도교 인물들의 활동</button>
-                <button type="button" onclick="setQuery('평양고보 동맹휴학과 숭덕학교 휴교')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">평양고보 동맹휴학과 숭덕학교 휴교</button>
-                <button type="button" onclick="setQuery('평북 정주군 시위의 전개와 피해')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">평북 정주군 시위의 전개와 피해</button>
-                <button type="button" onclick="setQuery('장단군 장도면 산상 화톳불 시위')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">장단군 장도면 산상 화톳불 시위</button>
-                <button type="button" onclick="setQuery('동경 유학생 독립선언과 국내 독립선언 준비')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all cursor-pointer">동경 유학생 독립선언과 국내 독립선언 준비</button>
+                <button type="button" onclick="setQuery('태화관 독립선언과 경성 시내 시위')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>태화관 독립선언과 경성 시내 시위</span>
+                </button>
+                <button type="button" onclick="setQuery('남대문역 학생 만세시위의 주도 세력')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>남대문역 학생 만세시위의 주도 세력</span>
+                </button>
+                <button type="button" onclick="setQuery('유관순 일가의 아우내 장터 시위 피해')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>유관순 일가의 아우내 장터 시위 피해</span>
+                </button>
+                <button type="button" onclick="setQuery('발안장 시위와 제암리 학살 사건')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>발안장 시위와 제암리 학살 사건</span>
+                </button>
+                <button type="button" onclick="setQuery('사강리 시위의 확대와 순사 참살')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>사강리 시위의 확대와 순사 참살</span>
+                </button>
+                <button type="button" onclick="setQuery('손병희와 천도교 인물들의 활동')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>손병희와 천도교 인물들의 활동</span>
+                </button>
+                <button type="button" onclick="setQuery('평양고보 동맹휴학과 숭덕학교 휴교')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>평양고보 동맹휴학과 숭덕학교 휴교</span>
+                </button>
+                <button type="button" onclick="setQuery('평북 정주군 시위의 전개와 피해')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>평북 정주군 시위의 전개와 피해</span>
+                </button>
+                <button type="button" onclick="setQuery('장단군 장도면 산상 화톳불 시위')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>장단군 장도면 산상 화톳불 시위</span>
+                </button>
+                <button type="button" onclick="setQuery('동경 유학생 독립선언과 국내 독립선언 준비')" class="suggestion-chip extra-chip hidden px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>동경 유학생 독립선언과 국내 독립선언 준비</span>
+                </button>
                 <button type="button" aria-expanded="false" onclick="const open = this.getAttribute('aria-expanded') !== 'true'; document.querySelectorAll('#suggestion-chips .extra-chip').forEach(b => b.classList.toggle('hidden', !open)); this.setAttribute('aria-expanded', open); this.textContent = open ? '− 접기' : '+ 질문 더보기';" class="suggestion-chip px-3.5 py-1.5 border border-dashed border-ink-300 rounded-full text-xs text-ink-500 hover:border-ink-400 hover:text-ink-800 transition-all cursor-pointer">+ 질문 더보기</button>
             </div>
         </section>
@@ -272,6 +302,6 @@
     </footer>
 
     <!-- ═══════════════ SCRIPTS ═══════════════ -->
-    <script src="static/docent.js"></script>
+    <script src="static/docent.js?v=dev"></script>
 </body>
 </html>
