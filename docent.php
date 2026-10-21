@@ -90,7 +90,7 @@ if (isset($_GET['ajax'])) {
 $token = !empty($_SESSION['docent_csrf']) ? $_SESSION['docent_csrf'] : docent_generate_csrf_token();
 $_SESSION['docent_csrf'] = $token;
 $csrf_token = htmlspecialchars($token, ENT_QUOTES, 'UTF-8');
-$html_file = __DIR__ . '/docent.html';
+$html_file = file_exists(__DIR__ . '/docent.html') ? __DIR__ . '/docent.html' : __DIR__ . '/index.html';
 
 if (file_exists($html_file)) {
     $html = file_get_contents($html_file);

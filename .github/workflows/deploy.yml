@@ -1,0 +1,76 @@
+name: Deploy PHP Web Docent
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "docent.php"
+      - "docent_eng.php"
+      - "docent_cli.php"
+      - "docent.html"
+      - "includes/**"
+      - "static/**"
+      - "composer.json"
+      - "composer.lock"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: "deploy-php-docent"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Lint, Build & Deploy to PHP Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          extensions: mbstring, pdo, pdo_pgsql, curl, bcmath, xml
+          tools: composer:v2
+          coverage: none
+
+      - name: Lint PHP files
+        run: |
+          php -l docent.php
+          php -l docent_eng.php
+          php -l docent_cli.php
+          for f in includes/*.php; do
+            php -l "$f"
+          done
+
+      - name: Install Composer dependencies
+        run: composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
+
+      - name: Prepare deployment bundle
+        run: |
+          mkdir -p dist
+          cp docent.php docent_eng.php docent_cli.php composer.json composer.lock dist/
+          cp docent.html dist/index.html
+          cp -R includes static vendor dist/
+
+      - name: Deploy via SSH/rsync
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+          TARGET_DIR: ${{ secrets.SSH_TARGET_DIR || '/var/www/html/' }}
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSHPASS" ]; then
+            echo "::error::Missing required GitHub Secrets (SSH_HOST, SSH_USER, SSH_PASSWORD)."
+            exit 1
+          fi
+          sudo apt-get update -y && sudo apt-get install -y sshpass rsync
+          RSYNC_RSH="ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new" \
+            sshpass -e rsync -avz \
+            --exclude='.env' \
+            --exclude='.streamlit/' \
+            --exclude='.pg_meta_cache.json' \
+            dist/ "${SSH_USER}@${SSH_HOST}:${TARGET_DIR}"
