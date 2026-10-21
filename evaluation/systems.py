@@ -35,6 +35,8 @@ TOP_P = 0.8
 CONTEXT_CHARS = 11000        # evidence budget per question; the deployed system's DOCENT_CONTEXT_CHARS
 ANSWER_MAX_TOKENS = 1500     # output limit of every answer call
 
+MODEL_VERSIONS: Counter = Counter()  # dated model versions reported by the API (the alias can move)
+
 # key -> (label in tables, runner); filled at the end of the module
 SYSTEMS: dict[str, tuple[str, Any]] = {}
 MAIN_SYSTEMS = ["passage", "hybrid", "graph", "dcent"]
@@ -79,6 +81,7 @@ def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> s
             resp = requests.post(url, json=payload, timeout=60)
             if resp.status_code == 200:
                 data = resp.json()
+                MODEL_VERSIONS[data.get("modelVersion") or model] += 1
                 return data["candidates"][0]["content"]["parts"][0]["text"].strip()
             elif resp.status_code in (429, 503):
                 wait_time = max(15, (attempt + 1) * 10)
@@ -111,6 +114,26 @@ def pack_context(items: list[str], separator: str) -> list[str]:
 
 
 # ── Evidence helpers ─────────────────────────────────────────────────────────
+# Every system that receives record text gets it in blocks identified by table and row, and the
+# same citation rule as the deployed system in evaluation mode (includes/prompts.php), so that
+# citations can be verified and compared across systems.
+CITATION_RULE = (
+    "[근거 표기] 각 핵심 주장 뒤에 근거를 괄호로 표시하십시오. 괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 적힌 기록 식별자"
+    "(예: raw_bibliography-123) 또는 문맥에 그대로 적힌 사건명만 쓰십시오. 관계 이름, 블록 이름, "
+    "'지식그래프' 같은 표기는 근거로 쓰지 마십시오. 근거가 없는 질문의 전제는 부정하거나 '자료에서 확인되지 않음'이라고 답하십시오."
+)
+
+
+def record_block(table: str, rowid: Any, text: str) -> str:
+    return f'<SOURCE_EVIDENCE id="{table}-{rowid}">\n{text}\n</SOURCE_EVIDENCE>'
+
+
+def chunk_block(chunk: dict[str, Any]) -> str:
+    """A hybrid-baseline chunk ("raw_bibliography:123#0") as a citable record block."""
+    table, rowid = chunk["id"].split("#")[0].split(":")
+    return record_block(table, rowid, chunk["text"])
+
+
 _ENTITY_CACHE: dict[str, list[str]] = {}
 
 
@@ -336,13 +359,13 @@ def retrieve_vector_chunks(query: str, target_entities: list[str], top_k: int = 
     chunks = []
     for ent in target_entities[:3]:
         cur.execute("""
-            SELECT tei FROM raw_bibliography WHERE tei LIKE %s LIMIT %s
+            SELECT rowid, tei FROM raw_bibliography WHERE tei LIKE %s LIMIT %s
         """, (f"%{ent}%", top_k))
-        for r in cur.fetchall():
-            clean = re.sub(r'<[^>]+>', ' ', r[0])
+        for rowid, tei in cur.fetchall():
+            clean = re.sub(r'<[^>]+>', ' ', tei)
             clean = re.sub(r'\s+', ' ', clean).strip()
             if clean:
-                chunks.append(clean[:400])
+                chunks.append(record_block("raw_bibliography", rowid, clean[:400]))
         if len(chunks) >= top_k:
             break
     cur.close()
@@ -368,7 +391,7 @@ def run_hybrid_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     """BM25 + dense + rerank baseline. Retrieves from the question text only."""
     t0 = time.time()
     search_text = query_item["query"]
-    chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker="cross-encoder")]
+    chunks = [chunk_block(c) for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker="cross-encoder")]
     return _answer_from_chunks("Hybrid Vector RAG (BM25+Dense+Rerank)", query_item, pack_context(chunks, CHUNK_SEPARATOR), time.time() - t0)
 
 
@@ -378,7 +401,7 @@ def _answer_from_chunks(model_name: str, query_item: dict[str, Any], chunks: lis
         "You are a strict historical RAG assistant. Use only the retrieved document chunks. "
         "Separate documented facts from inference, never transfer a person or event across regions, "
         "and explicitly state '자료에서 확인되지 않음' when the question is not supported. "
-        "Every factual claim must be traceable to a retrieved chunk."
+        "Every factual claim must be traceable to a retrieved chunk.\n\n" + CITATION_RULE
     )
     user_prompt = f"[Retrieved Document Chunks]\n{context_str}\n\n[Question]\n{query_item['query']}"
 
@@ -444,7 +467,7 @@ def run_graph_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     system_prompt = (
         "You are a strict historical GraphRAG assistant. Answer only from the graph triples below. "
         "Do not infer an event/person relationship unless the exact triple supports it; "
-        "do not merge similarly named places; explicitly state '자료에서 확인되지 않음' when unsupported."
+        "do not merge similarly named places; explicitly state '자료에서 확인되지 않음' when unsupported.\n\n" + CITATION_RULE
     )
     user_prompt = f"[Knowledge Graph Relationships]\n{context_str}\n\n[Question]\n{query_item['query']}"
 
@@ -516,7 +539,7 @@ def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
             clean = re.sub(r'<[^>]+>', ' ', tei)
             clean = re.sub(r'\s+', ' ', clean).strip()[:500]
             envelopes.append(
-                f'<SOURCE_EVIDENCE id="raw_bib_{rowid}" entity="{ent}">\n'
+                f'<SOURCE_EVIDENCE id="raw_bibliography-{rowid}" entity="{ent}">\n'
                 f'  [사료 원문: {clean}]\n'
                 f'</SOURCE_EVIDENCE>'
             )
@@ -574,7 +597,7 @@ def run_docent_hybrid_rag(
         "4. [답변의 완결성]\n"
         "문장이 중간에 끊기지 않도록 분량을 조절하십시오. 마지막 단락(결론)은 해당 사건이나 인물이 지니는 역사적 의의를 2~3문장으로 간결하고 명확하게 요약하여 완벽하게 끝맺음하십시오.\n\n"
         "5. [엄격 모드 출력]\n"
-        "각 핵심 주장 뒤에 근거를 괄호로 표시하십시오. 괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 적힌 id(예: raw_bib_123) "
+        "각 핵심 주장 뒤에 근거를 괄호로 표시하십시오. 괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 적힌 id(예: raw_bibliography-123) "
         "또는 <GRAPH_TOPOLOGY>에 그대로 적힌 사건명만 쓰십시오. 관계 이름(P70_documents, P106i 등), 블록 이름(GRAPH_TOPOLOGY, 블록 1), "
         "'Graph DB'나 '지식그래프' 같은 표기는 근거로 쓰지 마십시오. "
         "근거가 없는 질문의 전제는 부정하거나 '자료에서 확인되지 않음'이라고 답하십시오. "
@@ -619,11 +642,8 @@ def run_hybrid_2stage(query_item: dict[str, Any]) -> dict[str, Any]:
     """Ablation: the hybrid baseline's evidence, answered with Docent's fact table -> answer generation."""
     # Same search text, top_k and budget cut as run_hybrid_vector_rag; each chunk gets a citable id.
     search_text = query_item["query"]
-    chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker="cross-encoder")]
-    evidence = "\n\n".join(
-        f'<SOURCE_EVIDENCE id="chunk_{n}">\n  [사료 원문: {chunk}]\n</SOURCE_EVIDENCE>'
-        for n, chunk in enumerate(pack_context(chunks, CHUNK_SEPARATOR), 1)
-    )
+    chunks = [chunk_block(c) for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker="cross-encoder")]
+    evidence = "\n\n".join(pack_context(chunks, "\n\n"))
     return run_docent_hybrid_rag(query_item, "Hybrid + 2-Stage (Ablation)", scoped_context=evidence)
 
 

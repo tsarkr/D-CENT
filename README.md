@@ -168,8 +168,9 @@ deployed system. `explain` allows five requests per minute, so keep `EVAL_DELAY`
 ### Run results
 
 `results/<date_time>/` holds `config.json` (conditions, model, code version), `answers.json` (answers and
-evidence), `scores.csv` (scores per question and system), `report.md`, `table_main.tex`, and
-`table_by_category.tex`.
+evidence), `scores.csv` (scores per question and system), `report.md`, `table_main.tex`,
+`table_by_category.tex`, `case_study.md` (one question, D-CENT next to the best baseline), and
+`error_analysis.xlsx` (20 D-CENT answers to code for the four failure modes; rerun `report` to tally them).
 
 The report contains per-system measures (mean and 95% bootstrap CI), the planned comparisons (RQ1: D-CENT
 against the baselines; RQ2: contributions of the narrative paths, query generation, two-stage generation,
@@ -181,7 +182,9 @@ testing, and run-to-run variation is shown.
 ### Benchmark
 
 `dataset` validates `dataset/questions.json` and writes the questions that pass (with particle corrections)
-to `dataset/benchmark.json`; the validation workbook with a 30% review sample goes to `dataset/validation/`.
+to `dataset/benchmark.json`; the validation workbook with a 30% review sample and the composition table `benchmark_table.tex` go to
+`dataset/validation/`. Reference facts of template questions state only what the event register records (persons,
+dates, places, links between related incidents, and the order given by the dates).
 `dataset --generate` first regenerates the template questions from the event register (curated and
 third-party questions are kept) and merges external questions from `dataset/third_party/*.json`, in the
 format of [third_party_template.json](./evaluation/dataset/third_party_template.json) with `author` filled in.

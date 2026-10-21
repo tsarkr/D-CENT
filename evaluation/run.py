@@ -171,8 +171,11 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
             if delay > 0:
                 time.sleep(delay)
         write_json(run_dir / "answers.json", answers)  # after every question, for --resume
+        config["model_versions"] = dict(systems.MODEL_VERSIONS)
+        write_json(run_dir / "config.json", config)
 
     write_scores(run_dir, read_json(dataset))
+    config["model_versions"] = dict(systems.MODEL_VERSIONS)  # calls of this harness; the server uses the same key and alias
     config["complete"] = True
     config["finished"] = dt.datetime.now().isoformat(timespec="seconds")
     write_json(run_dir / "config.json", config)

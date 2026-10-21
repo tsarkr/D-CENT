@@ -19,8 +19,12 @@ from typing import Any
 
 from pipeline.config import ROOT
 
-from evaluation.common import GRAPH_RESULTS, RESULTS_DIR, bootstrap_ci, holm_adjust, paired_permutation_test, read_json
-from evaluation.metrics import METRICS, SOURCE_ORDER, analyze
+import random
+
+from evaluation.common import (
+    GRAPH_RESULTS, RESULTS_DIR, add_sheet, bootstrap_ci, holm_adjust, new_workbook, paired_permutation_test, read_json, read_sheet,
+)
+from evaluation.metrics import METRICS, SOURCE_ORDER, analyze, verify_answer
 
 LABEL = {
     "faithfulness": "Fact recall (%) ↑",
@@ -296,6 +300,13 @@ def report(run_dirs: list[Path]) -> Path:
     for r in flagged[:40]:
         md.append(f"- `{r['query_id']}` {labels.get(r['system'], r['system'])}: {r['trap_flagged_text'][:200]}")
 
+    # 10. Worked example and error analysis (from the latest run)
+    md.append("\n## 10. 사례와 오류 분석\n")
+    case = write_case_study(run_dirs[-1], labels)
+    md.append(f"- 사례: `{case.name}` — 질문 하나에 대한 D-CENT의 서사 경로·팩트 표·답변과 기준선 답변, 인용 검증 결과."
+              if case else "- 사례: D-CENT(end-to-end) 답변이 없어 만들지 않았습니다.")
+    md.append(_error_section(run_dirs[-1]))
+
     path = out_dir / "report.md"
     path.write_text("\n".join(md) + "\n", encoding="utf-8")
     _print_summary(title, table, header, contrasts, path)
@@ -366,3 +377,95 @@ def _print_summary(title: str, table: list[list[str]], header: list[str], contra
         for c in shown:
             print(f"  {c['a']} vs {c['b']}: {c['diff']:+.1f} (n={c['n']}, p={c['p_holm']:.4f}){' *' if c['p_holm'] < 0.05 else ''}")
     print(f"\n📄 {path}")
+
+
+# ── Worked example ───────────────────────────────────────────────────────────
+NARRATIVE_CATEGORIES = ("Spatial-Temporal Diffusion", "Multi-hop Chaining")
+
+
+def write_case_study(run_dir: Path, labels: dict[str, str]) -> Path | None:
+    """case_study.md: one narrative question, D-CENT end to end next to the best-scoring baseline."""
+    answers = [a for a in read_json(run_dir / "answers.json") if not a.get("generation_failed")]
+    scores = {}
+    with (run_dir / "scores.csv").open(encoding="utf-8", newline="") as f:
+        for r in csv.DictReader(f):
+            scores[(r["query_id"], r["system"])] = r
+    candidates = [a for a in answers if a["system"] == "dcent" and a["category"] in NARRATIVE_CATEGORIES
+                  and str(a.get("narrative_used")).lower() == "true"] or [a for a in answers if a["system"] == "dcent"]
+    if not candidates:
+        return None
+
+    def recall(a: dict[str, Any]) -> float:
+        return float(scores.get((a["query_id"], a["system"]), {}).get("faithfulness") or 0)
+
+    case = max(candidates, key=lambda a: (recall(a), -len(a["response"])))
+    others = [a for a in answers if a["query_id"] == case["query_id"] and a["system"] in ("passage", "hybrid", "graph")]
+    baseline = max(others, key=recall) if others else None
+
+    def cites(a: dict[str, Any]) -> str:
+        found = verify_answer(a["response"], a["retrieved_contexts"])
+        if not found:
+            return "인용 없음"
+        return "; ".join(f"{c['text']} ({'유효' if c['valid'] else '무효'}, {c['kind']})" for c in found[:20])
+
+    context = (case["retrieved_contexts"] or [""])[0]
+    lines = [f"# 사례: {case['query_id']} ({case['category']})", "", f"**질문** {case['user_input']}", "",
+             "**기준 사실**", "", *[f"- {line}" for line in case["reference"].split("\n")], "",
+             "## D-CENT (end-to-end)", "", f"사실 재현율 {recall(case):.0f}%", "",
+             "**생성 문맥 앞부분 (서사 경로가 맨 앞)**", "", "```text", context[:2500], "```", "",
+             "**팩트 표**", "", case.get("fact_table") or "(없음)", "", "**답변**", "", case["response"], "",
+             f"**인용 검증** {cites(case)}", ""]
+    if baseline:
+        lines += [f"## {labels.get(baseline['system'], baseline['system'])}", "", f"사실 재현율 {recall(baseline):.0f}%", "",
+                  "**답변**", "", baseline["response"], "", f"**인용 검증** {cites(baseline)}", ""]
+    path = run_dir / "case_study.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+# ── Error analysis ───────────────────────────────────────────────────────────
+FAILURE_MODES = ["misattribution", "unsupported", "conflation", "misordering"]
+ERROR_SAMPLE = 20
+ERROR_INSTRUCTIONS = [
+    "D-CENT 답변 오류 분석 시트",
+    "",
+    "각 답변을 근거(evidence)와 대조해, 논문이 정의한 네 가지 실패가 있으면 해당 칸에 Y, 없으면 N을 적습니다.",
+    "  misattribution: 서로 다른 사건·기록의 인물·장소·행위를 하나로 합침",
+    "  unsupported: 근거에 없는 내용을 서술함 (모델의 사전 지식으로 채움)",
+    "  conflation: 동명이인이나 같은 이름의 다른 마을을 같은 것으로 취급함",
+    "  misordering: 사건의 시간 순서를 잘못 배열함",
+    "note에는 오류가 난 문장과 원인(검색 실패, 그래프 누락, 생성 오류 등)을 적어 주십시오.",
+]
+
+
+def _error_section(run_dir: Path) -> str:
+    """Create error_analysis.xlsx once (seeded sample of D-CENT answers); summarise it when coded."""
+    path = run_dir / "error_analysis.xlsx"
+    if not path.exists():
+        answers = [a for a in read_json(run_dir / "answers.json") if a["system"] == "dcent" and not a.get("generation_failed")]
+        if not answers:
+            return "- 오류 분석: D-CENT(end-to-end) 답변이 없어 시트를 만들지 않았습니다."
+        rng = random.Random(42)
+        by_cat: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for a in answers:
+            by_cat[a["category"]].append(a)
+        for group in by_cat.values():
+            rng.shuffle(group)
+        picked = [a for row in zip(*[g + [None] * ERROR_SAMPLE for g in by_cat.values()]) for a in row if a][:ERROR_SAMPLE]
+        rows = [{"query_id": a["query_id"], "category": a["category"], "question": a["user_input"], "reference": a["reference"],
+                 "answer": a["response"], "evidence": (a["retrieved_contexts"] or [""])[0][:3000]} for a in picked]
+        wb = new_workbook(ERROR_INSTRUCTIONS)
+        add_sheet(wb, "answers", ["query_id", "category", "question", "reference", "answer", "evidence", *FAILURE_MODES, "note"], rows,
+                  widths={"question": 40, "reference": 50, "answer": 80, "evidence": 80, "note": 40},
+                  choices={m: ["Y", "N"] for m in FAILURE_MODES})
+        wb.save(path)
+        return f"- 오류 분석: `{path.name}`에 D-CENT 답변 {len(rows)}개를 범주별로 뽑았습니다. 네 가지 실패 유형을 표시한 뒤 `report`를 다시 실행하면 집계가 여기에 나옵니다."
+    rows = read_sheet(path, "answers")
+    coded = [r for r in rows if any(r.get(m, "").upper() in ("Y", "N") for m in FAILURE_MODES)]
+    if not coded:
+        return f"- 오류 분석: `{path.name}`가 아직 채워지지 않았습니다."
+    counts = {m: sum(r.get(m, "").upper() == "Y" for r in coded) for m in FAILURE_MODES}
+    any_error = sum(any(r.get(m, "").upper() == "Y" for m in FAILURE_MODES) for r in coded)
+    table = _md_table(["실패 유형", "답변 수", "비율"], [[m, n, f"{n / len(coded):.0%}"] for m, n in counts.items()]
+                      + [["하나 이상", any_error, f"{any_error / len(coded):.0%}"]])
+    return f"**오류 분석** (D-CENT 답변 {len(coded)}개, `{path.name}`)\n\n" + table

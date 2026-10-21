@@ -166,7 +166,7 @@ DOCENT_EVAL_MODE=1 php -S localhost:8000     # 다른 터미널에서
 ### 실행 결과
 
 `results/<날짜_시각>/`에 `config.json`(조건·모델·코드 버전), `answers.json`(답변과 근거),
-`scores.csv`(질문×시스템 점수), `report.md`, `table_main.tex`, `table_by_category.tex`가 생깁니다.
+`scores.csv`(질문×시스템 점수), `report.md`, `table_main.tex`, `table_by_category.tex`, `case_study.md`(질문 하나의 D-CENT·기준선 답변 비교), `error_analysis.xlsx`(D-CENT 답변 20개의 실패 유형 표시용, 채운 뒤 `report`를 다시 실행하면 집계됨)가 생깁니다.
 
 리포트에는 시스템별 지표(평균과 95% 부트스트랩 CI), 계획된 비교(RQ1: D-CENT 대 기준선, RQ2: 서사 경로·
 쿼리 생성·2단계 생성·근거의 기여; 쌍대 순열 검정, 지표별 Holm 보정), 범주별·출처별 결과, 인용 검증,
@@ -176,7 +176,8 @@ context precision, 전문가 평가, 그래프 규모, 직접 확인할 항목(�
 ### 벤치마크
 
 `dataset`은 `dataset/questions.json`을 검증해 통과한 문항(조사 교정 포함)을 `dataset/benchmark.json`에
-씁니다. 검증 워크북(사람 검토용 30% 표본 포함)은 `dataset/validation/`에 생깁니다.
+씁니다. 검증 워크북(사람 검토용 30% 표본 포함)과 논문용 구성표 `benchmark_table.tex`는 `dataset/validation/`에 생깁니다.
+템플릿 문항의 기준 사실은 사건 대장에 기록된 것(관련 인물, 날짜, 장소, 관련 사건 연결, 날짜로 정해지는 순서)만 씁니다.
 `dataset --generate`는 사건 대장에서 템플릿 문항을 다시 만들고(저자·외부 출제 문항은 유지),
 `dataset/third_party/*.json`의 외부 출제 문항을 병합합니다. 형식은
 [third_party_template.json](./evaluation/dataset/third_party_template.json)을 따르며 `author`를 기입해야 합니다.

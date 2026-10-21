@@ -65,6 +65,11 @@ def with_josa(word: str, after_consonant: str = "이", after_vowel: str = "가")
     return word + (after_consonant if has_batchim else after_vowel)
 
 
+def particle(word: str, after_consonant: str, after_vowel: str) -> str:
+    """Only the particle that with_josa would attach (for words followed by a parenthesis)."""
+    return with_josa(word, after_consonant, after_vowel)[len(word):]
+
+
 def strip_josa(token: str) -> str:
     """Drop one trailing particle so '이동휘가' can be matched as '이동휘'."""
     for josa in ("에서는", "에서", "으로", "까지", "보다", "에게", "이", "가", "은", "는", "을", "를", "의", "에", "와", "과"):
@@ -472,8 +477,8 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             p2_str = ", ".join(target_ev["persons"][:3])
             q_id = f"Q_MH_{len(generated) + 1:02d}"
             query_text = (
-                f"'{ev['title']}'(발생지: {ev['place']})과 이에 연계된 '{target_ev['title']}'(발생지: {target_ev['place']})에서 "
-                f"각각 활동한 주요 인물들과 그들의 구체적인 역할은 무엇인가?"
+                f"'{ev['title']}'(발생지: {ev['place']}){particle(ev['title'], '과', '와')} 이와 관련된 사건으로 기록된 '{target_ev['title']}'(발생지: {target_ev['place']})에 "
+                f"각각 관련 인물로 기록된 사람은 누구이며, 두 사건은 기록에서 어떻게 연결되어 있는가?"
             )
             if query_text in seen_queries:
                 continue
@@ -485,14 +490,15 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
                 "query": query_text,
                 "hops": 2,
                 "target_entities": list(set([ev["title"][:15], target_ev["title"][:15], ev["place"].split()[-1], target_ev["place"].split()[-1]] + ev["persons"][:2] + target_ev["persons"][:2])),
+                # Reference facts state only what the event register records: related persons and the link.
                 "gold_facts": [
-                    f"{ev['title']}에서는 {p1_str} 등이 참여하여 활동을 전개함",
-                    f"이와 연계된 {target_ev['title']}에서는 {p2_str} 등이 주도적 역할을 수행함",
-                    f"두 사건은 {ev['place']}와 {target_ev['place']} 간의 연계망을 통해 순차적으로 발생함"
+                    f"{ev['title']}의 관련 인물로 {p1_str} 등이 기록되어 있음",
+                    f"{target_ev['title']}의 관련 인물로 {p2_str} 등이 기록되어 있음",
+                    f"사건 대장은 {with_josa(ev['title'], '과', '와')} {with_josa(target_ev['title'], '을', '를')} 관련 사건으로 연결함",
                 ],
                 "negative_traps": [
                     f"{with_josa(outsider_a)} {target_ev['place']}의 {target_ev['title']} 현장을 직접 지휘했다",
-                    f"{with_josa(outsider_b)} {ev['place']} 사건의 총책임자로 체포되었다"
+                    f"{with_josa(outsider_b)} {ev['title']}의 총책임자로 체포되었다"
                 ]
             }
             if not accept(item, tuple(sorted((ev["title"], target_ev["title"])))):
@@ -538,8 +544,8 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
 
         q_id = f"Q_ST_{len(generated) + 1:02d}"
         query_text = (
-            f"{period} {prov} 지역에서 '{e1['title']}'({e1['start_date']})부터 '{e2['title']}'({e2['start_date']})로 "
-            f"만세 운동이 확산되어 나간 경로와 각 시위의 주동 세력은 누구인가?"
+            f"{period} {prov} 지역의 '{e1['title']}'({e1['start_date']}){particle(e1['title'], '과', '와')} '{e2['title']}'({e2['start_date']}){particle(e2['title'], '은', '는')} "
+            f"어떤 순서로 어디에서 일어났으며, 각 시위에 관련 인물로 기록된 사람은 누구인가?"
         )
         if query_text in seen_queries:
             continue
@@ -553,10 +559,11 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             "query": query_text,
             "hops": 2,
             "target_entities": list(set([prov, e1["place"].split()[-1], e2["place"].split()[-1]] + e1["persons"][:2] + e2["persons"][:2])),
+            # Reference facts: dates, places, and recorded persons only; the order follows from the dates.
             "gold_facts": [
-                f"{e1['start_date']} {e1['place']}에서 {p1} 등의 주도로 초기 시위가 발발함",
-                f"이후 {e2['start_date']}에 이르러 {e2['place']}에서 {p2} 등에 의해 시위가 확산·계승됨",
-                f"{prov} 내에서 초기 거점에서 점차 인근 읍·면 지역으로 시위가 파급됨"
+                f"{with_josa(e1['title'], '은', '는')} {e1['start_date']} {e1['place']}에서 일어났으며 관련 인물로 {p1} 등이 기록되어 있음",
+                f"{with_josa(e2['title'], '은', '는')} {e2['start_date']} {e2['place']}에서 일어났으며 관련 인물로 {p2} 등이 기록되어 있음",
+                f"{with_josa(e1['title'], '이', '가')} {e2['title']}보다 먼저 일어남",
             ],
             "negative_traps": [
                 f"{with_josa(mover)} {e2['start_date']} {e2['place']} 시위까지 직접 이동하여 주동했다",
@@ -589,43 +596,43 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             break
         if not ev["persons"] or not ev["place"]:
             continue
-
-        # Pair a famous figure with a completely unrelated regional event
-        fig_name, fig_loc, fig_role = famous_figures[zc_count % len(famous_figures)]
-        if fig_name in ev["persons"] or fig_loc in ev["place"]:
-            continue
-
-        q_id = f"Q_ZC_{len(generated) + 1:02d}"
-        query_text = (
-            f"{with_josa(fig_name)} {ev['start_date'] if ev['start_date'] else '1919년 3월'} {ev['place']}에서 일어난 "
-            f"'{ev['title']}' 현장에서 군중을 직접 인솔하며 만세 시위를 지휘했는가?"
-        )
-        if query_text in seen_queries:
-            continue
-
         real_leaders = ", ".join(ev["persons"][:3])
-        item = {
-            "id": q_id,
-            "category": "Zero-Correlation Trap",
-            "source": "template",
-            "query": query_text,
-            "hops": 0,
-            "target_entities": [fig_name, ev["place"].split()[-1], ev["title"][:12]] + ev["persons"][:2],
-            "gold_facts": [
-                f"{with_josa(fig_name, '은', '는')} 해당 시기 {fig_loc} 등에서 독자적인 활동({fig_role})을 수행 중이었음",
-                f"{ev['place']}의 {with_josa(ev['title'], '은', '는')} 현지 인물인 {real_leaders} 등에 의해 독자적으로 주도됨",
-                f"{with_josa(fig_name)} {ev['place']} 시위 현장에 직접 나타나 군중을 지휘했다는 것은 사료적 근거가 없는 허위 사실임"
-            ],
-            "negative_traps": [
-                f"{with_josa(fig_name)} {ev['place']} 시위대 선두에서 태극기를 흔들다 현장에서 일제 순사에게 연행되었다",
-                f"{with_josa(fig_name)} {ev['title']}의 격문을 직접 작성하여 배포하였다"
-            ]
-        }
-        if not accept(item, (fig_name, ev["title"])):
-            continue
-        generated.append(item)
-        seen_queries.add(query_text)
-        zc_count += 1
+        # Pair the event with a well-known figure who is not recorded for it (try each in turn).
+        for offset in range(len(famous_figures)):
+            fig_name, fig_loc, _ = famous_figures[(zc_count + offset) % len(famous_figures)]
+            if fig_name in ev["persons"] or fig_loc in ev["place"]:
+                continue
+            q_id = f"Q_ZC_{len(generated) + 1:02d}"
+            query_text = (
+                f"{with_josa(fig_name)} {ev['start_date'] if ev['start_date'] else '1919년 3월'} {ev['place']}에서 일어난 "
+                f"'{ev['title']}' 현장에서 군중을 직접 인솔하며 만세 시위를 지휘했는가?"
+            )
+            if query_text in seen_queries:
+                continue
+            item = {
+                "id": q_id,
+                "category": "Zero-Correlation Trap",
+                "source": "template",
+                "query": query_text,
+                "hops": 0,
+                "target_entities": [fig_name, ev["place"].split()[-1], ev["title"][:12]] + ev["persons"][:2],
+                # Reference facts: what the register records, and that it does not record the figure.
+                "gold_facts": [
+                    f"{ev['title']}의 관련 인물로 {real_leaders} 등이 기록되어 있음",
+                    f"{ev['title']}의 관련 인물 기록에 {fig_name}의 이름은 없음",
+                    f"{with_josa(fig_name)} 이 시위 현장을 지휘했다는 기록은 확인되지 않음",
+                ],
+                "negative_traps": [
+                    f"{with_josa(fig_name)} {ev['place']} 시위대 선두에서 태극기를 흔들다 현장에서 일제 순사에게 연행되었다",
+                    f"{with_josa(fig_name)} {ev['title']}의 격문을 직접 작성하여 배포하였다"
+                ]
+            }
+            if not accept(item, (fig_name, ev["title"])):
+                continue
+            generated.append(item)
+            seen_queries.add(query_text)
+            zc_count += 1
+            break
 
     print(f"✅ 총 {len(generated)}건의 정량 평가 벤치마크 데이터셋 구축 완료!")
     if rejected:
@@ -654,4 +661,35 @@ def build(generate: bool = False) -> int:
     if not QUESTIONS.exists():
         raise SystemExit(f"{QUESTIONS}가 없습니다. `python -m evaluation dataset --generate`로 만드세요.")
     validate_dataset(QUESTIONS, VALIDATION_DIR, seed=42, save_passed=BENCHMARK)
+    write_composition_table(json.loads(BENCHMARK.read_text(encoding="utf-8")), VALIDATION_DIR / "benchmark_table.tex")
     return 0
+
+
+CATEGORY_NAMES = {
+    "Spatial-Temporal Diffusion": "Spatio-temporal diffusion",
+    "Multi-hop Chaining": "Multi-hop chaining",
+    "Zero-Correlation Trap": "False premise (zero-correlation trap)",
+    "Kinship & Affiliation": "Kinship and affiliation",
+}
+
+
+def write_composition_table(items: list[dict[str, Any]], path: Path) -> None:
+    """Benchmark composition by category and source, printed and written as a LaTeX table."""
+    counts = Counter((item["category"], item.get("source") or "template") for item in items)
+    sources = [s for s in ("curated", "third_party", "template") if any(k[1] == s for k in counts)]
+    categories = sorted({c for c, _ in counts}, key=lambda c: -sum(n for (cc, _), n in counts.items() if cc == c))
+    print("\n벤치마크 구성 (범주 × 출처)")
+    lines = [r"\begin{table}[t]", r"\centering", r"\caption{Benchmark composition.}", r"\label{tab:benchmark}",
+             r"\begin{tabular}{l" + "r" * (len(sources) + 1) + "}", r"\toprule",
+             r"\textbf{Category} & " + " & ".join(rf"\textbf{{{s.replace('_', ' ').capitalize()}}}" for s in sources) + r" & \textbf{Total} \\",
+             r"\midrule"]
+    for c in categories:
+        row = [counts.get((c, s), 0) for s in sources]
+        print(f"  {c:<30} " + "  ".join(f"{s} {n}" for s, n in zip(sources, row)) + f"  total {sum(row)}")
+        lines.append(f"{CATEGORY_NAMES.get(c, c)} & " + " & ".join(map(str, row)) + f" & {sum(row)} \\\\")
+    totals = [sum(n for (_, s), n in counts.items() if s == src) for src in sources]
+    lines += [r"\midrule", "Total & " + " & ".join(map(str, totals)) + f" & {sum(totals)} \\\\", r"\bottomrule",
+              r"\end{tabular}", r"\end{table}", ""]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"📄 {path}")
