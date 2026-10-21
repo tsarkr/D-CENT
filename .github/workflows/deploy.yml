@@ -68,6 +68,8 @@ jobs:
             exit 1
           fi
           sudo apt-get update -y && sudo apt-get install -y sshpass rsync
+          printf '%s\n' "$SSHPASS" | sshpass -e ssh -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
+            "sudo -S chown -R ${SSH_USER}:${SSH_USER} ${TARGET_DIR} 2>/dev/null || true"
           RSYNC_RSH="ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new" \
             sshpass -e rsync -avz \
             --exclude='.env' \
