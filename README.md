@@ -104,6 +104,7 @@ Diagnostics (read-only):
 .venv3.14/bin/python -m pipeline inspect search 유관순 아우내   # record search timing and index use
 .venv3.14/bin/python -m pipeline inspect counts                 # graph size → evaluation/results/graph/
 .venv3.14/bin/python -m pipeline inspect sparsity               # Event-layer sparsity → evaluation/results/graph/
+.venv3.14/bin/python -m pipeline inspect sources                # rows of the files in data/ and ID checks → evaluation/results/graph/
 ```
 
 ## Web docent

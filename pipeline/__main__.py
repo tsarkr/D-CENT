@@ -5,7 +5,7 @@
   python -m pipeline build graph      only the graph steps (6-8), from existing PostgreSQL data
   python -m pipeline build --yes      do not pause for the entity-list review
   python -m pipeline check            offline self-test (no database needed)
-  python -m pipeline inspect          list the read-only diagnostics (names, family, search, counts, sparsity)
+  python -m pipeline inspect          list the read-only diagnostics (names, family, search, counts, sparsity, sources)
 
 Settings (database, Neo4j, API keys, THESAURUS_CSV) come from environment variables
 or .streamlit/secrets.toml; see README.
@@ -73,7 +73,7 @@ def main() -> int:
     p_build.add_argument("--yes", action="store_true", help="do not pause for the entity-list review")
     sub.add_parser("check", help="offline self-test")
     p_inspect = sub.add_parser("inspect", help="read-only diagnostics of the databases")
-    p_inspect.add_argument("what", nargs="?", help="names | family | search | counts | sparsity")
+    p_inspect.add_argument("what", nargs="?", help="names | family | search | counts | sparsity | sources")
     p_inspect.add_argument("terms", nargs="*", help="question, name(s) to look up")
     args = parser.parse_args()
 

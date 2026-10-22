@@ -5,6 +5,7 @@
   python -m pipeline inspect search 이름 ...   time of the record search (pg_prefetch) per table, index use
   python -m pipeline inspect counts            nodes per label, relationships per type -> evaluation/results/graph/
   python -m pipeline inspect sparsity          how sparse the Event layer is, and why -> evaluation/results/graph/
+  python -m pipeline inspect sources           rows of the downloaded source files in data/ -> evaluation/results/graph/
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import statistics
 import time
 from typing import Any
 
-from pipeline.config import GRAPH_REPORT_DIR, get_neo4j_driver, get_pg_connection
+from pipeline.config import DATA_DIR, GRAPH_REPORT_DIR, get_neo4j_driver, get_pg_connection
 
 DEFAULT_QUESTION = "보성사에서 손병희를 명예총재로, 이종일을 단장으로 결성된 천도교 항일비밀결사는?"
 DEFAULT_NAMES = ["유관순", "아우내", "아우내 장터", "만세운동", "柳寬順"]
@@ -307,6 +308,122 @@ def sparsity() -> int:
     return 0
 
 
+# ── sources: rows of the downloaded files (no database) ───────────────────────
+# (label in the paper, file name prefix, identifier column)
+SOURCE_FILES = [
+    ("event register", "사건정보", "아이디"),
+    ("bibliographic records", "서지정보", "문서아이디"),
+    ("source entries", "출처정보", "출처정보아이디"),
+    ("detailed places", "세부장소_", "세부장소아이디"),
+    ("incident-place links", "사건-세부장소", None),
+    ("administrative regions", "행정구역", "행정구역 아이디"),
+    ("police organizations", "탄압기구(경찰)", None),
+    ("gendarmerie organizations", "탄압기구(헌병)", None),
+    ("military organizations", "탄압기구(군대)", None),
+]
+
+
+def _find_source(prefix: str):
+    import unicodedata
+    for path in sorted(DATA_DIR.iterdir()):
+        if unicodedata.normalize("NFC", path.name).startswith(prefix) and path.suffix in (".csv", ".xlsx"):
+            return path
+    return None
+
+
+def _source_rows(path) -> tuple[list[str], list[list[str]], str]:
+    """Header, data rows and provision date of one file. Comment lines start with '//';
+    blank rows are skipped; the first remaining row is the header."""
+    import io
+    import re
+    if path.suffix == ".xlsx":
+        import openpyxl
+        ws = openpyxl.load_workbook(path, read_only=True).worksheets[0]
+        rows = [["" if c is None else str(c) for c in r] for r in ws.iter_rows(values_only=True)]
+    else:
+        raw = path.read_bytes()
+        for enc in ("utf-8-sig", "cp949", "utf-16"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError(f"cannot decode {path.name}")
+        delimiter = "\t" if enc == "utf-16" else ","
+        rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    rows = [r for r in rows if any(c.strip() for c in r)]
+    comments = [r[0] for r in rows if r[0].lstrip().startswith("//")]
+    rows = [r for r in rows if not r[0].lstrip().startswith("//")]
+    date = ""
+    for line in comments:
+        m = re.search(r"제공일\s*:\s*(\d{4}-\d{2}-\d{2})", line)
+        if m:
+            date = m.group(1)
+    if not date:
+        m = re.search(r"_(\d{6}|\d{8})$", path.stem)
+        if m:
+            d = m.group(1)
+            d = d if len(d) == 8 else "20" + d
+            date = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    return [h.strip() for h in rows[0]], rows[1:], date
+
+
+def sources() -> int:
+    report: dict[str, Any] = {"data_dir": str(DATA_DIR), "files": [], "checks": {}}
+    columns: dict[str, dict[str, set]] = {}
+    print(f"{'table':28} {'rows':>8} {'distinct ids':>13}  provided    file")
+    for label, prefix, id_col in SOURCE_FILES:
+        path = _find_source(prefix)
+        if path is None:
+            print(f"{label:28} {'missing':>8}")
+            report["files"].append({"table": label, "file": None})
+            continue
+        header, rows, date = _source_rows(path)
+        distinct = None
+        if id_col in header:
+            i = header.index(id_col)
+            distinct = len({r[i] for r in rows if i < len(r)})
+        columns[label] = {h: {r[i].strip() for r in rows if i < len(r)} for i, h in enumerate(header)}
+        report["files"].append({"table": label, "file": path.name, "rows": len(rows),
+                                "distinct_ids": distinct, "provided": date})
+        print(f"{label:28} {len(rows):>8,} {distinct if distinct is not None else '':>13}  {date:10}  {path.name}")
+
+    src = columns.get("source entries", {})
+    events = columns.get("event register", {}).get("아이디", set())
+    bib = columns.get("bibliographic records", {}).get("문서아이디", set())
+    if src:
+        header, rows, _ = _source_rows(_find_source("출처정보"))
+        ie, idoc = header.index("사건아이디"), header.index("문서아이디")
+        src_events = src.get("사건아이디", set()) - {""}
+        src_docs = src.get("문서아이디", set()) - {""}
+        missing = src_events - events
+        lower = {e.lower() for e in events}
+        checks = {
+            "source entries: distinct incident ids": len(src_events),
+            "  not in the event register": len(missing),
+            "    of which differ only in letter case": sum(1 for e in missing if e.lower() in lower),
+            "  entries without an incident id": sum(1 for r in rows if not r[ie].strip()),
+            "source entries: distinct document ids": len(src_docs),
+            "  not among the bibliographic records": len(src_docs - bib),
+            "  entries without a document id": sum(1 for r in rows if not r[idoc].strip()),
+            "event register: incidents without a source entry": len(events - src_events),
+        }
+        report["checks"] = checks
+        report["not_in_register"] = sorted(missing)
+        report["not_in_bibliography"] = sorted(src_docs - bib)
+        print()
+        for k, v in checks.items():
+            print(f"{k:52} {v:>7,}")
+    print("\nrows = data rows, excluding header, comment ('//') and blank lines;"
+          " identifiers are compared after trimming spaces")
+    GRAPH_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path = GRAPH_REPORT_DIR / "sources.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"💾 {path}")
+    return 0
+
+
 def main(what: str | None, terms: list[str]) -> int:
     if what == "names":
         return names(" ".join(terms) or DEFAULT_QUESTION)
@@ -318,5 +435,7 @@ def main(what: str | None, terms: list[str]) -> int:
         return counts()
     if what == "sparsity":
         return sparsity()
+    if what == "sources":
+        return sources()
     print(__doc__)
     return 0 if what is None else 2

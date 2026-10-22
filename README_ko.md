@@ -103,6 +103,7 @@ EVAL_DELAY = "15"                                 # 호출 간격(초)
 .venv3.14/bin/python -m pipeline inspect search 유관순 아우내                # 기록 검색 시간·인덱스 사용
 .venv3.14/bin/python -m pipeline inspect counts                              # 그래프 규모 → evaluation/results/graph/
 .venv3.14/bin/python -m pipeline inspect sparsity                            # 사건 계층 희소성 → evaluation/results/graph/
+.venv3.14/bin/python -m pipeline inspect sources                             # data/ 원본 파일 행 수·식별자 대조 → evaluation/results/graph/
 ```
 
 ## 웹 도슨트
