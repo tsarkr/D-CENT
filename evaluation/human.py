@@ -50,17 +50,30 @@ TYPES = ["Person", "Place", "P14_carried_out_by", "P7_took_place_at"]
 ENTITY_TYPES = {"Person", "Place"}
 VERDICT_OK, VERDICT_WRONG = "O", "X"
 
-INSTRUCTIONS = [
+EXPERT_INSTRUCTIONS = [
     "개체·관계 추출 전문가 검증 시트",
     "",
-    "1. [records] 시트에서 사료 원문(text)을 읽습니다.",
+    "목적: 지식그래프가 사료에서 뽑아낸 인명·지명과 사건 관계가 맞는지, 무엇을 놓쳤는지 측정합니다 (논문 RQ3).",
+    "사료 150건, 예상 소요 시간 4~6시간. 여러 번에 나누어 작업해도 됩니다.",
+    "",
+    "1. [records] 시트에서 사료 원문(text)을 읽습니다. 원문은 한자 그대로이며, 파이프라인이 붙인 독음은 지웠습니다.",
+    "   event_title은 이 사료가 연결된 사건입니다. 비어 있으면 사건에 연결되지 않은 사료입니다.",
     "2. [extracted] 시트는 파이프라인이 해당 사료에서 추출한 인명·지명·관계입니다. 각 행의 verdict에 O(맞음) 또는 X(틀림)를 기입합니다.",
     "   - Person: 실제 사람 이름이면 O. 기관·직책·지명·일반명사이거나 이름의 경계가 틀리면 X.",
-    "   - Place: 실제 지명이면 O.",
-    "   - P14_carried_out_by: 그 인물이 해당 사건의 행위자·참여자로 사료에 기록되어 있으면 O. 단순 언급(수신자, 재판관 등)이면 X.",
+    "     예) O: 金容圭 (김용규)   X: 巡査 (순사, 직책)   X: 金容 (김용, 이름이 잘림)",
+    "     괄호 안 한글은 파이프라인이 붙인 독음입니다. 이름은 맞지만 독음이 틀리면 X로 하고 corrected에 올바른 독음을 적습니다.",
+    "     예) X: 車相晋 (거상진) → corrected: 차상진",
+    "   - Place: 실제 지명이면 O. 예) O: 水原郡   X: 警察署 (기관)",
+    "   - P14_carried_out_by: 그 인물이 해당 사건의 행위자·참여자로 사료에 기록되어 있으면 O.",
+    "     단순 언급(증인, 수신자, 재판관, 순사, 피해자, 가족 등)이면 X이고 note에 역할을 적어 주십시오. 예) note: 증인",
     "   - P7_took_place_at: 그 사건이 해당 장소에서 일어난 것으로 사료에 기록되어 있으면 O.",
+    "     예) X: 시위는 송산면에서 일어났고 水原郡 경찰서는 체포자를 보낸 곳일 뿐인 경우.",
     "   - X인 경우 corrected에 올바른 값을 적어 주시면 오류 유형 분석에 사용합니다 (선택).",
+    "   - 사료만으로 판단할 수 없으면 verdict를 비워 두고 note에 이유를 적습니다. 빈 칸은 계산에서 제외됩니다.",
     "3. [missed] 시트에는 사료에 있는데 파이프라인이 놓친 인명·지명·관계를 한 행에 하나씩 추가합니다 (record_id, type, value).",
+    "   추출 항목이 하나도 없는 사료도 반드시 읽고, 놓친 것이 있으면 적어 주십시오.",
+    "   예) record_id: raw_bibliography:123, type: Person, value: 李東輝",
+    "   예) record_id: raw_event_info:45, type: P14_carried_out_by, value: [사건명] → 李東輝",
     "4. 다른 검증자와 상의하지 말고 독립적으로 판정해 주십시오. item_id와 record_id는 수정하지 마십시오.",
 ]
 
@@ -78,6 +91,14 @@ def _body_text(tei: str) -> str:
     # Drop glosses so the annotator reads the source as written.
     text = re.sub(r"<rt[^>]*>[^<]*</rt>", "", body.group(1) if body else tei)
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).strip()
+
+
+def _refuse_overwrite(paths: list[Path]) -> None:
+    """Workbooks may already hold judgments; never overwrite them silently."""
+    existing = [p for p in paths if p.exists()]
+    if existing:
+        raise SystemExit("이미 있는 워크북을 덮어쓰지 않습니다. 채점이 끝났거나 필요 없으면 다른 폴더로 옮긴 뒤 다시 실행하세요:\n  "
+                         + "\n  ".join(str(p) for p in existing))
 
 
 def sample_records(n: int, seed: int) -> list[dict[str, Any]]:
@@ -126,6 +147,7 @@ def extract_items(record: dict[str, Any]) -> list[dict[str, str]]:
 def expert_export(n: int = 150, seed: int = 42, annotators: tuple[str, ...] = ("A", "B")) -> int:
     """Write one annotation workbook per annotator to annotation/expert/."""
     out_dir = EXPERT_DIR
+    _refuse_overwrite([out_dir / f"annotation_{a}.xlsx" for a in annotators])
     records = sample_records(n, seed)
     record_rows, item_rows = [], []
     for record in records:
@@ -141,7 +163,7 @@ def expert_export(n: int = 150, seed: int = 42, annotators: tuple[str, ...] = ("
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for annotator in annotators:
-        wb = new_workbook(INSTRUCTIONS)
+        wb = new_workbook(EXPERT_INSTRUCTIONS)
         add_sheet(wb, "records", ["record_id", "table", "event_title", "text"], record_rows,
                   widths={"record_id": 26, "event_title": 34, "text": 110})
         add_sheet(wb, "extracted", ["item_id", "record_id", "kind", "type", "value", "verdict", "corrected", "note"], item_rows,
@@ -301,7 +323,7 @@ LENGTH_BIAS_METRICS = ["accuracy", "completeness"]
 SUPPORT_VALUES = {"O": 1.0, "△": 0.5, "X": 0.0}
 RATED_SYSTEMS = ("passage", "hybrid", "graph", "dcent")  # the systems compared for RQ1; ablations are not rated
 
-INSTRUCTIONS = [
+RATING_INSTRUCTIONS = [
     "최종 답변 전문가 평가 시트 (블라인드)",
     "",
     "[answers] 시트: 같은 질문에 대한 여러 시스템의 답변이 무작위 순서로 섞여 있습니다. 어느 시스템인지는 표시하지 않습니다.",
@@ -376,6 +398,7 @@ def _source_texts(keys: set[str]) -> dict[str, str]:
 def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tuple[str, ...] = ("A", "B")) -> int:
     """Blind rating workbooks for a run's answers (systems in RATED_SYSTEMS only)."""
     out_dir, key_dir = RATING_DIR, RATING_KEY_DIR
+    _refuse_overwrite([out_dir / f"rating_{r}.xlsx" for r in raters] + [key_dir / "blinding_key.json"])
     records = [r for r in read_json(run_dir / "answers.json") if r.get("system") in RATED_SYSTEMS]
     if not records:
         raise SystemExit(f"평가할 답변이 없습니다 ({', '.join(RATED_SYSTEMS)} 시스템의 답변이 {run_dir}에 없음).")
@@ -421,7 +444,7 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for rater in raters:
-        wb = new_workbook(INSTRUCTIONS)
+        wb = new_workbook(RATING_INSTRUCTIONS)
         add_sheet(wb, "answers", ["item_id", "query_id", "question", "answer_label", "answer", *RATING_COLUMNS, "note"], answer_rows,
                   widths={"item_id": 14, "question": 50, "answer": 100, "note": 30},
                   choices={c: values for c, values in RATING_CHOICES.items() if values})
