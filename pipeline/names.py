@@ -6,7 +6,8 @@
    same conversion as the TEI ruby annotation (pipeline.text).
 2. Romanized variants of person names for the full-text index (below).
 3. Labels of Activity nodes that state what they are: the mention of a person
-   in one record, in order of mention ("유관순 — 출처정보 #14880 언급 (8번째)").
+   in one record, in order of mention ("유관순 — 출처정보 <출처정보아이디> 언급 (8번째)"; "#<rowid>" when
+   the record has no source identifier).
    They do not represent an attested action, date, or place.
 
 Questions in English often spell Korean names in different systems
@@ -137,7 +138,8 @@ WITH a, head(collect(coalesce(p.한글명칭, p.명칭))) AS actor,
        WHEN 'raw_bibliography' THEN '서지'
        WHEN 'raw_event_info' THEN '사건정보'
        ELSE coalesce(a.source_table, '기록') END AS src
-WITH a, coalesce(actor, '인물') + ' — ' + src + ' #' + toString(a.source_rowid)
+WITH a, coalesce(actor, '인물') + ' — ' + src + ' '
+        + CASE WHEN coalesce(a.원본id, '') <> '' THEN a.원본id ELSE '#' + toString(a.source_rowid) END
         + ' 언급 (' + toString(coalesce(ord, 1)) + '번째)' AS label
 SET a.명칭 = label, a.name = label, a.유형 = '기록 내 인물 언급',
     a.설명 = '해당 기록에서 이 인물이 언급되었다는 사실과 언급 순서만 나타냅니다. 구체적인 행위·일시·장소는 기록 원문을 확인해야 합니다.'

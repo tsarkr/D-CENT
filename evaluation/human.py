@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from pipeline.config import get_pg_connection
+from pipeline.config import SOURCE_ID_COLUMNS, get_pg_connection
 from pipeline.text import extract_ruby_parts
 
 from evaluation.common import (
@@ -58,6 +58,7 @@ EXPERT_INSTRUCTIONS = [
     "",
     "1. [records] 시트에서 사료 원문(text)을 읽습니다. 원문은 한자 그대로이며, 파이프라인이 붙인 독음은 지웠습니다.",
     "   event_title은 이 사료가 연결된 사건입니다. 비어 있으면 사건에 연결되지 않은 사료입니다.",
+    "   source_id는 삼일운동 데이터베이스의 식별자로, 원문을 데이터베이스에서 직접 확인할 때 씁니다.",
     "2. [extracted] 시트는 파이프라인이 해당 사료에서 추출한 인명·지명·관계입니다. 각 행의 verdict에 O(맞음) 또는 X(틀림)를 기입합니다.",
     "   - Person: 실제 사람 이름이면 O. 기관·직책·지명·일반명사이거나 이름의 경계가 틀리면 X.",
     "     예) O: 金容圭 (김용규)   X: 巡査 (순사, 직책)   X: 金容 (김용, 이름이 잘림)",
@@ -111,15 +112,18 @@ def sample_records(n: int, seed: int) -> list[dict[str, Any]]:
     records = []
     for table, event_col in SAMPLE_TABLES.items():
         event_expr = f'"{event_col}"' if event_col else "NULL"
+        source_col = SOURCE_ID_COLUMNS.get(table)
+        source_expr = f'"{source_col}"' if source_col else "NULL"
         cur.execute(
-            f'SELECT rowid, tei, {event_expr} FROM "{table}" WHERE tei IS NOT NULL '
+            f'SELECT rowid, tei, {event_expr}, {source_expr} FROM "{table}" WHERE tei IS NOT NULL '
             f"ORDER BY md5(rowid::text || %s) LIMIT %s",
             (str(seed), per_table),
         )
-        for rowid, tei, event_id in cur.fetchall():
+        for rowid, tei, event_id, source_id in cur.fetchall():
             event_id = str(event_id).strip() if event_id else ""
             records.append({
                 "record_id": f"{table}:{rowid}",
+                "source_id": str(source_id or "").strip(),
                 "table": table,
                 "event_id": event_id,
                 "event_title": event_titles.get(event_id, ""),
@@ -152,7 +156,7 @@ def expert_export(n: int = 150, seed: int = 42, annotators: tuple[str, ...] = ("
     record_rows, item_rows = [], []
     for record in records:
         record_rows.append({
-            "record_id": record["record_id"], "table": record["table"],
+            "record_id": record["record_id"], "source_id": record.get("source_id", ""), "table": record["table"],
             "event_title": record["event_title"], "text": _body_text(record["tei"]),
         })
         for n, item in enumerate(extract_items(record), 1):
@@ -164,8 +168,8 @@ def expert_export(n: int = 150, seed: int = 42, annotators: tuple[str, ...] = ("
     out_dir.mkdir(parents=True, exist_ok=True)
     for annotator in annotators:
         wb = new_workbook(EXPERT_INSTRUCTIONS)
-        add_sheet(wb, "records", ["record_id", "table", "event_title", "text"], record_rows,
-                  widths={"record_id": 26, "event_title": 34, "text": 110})
+        add_sheet(wb, "records", ["record_id", "source_id", "table", "event_title", "text"], record_rows,
+                  widths={"record_id": 26, "source_id": 18, "event_title": 34, "text": 110})
         add_sheet(wb, "extracted", ["item_id", "record_id", "kind", "type", "value", "verdict", "corrected", "note"], item_rows,
                   widths={"item_id": 28, "record_id": 26, "type": 22, "value": 46, "corrected": 30, "note": 30},
                   choices={"verdict": [VERDICT_OK, VERDICT_WRONG]})
@@ -360,6 +364,7 @@ RATING_INSTRUCTIONS = [
     "   예) 2: 이웃 면의 시위 주도자를 질문한 시위의 주도자로 서술함.",
     "",
     "[citations] 시트: 답변 문장(claim)과 그 문장이 인용한 사료 원문(source_text)입니다.",
+    "  source_id는 삼일운동 데이터베이스의 식별자로, 원문을 데이터베이스에서 직접 확인할 때 씁니다.",
     "  - supports: O=사료가 문장을 뒷받침함, △=일부만 뒷받침함, X=뒷받침하지 않거나 무관함.",
     "다른 평가자와 상의하지 말고 독립적으로 채점해 주십시오. item_id와 cite_id는 수정하지 마십시오.",
 ]
@@ -373,8 +378,8 @@ def _is_failed(record: dict[str, Any]) -> bool:
 RECORD_TABLES = {"bibliography", "source_info", "event_info", "detail_place"}
 
 
-def _source_texts(keys: set[str]) -> dict[str, str]:
-    """Record text for citation keys "table:rowid" (see metrics.record_key)."""
+def _source_texts(keys: set[str]) -> dict[str, tuple[str, str]]:
+    """Record text and source-database identifier for citation keys "table:rowid" (see metrics.record_key)."""
     by_table: dict[str, list[int]] = defaultdict(list)
     for key in keys:
         table, rowid = key.split(":")
@@ -386,10 +391,13 @@ def _source_texts(keys: set[str]) -> dict[str, str]:
     cur = conn.cursor()
     out = {}
     for table, rowids in by_table.items():
-        cur.execute(f'SELECT rowid, tei FROM "raw_{table}" WHERE rowid = ANY(%s)', (sorted(rowids),))
-        for rowid, tei in cur.fetchall():
+        id_col = SOURCE_ID_COLUMNS.get(f"raw_{table}")
+        id_expr = f'"{id_col}"' if id_col else "NULL"
+        cur.execute(f'SELECT rowid, tei, {id_expr} FROM "raw_{table}" WHERE rowid = ANY(%s)', (sorted(rowids),))
+        for rowid, tei, source_id in cur.fetchall():
             body = re.search(r"<body>(.*?)</body>", tei or "", flags=re.DOTALL)
-            out[f"{table}:{int(rowid)}"] = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body.group(1) if body else tei or "")).strip()
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body.group(1) if body else tei or "")).strip()
+            out[f"{table}:{int(rowid)}"] = (text, str(source_id or "").strip())
     cur.close()
     conn.close()
     return out
@@ -440,7 +448,8 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
 
     sources = _source_texts({row["_key"] for row in citation_rows})
     for row in citation_rows:
-        row["source_text"] = sources.get(row.pop("_key"), "[해당 사료 없음: 존재하지 않는 ID 인용]")
+        text, source_id = sources.get(row.pop("_key"), ("[해당 사료 없음: 존재하지 않는 ID 인용]", ""))
+        row["source_id"], row["source_text"] = source_id, text
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for rater in raters:
@@ -448,8 +457,8 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
         add_sheet(wb, "answers", ["item_id", "query_id", "question", "answer_label", "answer", *RATING_COLUMNS, "note"], answer_rows,
                   widths={"item_id": 14, "question": 50, "answer": 100, "note": 30},
                   choices={c: values for c, values in RATING_CHOICES.items() if values})
-        add_sheet(wb, "citations", ["cite_id", "item_id", "claim", "cited_source", "source_text", "supports", "note"], citation_rows,
-                  widths={"cite_id": 16, "item_id": 14, "claim": 60, "source_text": 100, "note": 30},
+        add_sheet(wb, "citations", ["cite_id", "item_id", "claim", "cited_source", "source_id", "source_text", "supports", "note"], citation_rows,
+                  widths={"cite_id": 16, "item_id": 14, "claim": 60, "source_id": 18, "source_text": 100, "note": 30},
                   choices={"supports": list(SUPPORT_VALUES)})
         path = out_dir / f"rating_{rater}.xlsx"
         wb.save(path)

@@ -18,7 +18,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from sqlalchemy import text
 
-from pipeline.config import ROOT, get_pg_engine, setting
+from pipeline.config import ROOT, SOURCE_ID_COLUMNS, get_pg_engine, setting
 
 # ── Source files -> raw_* tables ──────────────────────────────────────────────
 
@@ -562,9 +562,12 @@ def load_table_to_tei(table, conn, entities):
         return
     cur = conn.cursor()
 
-    # ensure rowid
+    # ensure rowid, numbered in the order of the source identifier so that a rebuild from
+    # the same files gives every record the same rowid (and the same citation key)
+    id_col = SOURCE_ID_COLUMNS.get(table)
+    order = f'ORDER BY "{id_col}", ctid' if id_col in headers else 'ORDER BY ctid'
     cur.execute(f"ALTER TABLE \"{table}\" ADD COLUMN IF NOT EXISTS rowid bigint;")
-    cur.execute(f"UPDATE \"{table}\" SET rowid = gen.rowid FROM (SELECT ctid, row_number() OVER () AS rowid FROM \"{table}\") gen WHERE \"{table}\".ctid = gen.ctid AND \"{table}\".rowid IS NULL;")
+    cur.execute(f"UPDATE \"{table}\" SET rowid = gen.rowid FROM (SELECT ctid, row_number() OVER ({order}) AS rowid FROM \"{table}\") gen WHERE \"{table}\".ctid = gen.ctid AND \"{table}\".rowid IS NULL;")
 
     # add tei column
     cur.execute(f"ALTER TABLE \"{table}\" ADD COLUMN IF NOT EXISTS tei text;")

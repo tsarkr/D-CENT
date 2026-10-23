@@ -78,8 +78,9 @@ function get_pg_tables_metadata($pdo) {
         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $schema) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table)) continue;
         $key = "{$schema}.{$table}";
         if (!isset($tables_raw[$key])) {
-            $tables_raw[$key] = ['schema' => $schema, 'table' => $table, 'first_col' => null, 'text_cols' => []];
+            $tables_raw[$key] = ['schema' => $schema, 'table' => $table, 'first_col' => null, 'has_rowid' => false, 'text_cols' => []];
         }
+        if ($col_name === 'rowid') $tables_raw[$key]['has_rowid'] = true;
         if ($tables_raw[$key]['first_col'] === null) {
             $tables_raw[$key]['first_col'] = $col_name;
         }
@@ -92,7 +93,9 @@ function get_pg_tables_metadata($pdo) {
 
     $meta = [];
     foreach ($tables_raw as $entry) {
-        $id_col = $entry['first_col'] ?? 'rowid';
+        // Records are cited as "<table>-<rowid>"; use the rowid column wherever it exists,
+        // whatever the column order of the table.
+        $id_col = !empty($entry['has_rowid']) ? 'rowid' : ($entry['first_col'] ?? 'rowid');
         if (!preg_match('/^[\p{L}_][\p{L}\p{N}_]*$/u', $id_col)) $id_col = 'rowid';
         $text_cols = $entry['text_cols'];
         foreach (['명칭', '사건명', '제목'] as $p) {
@@ -133,6 +136,26 @@ function resolve_pg_row_node_id($row, $id_col, $search_cols, $names) {
 // regions, repression organizations, event-place links) are reached through the graph
 // and are not searched by name here.
 const DOCENT_RECORD_TABLES = ['raw_bibliography', 'raw_source_info', 'raw_event_info', 'raw_detail_place'];
+
+// Identifier of each record in the March First Movement Database (pipeline.config.SOURCE_ID_COLUMNS).
+// Citations use the internal "<table>-<rowid>" key; these identifiers are what a reader can look up.
+const DOCENT_SOURCE_ID_COLUMNS = [
+    'raw_event_info' => '아이디',
+    'raw_bibliography' => '문서아이디',
+    'raw_source_info' => '출처정보아이디',
+    'raw_detail_place' => '세부장소아이디',
+];
+const DOCENT_SOURCE_LABELS = [
+    'raw_event_info' => '사건정보',
+    'raw_bibliography' => '서지정보',
+    'raw_source_info' => '출처정보',
+    'raw_detail_place' => '세부장소',
+];
+
+function docent_record_source_id($table, $row) {
+    $col = DOCENT_SOURCE_ID_COLUMNS[$table] ?? null;
+    return ($col !== null && isset($row[$col])) ? trim((string)$row[$col]) : '';
+}
 
 function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
     $names = array_values(array_filter(array_unique(array_map(fn($n) => trim((string)$n), (array)$names))));
@@ -180,6 +203,7 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
                 $out[] = [
                     'table' => $table, 'schema' => $schema,
                     'rowid' => $row[$id_col] ?? null, 'id_col' => $id_col,
+                    'source_id' => docent_record_source_id($table, $row),
                     'match_cols' => $search_cols, 'tei' => $row['tei'] ?? null,
                     'snippets' => $snippets,
                     'node_id' => resolve_pg_row_node_id($row, $id_col, $search_cols, $names)
@@ -219,6 +243,7 @@ function fetch_pg_rows_for_refs($pdo, $refs, $tables_meta) {
                 $out[] = [
                     'table' => $table, 'schema' => 'public',
                     'rowid' => $row[$id_col] ?? null, 'id_col' => $id_col,
+                    'source_id' => docent_record_source_id($table, $row),
                     'match_cols' => ['rowid'], 'tei' => $row['tei'] ?? null,
                     'snippets' => $snippets,
                     'node_id' => $rowids[(int)($row['rowid'] ?? 0)] ?? '',

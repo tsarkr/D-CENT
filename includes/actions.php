@@ -1471,6 +1471,8 @@ function handle_action_node_detail() {
         "found" => false,
         "table" => $table,
         "rowid" => $rowid,
+        "source_id" => "",
+        "source_label" => DOCENT_SOURCE_LABELS[$table] ?? "",
         "columns" => [],
         "tei" => ""
     ];
@@ -1481,6 +1483,8 @@ function handle_action_node_detail() {
             $response_data["found"] = true;
             $response_data["table"] = $tableName;
             $response_data["rowid"] = (int)($row['rowid'] ?? 0);
+            $response_data["source_id"] = docent_record_source_id($tableName, $row);
+            $response_data["source_label"] = DOCENT_SOURCE_LABELS[$tableName] ?? "";
             if (isset($row['tei'])) {
                 $response_data["tei"] = (string)$row['tei'];
                 unset($row['tei']);

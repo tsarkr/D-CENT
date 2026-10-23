@@ -23,6 +23,16 @@ ENTITIES_XLSX = OUTPUT_DIR / "Extracted_Historical_Entities.xlsx"
 CIDOC_TTL = OUTPUT_DIR / "CIDOC_Timeline_Mappings.ttl"
 GRAPH_REPORT_DIR = ROOT / "evaluation" / "results" / "graph"   # graph size/sparsity tables
 
+# Identifier column of each record table in the March First Movement Database. Records are
+# cited internally as "<table>-<rowid>"; these identifiers are the ones a reader can look up
+# in the database, and rowids are assigned in their order so that a rebuild keeps them.
+SOURCE_ID_COLUMNS = {
+    "raw_event_info": "아이디",
+    "raw_bibliography": "문서아이디",
+    "raw_source_info": "출처정보아이디",
+    "raw_detail_place": "세부장소아이디",
+}
+
 # ── TOML loader (Python 3.11+ or tomli fallback) ───────────────────────────
 try:
     import tomllib

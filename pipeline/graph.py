@@ -24,7 +24,7 @@ from sqlalchemy import create_engine, text
 import time
 
 
-from pipeline.config import get_pg_config, get_neo4j_config
+from pipeline.config import SOURCE_ID_COLUMNS, get_pg_config, get_neo4j_config
 from pipeline.text import extract_tei_surface
 from pipeline.names import hanja_reading, relabel_mentions
 
@@ -388,10 +388,11 @@ def _parse_cidoc_activities(ttl):
     return activities
 
 
-def apply_cidoc_mappings(session, mappings, event_ids=None):
+def apply_cidoc_mappings(session, mappings, event_ids=None, source_ids=None):
     """Apply CIDOC TTL mappings from DB into Neo4j using Korean labels.
     mappings: iterable of rows like (table_name, rowid, mapping_label, cidoc_ttl)
     event_ids: {(table_name, rowid): 사건 id} for rows that belong to an Event.
+    source_ids: {(table_name, rowid): identifier of the record in the source database}.
 
     Nodes are typed by their rdf:type, never by guessing from the id:
     - E5_Event in the TTL is only a wrapper for one source row (ex:<table>_<rowid>),
@@ -404,6 +405,7 @@ def apply_cidoc_mappings(session, mappings, event_ids=None):
     This function is forgiving and will continue on parse errors.
     """
     event_ids = event_ids or {}
+    source_ids = source_ids or {}
     activity_nodes = {}
     rel_p9 = []
     rel_p14 = []
@@ -433,6 +435,7 @@ def apply_cidoc_mappings(session, mappings, event_ids=None):
                     'label': act['label'],
                     'table': str(table_name),
                     'rowid': int(rowid),
+                    'source_id': source_ids.get((str(table_name), int(rowid)), ''),
                 }
                 rel_p9.append({'ev': event_id, 'act': act['uid']})
                 for actor in act['actors']:
@@ -455,7 +458,8 @@ def apply_cidoc_mappings(session, mappings, event_ids=None):
                  UNWIND $data AS row
                  MERGE (n:Activity:활동 {uid: row.uid})
                  SET n.명칭 = row.label, n.name = row.label, n.type = '활동',
-                     n.source_table = row.table, n.source_rowid = row.rowid
+                     n.source_table = row.table, n.source_rowid = row.rowid,
+                     n.원본id = row.source_id
                  """,
                  list(activity_nodes.values()),
                  batch_size=batch)
@@ -510,6 +514,21 @@ def load_cidoc_event_ids():
             if str(event_id).strip():
                 event_ids[(table_name, int(rowid))] = str(event_id).strip()
     return event_ids
+
+
+def load_source_ids():
+    """Map (table_name, rowid) of record rows to their identifier in the source database."""
+    source_ids = {}
+    for table_name, column in SOURCE_ID_COLUMNS.items():
+        try:
+            df = pd.read_sql(f'SELECT rowid, "{column}" AS source_id FROM "{table_name}" WHERE "{column}" IS NOT NULL', pg_engine)
+        except Exception as e:
+            print(f"⚠️ {table_name}: 원본 식별자를 읽지 못했습니다 ({e})")
+            continue
+        for rowid, source_id in df.itertuples(index=False, name=None):
+            if str(source_id).strip():
+                source_ids[(table_name, int(rowid))] = str(source_id).strip()
+    return source_ids
 
 
 def _split_multi(value):
@@ -1225,9 +1244,10 @@ def build_ultimate_graph():
                 )
                 total_processed = 0
                 cidoc_event_ids = load_cidoc_event_ids()
+                cidoc_source_ids = load_source_ids()
                 for chunk in chunks:
                     mappings = list(chunk.itertuples(index=False, name=None))
-                    apply_cidoc_mappings(session, mappings, cidoc_event_ids)
+                    apply_cidoc_mappings(session, mappings, cidoc_event_ids, cidoc_source_ids)
                     total_processed += len(chunk)
                     print(f"  ✓ CIDOC 매핑 {total_processed}행 처리 중...")
             except Exception as e:

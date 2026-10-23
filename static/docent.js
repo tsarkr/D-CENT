@@ -143,6 +143,7 @@
     let lastNarrative = null;        // 서사 경로 결과 (explain에서 재사용)
     let narrativePromise = null;     // graph와 동시에 시작한 서사 경로 요청
     let pgPrefetchTexts = [];
+    let recordSources = {};          // "<table>-<rowid>" -> identifier in the source database
     let currentNodes = [];
     let currentEdges = [];
     let analysisResult = null;
@@ -603,15 +604,28 @@
         return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
     }
 
+    const RECORD_LABELS = {raw_event_info:'사건정보', raw_bibliography:'서지정보', raw_source_info:'출처정보', raw_detail_place:'세부장소'};
+
+    // Show a cited record key ("raw_source_info-14880") with the identifier of the record in the
+    // March First Movement Database, which a reader can look up; the internal key stays in the tooltip.
+    function labelRecordCitations(html) {
+        return String(html).replace(/\b(raw_[a-z_]+?)-(\d+)\b/g, (whole, table, rowid) => {
+            const sid = recordSources[`${table}-${rowid}`];
+            if (!sid) return whole;
+            const label = RECORD_LABELS[table] || table;
+            return `<span class="record-cite" title="${escapeHtml(whole)}">${escapeHtml(label)} ${escapeHtml(sid)}</span>`;
+        });
+    }
+
     function renderMarkdown(md) {
         const safeMarkdown = String(md == null ? '' : md)
             .replace(/<\s*(script|iframe|object|embed)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
             .replace(/<\s*\/?\s*(script|iframe|object|embed)\b[^>]*>/gi, '')
             .replace(/\bon(?:error|load)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
         if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-            try { return marked.parse(safeMarkdown); } catch (_) {}
+            try { return labelRecordCitations(marked.parse(safeMarkdown)); } catch (_) {}
         }
-        return escapeHtml(safeMarkdown).replace(/\n/g, '<br>');
+        return labelRecordCitations(escapeHtml(safeMarkdown).replace(/\n/g, '<br>'));
     }
 
     function setQuery(t) {
@@ -742,7 +756,7 @@
         if ($reasoningSteps) $reasoningSteps.innerHTML=''; 
         if ($sourcesBadges) $sourcesBadges.innerHTML='';
         if ($explanationContent) $explanationContent.innerHTML='<p class="text-ink-400 italic">지식그래프 및 1차 사료를 탐색하고 있습니다...</p>';
-        lastEvidences=[]; lastNarrative=null; narrativePromise=null; pgPrefetchTexts=[]; currentNodes=[]; currentEdges=[]; analysisResult=null;
+        lastEvidences=[]; lastNarrative=null; narrativePromise=null; pgPrefetchTexts=[]; recordSources={}; currentNodes=[]; currentEdges=[]; analysisResult=null;
         logSystem(`검색 시작: "${term}"`);
 
         try {
@@ -852,6 +866,7 @@
             if (pn.length>0 || (gd.record_refs||[]).length>0) {
                 const s3=addStep('📚','PostgreSQL 사료 원문 연동 중...');
                 const rows = await api('pg_prefetch',{names:JSON.stringify(pn), refs:JSON.stringify(gd.record_refs||[])});
+                rows.forEach(r=>{ if(r&&r.source_id) recordSources[`${r.table}-${r.rowid}`]=r.source_id; });
                 pgPrefetchTexts=rows.map(r=>{let s=[];for(let k in r.snippets){if(r.snippets[k])s.push(`${k}: ${r.snippets[k]}`);}return`[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${s.join('; ')}`;});
                 doneStep(s3,'✅',`PostgreSQL 사료 ${pgPrefetchTexts.length}건 연동 완료`);
                 logSystem(`PG 사료: ${pgPrefetchTexts.length}건`);
@@ -1104,7 +1119,8 @@
         try{
             const d=await api('node_detail',{table:tbl,rowid:rid,raw_id:node.raw_id||'',label:lbl,aliases:JSON.stringify(node.aliases||[])});
             if(d&&d.found&&d.columns&&Object.keys(d.columns).length){
-                let rh=`<h4 class="text-xs font-semibold text-green-600 mb-2">📋 원천 사료 [${escapeHtml(d.table)} #${d.rowid}]</h4><div class="max-h-[200px] overflow-y-auto"><table class="w-full text-xs">`;
+                const srcName=d.source_id?`${escapeHtml(d.source_label||d.table)} ${escapeHtml(d.source_id)}`:`${escapeHtml(d.table)} #${d.rowid}`;
+                let rh=`<h4 class="text-xs font-semibold text-green-600 mb-2" title="${escapeHtml(d.table)} #${d.rowid}">📋 원천 사료 [${srcName}]</h4><div class="max-h-[200px] overflow-y-auto"><table class="w-full text-xs">`;
                 for(let c in d.columns){const v=d.columns[c];if(v==null||v==='')continue;rh+=`<tr class="border-b border-ink-50"><td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap">${escapeHtml(c)}</td><td class="py-1.5 text-ink-700 break-all" style="white-space:pre-wrap">${escapeHtml(v)}</td></tr>`;}
                 rh+=`</table></div>`;
                 if(d.tei){const teiHtml=renderTeiHtml(d.tei); if(teiHtml) rh+=`<details class="mt-2" open><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 TEI 주석 보기</summary><div class="mt-1 bg-ink-50 p-3 rounded-lg overflow-auto max-h-[260px]">${teiHtml}</div></details>`;}

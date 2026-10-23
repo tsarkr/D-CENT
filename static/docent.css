@@ -110,3 +110,14 @@
 a.tei-linked { color: inherit; text-decoration: none; border-bottom-style: solid; border-bottom-width: 2px; }
 a.tei-linked:hover { background: rgba(37, 99, 235, 0.22); }
 .tei-legend span { margin-right: 4px; }
+
+/* A cited record, shown with its identifier in the March First Movement Database */
+.record-cite {
+    display: inline-block;
+    padding: 0 0.35em;
+    border-radius: 0.25em;
+    background: rgba(16, 185, 129, 0.12);
+    font-size: 0.85em;
+    white-space: nowrap;
+    cursor: help;
+}
