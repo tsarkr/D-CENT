@@ -150,7 +150,7 @@
     let csrfToken = (typeof window !== 'undefined' && window.__PRELOADED_CSRF__) ? window.__PRELOADED_CSRF__ : '';
     let selectedUiLang = 'auto'; // 'auto' | 'ko' | 'en' | 'ja' | 'zh'
     let isSubmitting = false;
-    // Progress messages follow the query language: Korean for Korean queries, English otherwise.
+    // Progress messages and logs: the UI language picker decides when set; otherwise Korean for Korean queries, English for others.
     let stepKo = true;
     const tr = (ko, en) => (stepKo ? ko : en);
 
@@ -439,6 +439,7 @@
     /* ━━━ Multilingual UI Language Switcher ━━━ */
     function setUiLanguage(lang) {
         selectedUiLang = lang;
+        if (lang !== 'auto') stepKo = lang === 'ko';
         document.querySelectorAll('.lang-nav-btn').forEach(btn => {
             if (btn.dataset.lang === lang) {
                 btn.className = "lang-nav-btn px-2.5 py-1 rounded-lg text-xs font-semibold bg-white text-ink-900 shadow-xs transition-all";
@@ -475,7 +476,7 @@
         if ($('legend-doc')) $('legend-doc').textContent = activeDict.legendDoc;
 
         updateInputLanguageBadge();
-        logSystem(`UI 언어 전환: ${lang.toUpperCase()}`);
+        logSystem(`${tr('UI 언어 전환', 'UI language')}: ${lang.toUpperCase()}`);
     }
 
     /* ━━━ Real-time Input Language Detection ━━━ */
@@ -697,7 +698,7 @@
             } catch (_) {}
 
             if (isCsrfError && !isRetry) {
-                logSystem(`🔄 보안 토큰 재발급 후 재시도 (${action})`);
+                logSystem(tr(`🔄 보안 토큰 재발급 후 재시도 (${action})`, `🔄 Security token renewed; retrying (${action})`));
                 try { sessionStorage.removeItem('docent_csrf'); } catch (_) {}
                 csrfToken = '';
                 await ensureCsrf(true);
@@ -743,7 +744,7 @@
         if (isSubmitting) return;
         const rawTerm = (typeof text === 'string') ? text : ($input ? $input.value : '');
         const term = (rawTerm || '').trim();
-        stepKo = ['ko', 'auto'].includes(detectInputLanguage(term));
+        stepKo = selectedUiLang !== 'auto' ? selectedUiLang === 'ko' : ['ko', 'auto'].includes(detectInputLanguage(term));
         if (term.length < 2) { 
             if ($input) $input.focus(); 
             return; 
@@ -767,13 +768,13 @@
         if ($sourcesBadges) $sourcesBadges.innerHTML='';
         if ($explanationContent) $explanationContent.innerHTML=`<p class="text-ink-400 italic">${tr('지식그래프 및 1차 사료를 탐색하고 있습니다...', 'Searching the knowledge graph and primary sources...')}</p>`;
         lastEvidences=[]; lastNarrative=null; narrativePromise=null; pgPrefetchTexts=[]; recordSources={}; currentNodes=[]; currentEdges=[]; analysisResult=null;
-        logSystem(`검색 시작: "${term}"`);
+        logSystem(`${tr('검색 시작', 'Search started')}: "${term}"`);
 
         try {
             /* 0. Intent Router — 클라이언트 사전 분류 */
             const intentResult = classifyIntent(term);
             const strategyMeta = STRATEGY_LABELS[intentResult.intent] || STRATEGY_LABELS.FULLTEXT;
-            addStep(strategyMeta.icon, `${tr('[질의 유형]', '[Query type]')} ${tr(strategyMeta.label, strategyMeta.en)} — ${intentResult.reason}`, 'done');
+            addStep(strategyMeta.icon, `${tr('[질의 유형 · 규칙 기반 사전 분류]', '[Query type · rule-based pre-check]')} ${tr(strategyMeta.label, strategyMeta.en)} — ${intentResult.reason}`, 'done');
             logSystem(`[Router] intent=${intentResult.intent}, keywords=[${intentResult.keywords.join(',')}], reason=${intentResult.reason}`);
 
             const serverIntent = SERVER_INTENT[intentResult.intent] || 'ENTITY_SEARCH';
@@ -788,18 +789,18 @@
             /* 서사 경로: graph와 동시에 별도 요청으로 계산 (해설 단계에서 재사용) */
             narrativePromise = api('narrative', {term})
                 .then(r => { lastNarrative = (r && Array.isArray(r.rows) && r.rows.length) ? r : null; return lastNarrative; })
-                .catch(err => { logSystem(`⚠️ narrative 생략: ${err.message}`); return null; });
+                .catch(err => { logSystem(`⚠️ ${tr('narrative 생략', 'narrative skipped')}: ${err.message}`); return null; });
 
             /* 1. Graph: 외국어는 analyze의 한국어 변환을 먼저 반영 */
             const s2 = addStep('🔍', tr(`지식그래프에서 "${kws.join(', ')}" 탐색 중...`, `Searching the knowledge graph for "${kws.join(', ')}"...`));
             if ($reasoningTitle) $reasoningTitle.textContent=tr('지식그래프 사료 탐색 중...', 'Searching the knowledge graph...');
-            logSystem(`의도: ${intentResult.intent}, KW: ${kws.join(', ')}, 감지언어: ${detectedLang}`);
+            logSystem(tr(`의도: ${intentResult.intent}, KW: ${kws.join(', ')}, 감지언어: ${detectedLang}`, `Intent: ${intentResult.intent}, KW: ${kws.join(', ')}, language: ${detectedLang}`));
 
             let gd;
-            let analysis;
+            let analysis, analyzed;
             if (detectedLang === 'ko') {
                 const analyzePromise = api('analyze',{term, search_strategy: serverIntent}).catch(err => {
-                    logSystem(`⚠️ analyze 비동기 알림: ${err.message}`);
+                    logSystem(`⚠️ ${tr('analyze 실패 (그래프 탐색은 계속)', 'analyze failed (graph search continues)')}: ${err.message}`);
                     return null;
                 });
                 gd = await api('graph',{
@@ -808,7 +809,8 @@
                     intent_ko: term,
                     search_strategy: serverIntent
                 });
-                analysis = (await analyzePromise) || {
+                analyzed = await analyzePromise;
+                analysis = analyzed || {
                     intent_type: serverIntent,
                     search_keywords: kws,
                     analyzed_intent_ko: term,
@@ -819,8 +821,8 @@
                     explanation: term
                 };
             } else {
-                const analyzed = await api('analyze',{term, search_strategy: serverIntent}).catch(err => {
-                    logSystem(`⚠️ analyze 실패: ${err.message}`);
+                analyzed = await api('analyze',{term, search_strategy: serverIntent}).catch(err => {
+                    logSystem(`⚠️ ${tr('analyze 실패', 'analyze failed')}: ${err.message}`);
                     return null;
                 });
                 analysis = analyzed || {
@@ -848,22 +850,25 @@
 
             analysisResult = analysis;
             analysisResult._clientIntent = intentResult;
+            if (analyzed && analyzed.intent_type) {
+                addStep('🧭', tr(`[질의 분석] 서버 의도 분류: ${analyzed.intent_type}`, `[Query analysis] Server intent: ${analyzed.intent_type}`), 'done');
+            }
 
             if (gd.generated_cypher) {
                 const cypherBadge = gd.cypher_executed 
                     ? tr(`[Text-to-Cypher] 동적 쿼리 생성 및 실행 성공 (${gd.cypher_record_count || 0}건 반환)`, `[Text-to-Cypher] Query generated and run (${gd.cypher_record_count || 0} rows)`)
                     : tr(`[Text-to-Cypher] 동적 쿼리 생성 완료`, `[Text-to-Cypher] Query generated`);
                 addStep('🕸️', `${cypherBadge} — ${gd.generated_cypher}`, 'done');
-                logSystem(`[Text-to-Cypher] ${gd.generated_cypher} (매칭 ${gd.cypher_record_count || 0}건)`);
+                logSystem(`[Text-to-Cypher] ${gd.generated_cypher} (${tr('매칭', 'matches')} ${gd.cypher_record_count || 0})`);
             }
 
             const graphDoneMsg = (gd.cypher_executed && gd.cypher_record_count > 0)
-                ? tr(`동적 Cypher 탐색 완료 (${gd.cypher_record_count}건 매칭) — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`,
-                    `Cypher search done (${gd.cypher_record_count} matches) — ${currentNodes.length} nodes, ${currentEdges.length} relations, ${lastEvidences.length} records`)
-                : tr(`그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`,
-                    `Graph search done — ${currentNodes.length} nodes, ${currentEdges.length} relations, ${lastEvidences.length} records`);
+                ? tr(`동적 Cypher 탐색 완료 (${gd.cypher_record_count}건 매칭) — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 근거 기록 ${lastEvidences.length}건`,
+                    `Cypher search done (${gd.cypher_record_count} matches) — ${currentNodes.length} nodes, ${currentEdges.length} relations, ${lastEvidences.length} evidence records`)
+                : tr(`그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 근거 기록 ${lastEvidences.length}건`,
+                    `Graph search done — ${currentNodes.length} nodes, ${currentEdges.length} relations, ${lastEvidences.length} evidence records`);
             doneStep(s2,'✅', graphDoneMsg);
-            logSystem(`노드 ${currentNodes.length}, 엣지 ${currentEdges.length}, 사료 ${lastEvidences.length}`);
+            logSystem(tr(`노드 ${currentNodes.length}, 엣지 ${currentEdges.length}, 근거 기록 ${lastEvidences.length}`, `Nodes ${currentNodes.length}, edges ${currentEdges.length}, evidence records ${lastEvidences.length}`));
 
             if (currentNodes.length>0) { 
                 renderBadges(currentNodes); 
@@ -881,8 +886,12 @@
                 const rows = await api('pg_prefetch',{names:JSON.stringify(pn), refs:JSON.stringify(gd.record_refs||[])});
                 rows.forEach(r=>{ if(r&&r.source_id) recordSources[`${r.table}-${r.rowid}`]=r.source_id; });
                 pgPrefetchTexts=rows.map(r=>{let s=[];for(let k in r.snippets){if(r.snippets[k])s.push(`${k}: ${r.snippets[k]}`);}return`[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${s.join('; ')}`;});
-                doneStep(s3,'✅',tr(`PostgreSQL 사료 ${pgPrefetchTexts.length}건 연동 완료`, `Loaded ${pgPrefetchTexts.length} source texts from PostgreSQL`));
-                logSystem(`PG 사료: ${pgPrefetchTexts.length}건`);
+                // The server looks up at most 25 record IDs, then fills the rest by name search (handle_action_pg_prefetch).
+                const refCount = (gd.record_refs || []).length;
+                const byName = rows.filter(r => r && r.via === 'name').length, byRef = rows.length - byName;
+                doneStep(s3,'✅',tr(`PostgreSQL 원문 ${rows.length}행 연동 완료 — 기록 식별자 ${refCount}건 중 ${byRef}행, 이름 검색 ${byName}행${refCount > 25 ? ' (식별자 조회는 최대 25건)' : ''}`,
+                    `Loaded ${rows.length} source rows from PostgreSQL — ${byRef} of ${refCount} referenced records, ${byName} by name search${refCount > 25 ? ' (ID lookup capped at 25)' : ''}`));
+                logSystem(`${tr('PG 원문 행', 'PG source rows')}: ${pgPrefetchTexts.length} (ID ${byRef}/${refCount}, ${tr('이름', 'name')} ${byName})`);
             }
 
             /* 4. Automatically trigger docent explanation */
@@ -897,7 +906,7 @@
             if ($explanationContent) {
                 $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">${tr('데이터 탐색 실패', 'Search failed')}</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
             }
-            logSystem(`오류: ${e.message}`);
+            logSystem(`${tr('오류', 'Error')}: ${e.message}`);
         } finally {
             isSubmitting = false;
         }
@@ -906,10 +915,10 @@
     /* ━━━ Re-Explain in Different Language ━━━ */
     async function reExplainWithLang(targetLang) {
         if (!lastEvidences || lastEvidences.length === 0) {
-            logSystem(`사료가 아직 수집되지 않았습니다.`);
+            logSystem(tr('사료가 아직 수집되지 않았습니다.', 'No sources collected yet.'));
             return;
         }
-        logSystem(`언어 전환 요청: ${targetLang.toUpperCase()}`);
+        logSystem(`${tr('언어 전환 요청', 'Language change requested')}: ${targetLang.toUpperCase()}`);
         updateExplainLangBadge(targetLang);
         await generateExplanation(targetLang);
     }
@@ -933,7 +942,7 @@
             </div>`;
         }
         const sE=addStep('✍️',`${tr('AI 도슨트가 학술 해설을 작성 중입니다...', 'The AI docent is writing commentary...')} [${lang.toUpperCase()}]`);
-        logSystem(`해설 생성 시작: lang=${lang}`);
+        logSystem(`${tr('해설 생성 시작', 'Commentary started')}: lang=${lang}`);
 
         try {
             await ensureCsrf();
@@ -993,7 +1002,7 @@
             doneStep(sE,'✅',`${tr('AI 도슨트 해설 작성 완료', 'Docent commentary complete')} [${lang.toUpperCase()}]`);
             if ($reasoningTitle) $reasoningTitle.textContent=tr('✨ 도슨트 해설 완료', '✨ Commentary complete');
             if ($explainBtn) $explainBtn.classList.remove('hidden');
-            logSystem(`해설 완료 [${lang.toUpperCase()}]`);
+            logSystem(`${tr('해설 완료', 'Commentary complete')} [${lang.toUpperCase()}]`);
         } catch(e) {
             console.error(e);
             if ($explanationContent) {
@@ -1001,7 +1010,7 @@
             }
             doneStep(sE,'❌',`${tr('실패', 'Failed')}: ${e.message}`);
             if ($explainBtn) $explainBtn.classList.remove('hidden');
-            logSystem(`해설 오류: ${e.message}`);
+            logSystem(`${tr('해설 오류', 'Commentary error')}: ${e.message}`);
         }
     }
 
@@ -1010,7 +1019,7 @@
         const c=$('graph-container');
         if (!c) return;
         if (typeof vis === 'undefined' || !vis.DataSet || !vis.Network) {
-            logSystem('⚠️ vis.js 로딩 대기 중...');
+            logSystem(tr('⚠️ vis.js 로딩 대기 중...', '⚠️ Waiting for vis.js to load...'));
             return;
         }
         try {
