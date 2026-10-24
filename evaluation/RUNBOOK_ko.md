@@ -54,6 +54,17 @@ export보다 **먼저** 해야 합니다. PostgreSQL 표와 Neo4j 그래프를 �
 
 ## 5. 역사학자 (섭외 후)
 
+### 보내기 전 확인 (10월 24일 모의 실험으로 점검한 항목)
+
+- [ ] 그래프 재구축 뒤에 `expert export`를 했는가 (기록 번호가 바뀌면 표본도 바뀜)
+- [ ] `annotation_A.xlsx`의 records 시트에서 원문이 `열이름: 값` 줄로 보이고, 값이 열 이름과 맞는가 (예: `사건일자: 1919-…`)
+- [ ] 기록 150건(사건정보 30, 출처정보 60, 서지 30, 세부장소 30), 항목 약 380개인가
+- [ ] 답변 평가는 평가 실행 뒤 `rate export RUN --n 40`. 답변 속 인용이 `[근거 n]`으로 바뀌어 있고 `raw_` 식별자가 남지 않았는가
+- [ ] 평가자에게 보내는 것: `annotation_A/B.xlsx`(또는 `rating_A/B.xlsx`) 한 개씩과 `ANNOTATION_GUIDE_ko.md`. `rating_key/`와 모의 결과(`sim*/`)는 보내지 않음
+- [ ] 본 작업 전 보정: 두 평가자가 기록 10건 정도를 함께 판정하며 "놓친 이름으로 적는 기준"을 맞춤 (이 10건은 일치도 계산에서 제외)
+- [ ] 받은 뒤 `expert score` / `rate score`의 "해석할 수 없는 값" 목록이 비어 있는지 확인하고, 있으면 평가자에게 해당 칸을 물어봄
+
+
 - [ ] 그래프 검증: `expert export` → 두 분께 `annotation_A/B.xlsx`와 안내서 전달 → `expert score`
 - [ ] 답변 평가: `rate export RUN --n 40` → `annotation/rating/`만 전달 (`rating_key/`는 전달 금지) → `rate score`
 

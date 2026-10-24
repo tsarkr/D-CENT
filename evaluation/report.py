@@ -273,6 +273,19 @@ def report(run_dirs: list[Path]) -> Path:
             [m] + [f"{v[k]['mean']:.2f}" if v.get(k, {}).get("mean") is not None else "–" for k in metrics]
             + [f"{v['citation_accuracy']['strict']:.2f}" if v.get("citation_accuracy", {}).get("strict") is not None else "–"]
             for m, v in rating["models"].items()]))
+        sig = [r for r in rating.get("significance", []) if r.get("metric") in metrics]
+        if sig:
+            md.append("\n계획된 비교 (" + ("D-CENT 대 각 기준선" if rating.get("contrasts") == "focal_vs_baselines" else "모든 쌍")
+                      + ", 지표별 Holm 보정)\n")
+            md.append(_md_table(["지표", "비교", "차이 [95% CI]", "n", "p (Holm)"], [
+                [r["metric"], f"{r['model_a']} − {r['model_b']}",
+                 f"{r['mean_diff_a_minus_b']:.2f} [{r['ci95'][0]:.2f}, {r['ci95'][1]:.2f}]" if r.get("mean_diff_a_minus_b") is not None else "–",
+                 r["n_pairs"], f"{r['p_holm']:.4f}" if r.get("p_holm") is not None else "–"] for r in sig]))
+        lb = rating.get("length_bias", {})
+        if lb:
+            md.append("\n길이 편향 (답변 길이와 점수의 상관): " + ", ".join(
+                f"{m} 시스템 내 r={v.get('within_system_r')}" + (f" (전체 r={v.get('pearson_r')})" if v.get("pearson_r") is not None else "")
+                for m, v in lb.items()))
         for pair, entry in rating.get("agreement", {}).items():
             md.append(f"\n평가자 일치도 {pair}: " + ", ".join(
                 f"{k} κ={v.get('weighted_kappa', v.get('kappa')):.2f}" for k, v in entry.items()

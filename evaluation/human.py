@@ -20,6 +20,7 @@ import itertools
 import json
 import random
 import re
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,41 @@ def _body_text(tei: str) -> str:
     if lines:
         return "\n".join(lines)
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()   # TEI without column labels
+
+
+# ── What annotators type: accept common variants, report anything else by cell ──
+_O_FORMS = {"O", "○", "◯", "ㅇ", "맞음", "YES", "Y"}
+_X_FORMS = {"X", "×", "✕", "✗", "틀림", "NO", "N"}
+_PARTIAL_FORMS = {"△", "▲", "Δ", "∆", "부분", "PARTIAL"}
+_NA_FORMS = {"해당없음", "N/A", "NA", "-", "—"}
+
+
+def _clean(cell: Any) -> str:
+    return unicodedata.normalize("NFKC", str(cell or "")).strip().upper().replace(" ", "")
+
+
+# Compare in the same normalized form ('ㅇ' typed on a Korean keyboard changes under NFKC).
+_O_FORMS, _X_FORMS, _PARTIAL_FORMS, _NA_FORMS = ({_clean(v) for v in forms}
+                                                 for forms in (_O_FORMS, _X_FORMS, _PARTIAL_FORMS, _NA_FORMS))
+_YES_EXTRA, _NO_EXTRA = {_clean("예"), _clean("네")}, {_clean("아니오"), _clean("아니요")}
+
+
+def _verdict(cell: Any) -> str | None:
+    """'O', 'X', '' (left blank) or None (not understood)."""
+    s = _clean(cell)
+    if not s:
+        return ""
+    return VERDICT_OK if s in _O_FORMS else VERDICT_WRONG if s in _X_FORMS else None
+
+
+def _report_invalid(invalid: list[tuple[str, str, str, str]], what: str) -> None:
+    if not invalid:
+        return
+    print(f"  ⚠️ {what}: 해석할 수 없는 값 {len(invalid)}개 (계산에서 제외). 평가자에게 확인하세요:")
+    for sheet, row_id, column, value in invalid[:10]:
+        print(f"     [{sheet}] {row_id} {column} = '{value}'")
+    if len(invalid) > 10:
+        print(f"     … 외 {len(invalid) - 10}개")
 
 
 def _refuse_overwrite(paths: list[Path]) -> None:
@@ -215,24 +251,37 @@ def expert_export(n: int = 150, seed: int = 42, annotators: tuple[str, ...] = ("
 def _load_annotation(path: Path) -> dict[str, Any]:
     verdicts = {}
     unjudged = 0
+    invalid: list[tuple[str, str, str, str]] = []
     counts: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0}))
+    records = [r["record_id"] for r in read_sheet(path, "records")]
+    known = set(records)
     for row in read_sheet(path, "extracted"):
-        verdict = row["verdict"].upper()
-        if verdict not in (VERDICT_OK, VERDICT_WRONG):
+        verdict = _verdict(row.get("verdict"))
+        if not verdict:
             unjudged += 1
+            if verdict is None:
+                invalid.append(("extracted", row.get("item_id", ""), "verdict", row.get("verdict", "")))
             continue
         verdicts[row["item_id"]] = verdict
         counts[row["type"]][row["record_id"]]["tp" if verdict == VERDICT_OK else "fp"] += 1
-    ignored_missed = 0
+    ignored_missed, duplicate_missed, seen = 0, 0, set()
     for row in read_sheet(path, "missed"):
-        if row["type"] in RELATION_TYPES:
+        record_id, kind, value = row.get("record_id", ""), row.get("type", ""), row.get("value", "")
+        if kind in RELATION_TYPES:
             ignored_missed += 1          # relations are scored for precision only
             continue
-        if row["type"] not in MISSED_TYPES:
-            raise ValueError(f"{path} [missed]: 알 수 없는 type '{row['type']}' (record {row['record_id']})")
-        counts[row["type"]][row["record_id"]]["fn"] += 1
-    records = [r["record_id"] for r in read_sheet(path, "records")]
-    return {"verdicts": verdicts, "counts": counts, "records": records, "unjudged": unjudged, "ignored_missed": ignored_missed}
+        if record_id not in known or kind not in MISSED_TYPES or not value:
+            problem = ("record_id" if record_id not in known else "type" if kind not in MISSED_TYPES else "value")
+            invalid.append(("missed", record_id or "(빈 record_id)", problem, f"{kind} {value}".strip()))
+            continue
+        entry = (record_id, kind, _clean(value))
+        if entry in seen:
+            duplicate_missed += 1
+            continue
+        seen.add(entry)
+        counts[kind][record_id]["fn"] += 1
+    return {"verdicts": verdicts, "counts": counts, "records": records, "unjudged": unjudged,
+            "ignored_missed": ignored_missed, "duplicate_missed": duplicate_missed, "invalid": invalid}
 
 
 def _score_type(per_record: dict[str, dict[str, int]], records: list[str], n_boot: int = 5000) -> dict[str, Any]:
@@ -297,6 +346,8 @@ def expert_score(files: list[Path]) -> int:
                                    {t: _score_type(per_record, table_records) for t, per_record in per_type.items()})}
 
         report["annotators"][name] = {
+            "invalid_entries": len(ann["invalid"]),
+            "duplicate_missed": ann["duplicate_missed"],
             "n_records": len(ann["records"]),
             "n_records_by_table": {t: by_table[t]["n_records"] for t in tables},
             "n_items_judged": len(ann["verdicts"]),
@@ -319,6 +370,9 @@ def expert_score(files: list[Path]) -> int:
                   f"{fmt(e['precision']):>8} {fmt(e['recall']):>8}  {fmt(r['precision']):>7} {fmt(r['recall']):>7}")
         if ann["unjudged"]:
             print(f"  ⚠️ verdict가 비어 있는 {ann['unjudged']}개 항목은 계산에서 제외했습니다.")
+        if ann["duplicate_missed"]:
+            print(f"  ℹ️ missed 시트의 중복 행 {ann['duplicate_missed']}개는 한 번만 셌습니다.")
+        _report_invalid(ann["invalid"], name)
 
     names = list(annotations)
     for i in range(len(names)):
@@ -572,25 +626,34 @@ def rate_score(files: list[Path]) -> int:
     supports: dict[str, dict[str, str]] = defaultdict(dict)
     cite_item: dict[str, str] = {}
     answer_chars: dict[str, int] = {item_id: v["answer_chars"] for item_id, v in key.items() if "answer_chars" in v}
-    invalid_cells = 0
+    invalid: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
     for rater, path in raters.items():
         for row in read_sheet(path, "answers"):
             answer_chars.setdefault(row["item_id"], len(row.get("answer", "")))
             for metric in RATING_COLUMNS:
-                cell = row.get(metric, "").upper()
+                raw = row.get(metric, "")
+                cell = _clean(raw)
+                if not cell or cell in _NA_FORMS:
+                    continue
                 if metric in ("declined", "decline_justified"):
-                    value = {YES: 1.0, NO: 0.0}.get(cell)
+                    value = 1.0 if cell in _O_FORMS | _YES_EXTRA else 0.0 if cell in _X_FORMS | _NO_EXTRA else None
                 else:
                     low, high = (0, 10**6) if metric == "unsupported_claims" else (1, 5)
-                    value = float(cell) if re.fullmatch(r"\d+(\.0+)?", cell) and low <= float(cell) <= high else None
-                if value is not None:
+                    m = re.fullmatch(r"(\d+)(?:\.0+)?(?:점|개)?", cell)
+                    value = float(m.group(1)) if m and low <= int(m.group(1)) <= high else None
+                if value is None:
+                    invalid[rater].append(("answers", row.get("item_id", ""), metric, raw))
+                else:
                     ratings[metric][rater][row["item_id"]] = value
-                elif cell and cell != NA:
-                    invalid_cells += 1
         for row in read_sheet(path, "citations"):
             cite_item[row["cite_id"]] = row["item_id"]
-            if row["supports"] in SUPPORT_VALUES:
-                supports[rater][row["cite_id"]] = row["supports"]
+            cell = _clean(row.get("supports"))
+            value = "O" if cell in _O_FORMS else "△" if cell in _PARTIAL_FORMS else "X" if cell in _X_FORMS else None
+            if value:
+                supports[rater][row["cite_id"]] = value
+            elif cell:
+                invalid[rater].append(("citations", row.get("cite_id", ""), "supports", row.get("supports", "")))
+    invalid_cells = sum(len(v) for v in invalid.values())
 
     models = list(dict.fromkeys(v["model"] for v in key.values()))
     report: dict[str, Any] = {"n_raters": len(raters), "n_items": len(key), "n_questions": len({v["query_id"] for v in key.values()}),
@@ -696,7 +759,9 @@ def rate_score(files: list[Path]) -> int:
         print(f"  {metric:<14} 전체 r={_fmt(pearson)}, 시스템 내 r={_fmt(within)} (n={len(items)})")
     print("  (시스템 내 r이 길이 편향의 지표입니다. 전체 r은 시스템 간 품질 차이와 섞입니다.)")
     if invalid_cells:
-        print(f"\n⚠️ 허용되지 않는 값이 들어 있어 무시한 칸: {invalid_cells}개")
+        print()
+        for rater, cells in invalid.items():
+            _report_invalid(cells, rater)
         report["invalid_cells"] = invalid_cells
 
     write_json(output, report)  # NaN is stored as null
