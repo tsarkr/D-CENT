@@ -41,7 +41,7 @@ evaluation/annotation/rating_key/
 evaluation/dataset/validation/
 ~$*.xlsx
 # Not research data: simulated annotations (dry runs), the author's trial, set-aside workbooks
-evaluation/annotation/sim/
+evaluation/annotation/sim*/
 evaluation/annotation/trial/
 evaluation/annotation/old*/
 evaluation/annotation/expert/*.json

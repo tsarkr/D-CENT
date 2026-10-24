@@ -369,6 +369,9 @@ NUMERIC_METRICS = [*SCALE_METRICS, "unsupported_claims", "declined"]  # compared
 LENGTH_BIAS_METRICS = ["accuracy", "completeness"]
 SUPPORT_VALUES = {"O": 1.0, "△": 0.5, "X": 0.0}
 RATED_SYSTEMS = ("passage", "hybrid", "graph", "dcent")  # the systems compared for RQ1; ablations are not rated
+FOCAL_SYSTEM = "dcent"            # planned contrasts: the focal system against each baseline (as in the paper)
+CITES_PER_ANSWER = 3              # citations judged per answer, sampled with the seed
+CITE_LABEL = "근거"               # record citations are shown as "[근거 n]" so the cited table does not reveal the system
 
 RATING_INSTRUCTIONS = [
     "최종 답변 전문가 평가 시트 (블라인드)",
@@ -395,7 +398,7 @@ RATING_INSTRUCTIONS = [
     "   타당한 거절(decline_justified=Y)은 거절 이유를 밝혔으면 5, 부당한 거절은 1로 채점합니다.",
     "5) unsupported_claims (0 이상의 정수): 사료로 뒷받침되지 않는 주장의 개수. 인용 표시가 붙어 있는지와 무관하게 셉니다.",
     "   예) 인용 없이 \"이 시위에는 약 3,000명이 참여했다\"고 썼고 사료에서 확인되지 않으면 1개.",
-    "   예) (raw_bibliography-123)을 인용했지만 그 사료에 해당 내용이 없으면 이것도 1개. 사료로 확인되는 주장은 인용이 없어도 세지 않습니다.",
+    "   예) [근거 1]을 인용했지만 그 사료에 해당 내용이 없으면 이것도 1개. 사료로 확인되는 주장은 인용이 없어도 세지 않습니다.",
     "6) usefulness (1~5): 질문한 연구자·관람객에게 실제로 도움이 되는가. 1=쓸모없음, 5=그대로 활용 가능.",
     "   예) 5: 답과 근거 사료를 바로 확인해 인용할 수 있음.",
     "   예) 2: 틀린 내용은 없으나 질문과 관련이 적은 일반적 서술이 대부분임.",
@@ -406,7 +409,9 @@ RATING_INSTRUCTIONS = [
     "   1=다른 사건·지역의 인물이나 행위가 섞임, 3=일부 잘못 귀속, 5=모두 올바름. 7번과 같은 경우 '해당없음'.",
     "   예) 2: 이웃 면의 시위 주도자를 질문한 시위의 주도자로 서술함.",
     "",
-    "[citations] 시트: 답변 문장(claim)과 그 문장이 인용한 사료 원문(source_text)입니다.",
+    "답변 속 기록 인용은 시스템을 알아볼 수 없도록 [근거 1], [근거 2]처럼 번호로 바꾸어 표시했습니다.",
+    "",
+    "[citations] 시트: 답변 문장(claim)과 그 문장이 인용한 사료 원문(source_text)입니다. 답변마다 인용을 최대 3건까지 뽑아 제시합니다.",
     "  source_id는 삼일운동 데이터베이스의 식별자로, 원문을 데이터베이스에서 직접 확인할 때 씁니다.",
     "  - supports: O=사료가 문장을 뒷받침함, △=일부만 뒷받침함, X=뒷받침하지 않거나 무관함.",
     "다른 평가자와 상의하지 말고 독립적으로 채점해 주십시오. item_id와 cite_id는 수정하지 마십시오.",
@@ -444,6 +449,18 @@ def _source_texts(keys: set[str]) -> dict[str, tuple[str, str]]:
     return out
 
 
+def _neutral_citations(text: str) -> tuple[str, dict[int, str]]:
+    """Replace record citations with "[근거 n]", numbered per answer; return the text and n -> record key."""
+    numbers: dict[str, int] = {}
+
+    def label(m: re.Match) -> str:
+        key = record_key(m.group(1), m.group(2))
+        numbers.setdefault(key, len(numbers) + 1)
+        return f"[{CITE_LABEL} {numbers[key]}]"
+
+    return ID_RE.sub(label, text), {n: k for k, n in numbers.items()}
+
+
 def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tuple[str, ...] = ("A", "B")) -> int:
     """Blind rating workbooks for a run's answers (systems in RATED_SYSTEMS only)."""
     out_dir, key_dir = RATING_DIR, RATING_KEY_DIR
@@ -477,15 +494,21 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
         rng.shuffle(answers)
         for label, record in zip("ABCDEFGH", answers):
             item_id = f"{query_id}-{label}"
-            key[item_id] = {"run": run_dir.name, "query_id": query_id, "model": record["model"], "category": record.get("category", ""),
-                            "source": record.get("source", ""), "answer_chars": len(record["response"])}
+            shown, cited_keys = _neutral_citations(record["response"])
+            found = []    # (claim, citation number), in order, one per sentence and record
+            for sentence in re.split(r"(?<=[.!?。])\s+|\n+", shown):
+                for n in dict.fromkeys(int(m.group(1)) for m in re.finditer(rf"\[{CITE_LABEL} (\d+)\]", sentence)):
+                    found.append((sentence.strip(), n))
+            picked = sorted(rng.sample(range(len(found)), min(CITES_PER_ANSWER, len(found))))
+            key[item_id] = {"run": run_dir.name, "query_id": query_id, "system": record.get("system", ""), "model": record["model"],
+                            "category": record.get("category", ""), "source": record.get("source", ""),
+                            "answer_chars": len(record["response"]), "citations": cited_keys, "n_citations": len(found)}
             answer_rows.append({"item_id": item_id, "query_id": query_id, "question": record["user_input"],
-                                "answer_label": f"답변 {label}", "answer": record["response"]})
-            for sentence in re.split(r"(?<=[.!?。])\s+|\n+", record["response"]):
-                cited = {record_key(m.group(1), m.group(2)): m.group(0) for m in ID_RE.finditer(sentence)}
-                for cite_key, cite_text in cited.items():
-                    citation_rows.append({"cite_id": f"{item_id}#{len(citation_rows) + 1}", "item_id": item_id,
-                                          "claim": sentence.strip(), "cited_source": cite_text, "_key": cite_key})
+                                "answer_label": f"답변 {label}", "answer": shown})
+            for i in picked:
+                claim, n = found[i]
+                citation_rows.append({"cite_id": f"{item_id}#{len(citation_rows) + 1}", "item_id": item_id,
+                                      "claim": claim, "cited_source": f"[{CITE_LABEL} {n}]", "_key": cited_keys[n]})
 
     sources = _source_texts({row["_key"] for row in citation_rows})
     for row in citation_rows:
@@ -509,7 +532,9 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
     key_path.write_text(json.dumps(key, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"🔑 {key_path}  (평가자에게 전달하지 마세요. 평가자에게는 {out_dir} 폴더만 전달합니다)")
-    print(f"✅ 질문 {len(question_ids)}건 × 모델 {n_models}개 = 답변 {len(answer_rows)}개, 인용 검증 {len(citation_rows)}건")
+    total_cites = sum(v["n_citations"] for v in key.values())
+    print(f"✅ 질문 {len(question_ids)}건 × 모델 {n_models}개 = 답변 {len(answer_rows)}개, "
+          f"인용 검증 {len(citation_rows)}건 (전체 인용 {total_cites}건 중 답변당 최대 {CITES_PER_ANSWER}건)")
     if skipped:
         print(f"⚠️ 생성 실패 답변이 있어 제외한 질문: {skipped}건")
     cited_models = {key[row["item_id"]]["model"] for row in citation_rows}
@@ -517,6 +542,12 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
     if uncited:
         print(f"ℹ️ 사료 ID를 인용하지 않는 모델(인용 정확성 산출 불가): {uncited}")
     return 0
+
+
+def _pearson(x: list[float], y: list[float]) -> float:
+    if len(x) < 3 or len(set(x)) < 2 or len(set(y)) < 2:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
 
 
 def _fmt(value: float) -> str:
@@ -602,10 +633,14 @@ def rate_score(files: list[Path]) -> int:
         else:
             print(f"{model:<42} {'citation_accuracy':<18} {0:>4}   n/a  (인용 없음)")
 
-    print("\n쌍대 유의성 검정 (sign-flip permutation, Holm 보정)")
+    system_of = {v["model"]: v.get("system", "") for v in key.values()}
+    focal = next((m for m in models if system_of.get(m) == FOCAL_SYSTEM), None)
+    pairs = [(focal, m) for m in models if m != focal] if focal else list(itertools.combinations(models, 2))
+    print("\n계획된 비교: " + (f"{focal} 대 각 기준선" if focal else "모든 쌍") + " (sign-flip permutation, 지표별 Holm 보정)")
+    report["contrasts"] = "focal_vs_baselines" if focal else "all_pairs"
     for metric in NUMERIC_METRICS:
         rows = []
-        for model_a, model_b in itertools.combinations(models, 2):
+        for model_a, model_b in pairs:
             shared = sorted(set(per_question[metric][model_a]) & set(per_question[metric][model_b]))
             a = [per_question[metric][model_a][q] for q in shared]
             b = [per_question[metric][model_b][q] for q in shared]
@@ -642,11 +677,24 @@ def rate_score(files: list[Path]) -> int:
         items = sorted(i for i in by_item if i in answer_chars)
         lengths = [float(answer_chars[i]) for i in items]
         scores = [sum(by_item[i]) / len(by_item[i]) for i in items]
-        defined = len(items) >= 3 and len(set(lengths)) > 1 and len(set(scores)) > 1
-        pearson = float(np.corrcoef(lengths, scores)[0, 1]) if defined else float("nan")
-        report["length_bias"][metric] = {"n": len(items), "pearson_r": pearson}
-        print(f"  {metric:<14} Pearson r={_fmt(pearson)} (n={len(items)})")
-    print("  (|r|이 크면 점수가 길이에 좌우되고 있다는 신호입니다. 시스템별 평균 길이가 다르면 해석에 유의하세요.)")
+        pearson = _pearson(lengths, scores)
+        # Within systems: subtract each system's mean length and score, so that a better system that also
+        # writes longer answers does not appear as a length bias.
+        by_model: dict[str, list[int]] = defaultdict(list)
+        for n, i in enumerate(items):
+            by_model[key[i]["model"]].append(n)
+        res_len, res_score, per_model = [], [], {}
+        for model, idx in by_model.items():
+            ml = sum(lengths[n] for n in idx) / len(idx)
+            ms = sum(scores[n] for n in idx) / len(idx)
+            res_len += [lengths[n] - ml for n in idx]
+            res_score += [scores[n] - ms for n in idx]
+            per_model[model] = _pearson([lengths[n] for n in idx], [scores[n] for n in idx])
+        within = _pearson(res_len, res_score)
+        report["length_bias"][metric] = {"n": len(items), "pearson_r": pearson, "within_system_r": within,
+                                         "by_system": per_model}
+        print(f"  {metric:<14} 전체 r={_fmt(pearson)}, 시스템 내 r={_fmt(within)} (n={len(items)})")
+    print("  (시스템 내 r이 길이 편향의 지표입니다. 전체 r은 시스템 간 품질 차이와 섞입니다.)")
     if invalid_cells:
         print(f"\n⚠️ 허용되지 않는 값이 들어 있어 무시한 칸: {invalid_cells}개")
         report["invalid_cells"] = invalid_cells
