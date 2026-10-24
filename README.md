@@ -44,6 +44,112 @@ evaluation/
   results/      one folder per run; graph/ (graph size, expert validation)
 ```
 
+  ## System flow
+
+  ```mermaid
+  flowchart LR
+    %% Data pipeline
+    subgraph DATA["1. Data build pipeline"]
+      RAW["data/*.csv<br/>source data"]
+      INGEST["pipeline ingest<br/>load raw_* tables"]
+      ENTITY["pipeline entities<br/>create TEI and tag names"]
+      AUTH["pipeline authority<br/>link i815 authority data"]
+      CIDOC["pipeline cidoc<br/>CIDOC-CRM mappings"]
+      INDEX["pipeline indexes<br/>PostgreSQL search indexes"]
+      GRAPH["pipeline graph<br/>create Neo4j nodes and relations"]
+      THESAURUS["pipeline thesaurus<br/>Korean History Thesaurus"]
+      NAMES["pipeline names<br/>readings, romanized variants, namesIndex"]
+
+      RAW --> INGEST --> ENTITY --> AUTH --> CIDOC --> INDEX
+      INDEX --> GRAPH --> THESAURUS --> NAMES
+    end
+
+    PG[("PostgreSQL<br/>records, TEI, indexes")]
+    NEO[("Neo4j<br/>CIDOC graph")]
+    NAMESDB[("namesIndex<br/>name lookup index")]
+
+    INGEST --> PG
+    INDEX --> PG
+    GRAPH --> NEO
+    NAMES --> NAMESDB
+
+    CHECK["pipeline check<br/>offline self-test"] -.-> DATA
+    INSPECT["pipeline inspect<br/>database and graph diagnostics"] -.-> PG
+    INSPECT -.-> NEO
+
+    %% Web docent
+    subgraph WEB["2. Web docent query flow"]
+      USER["User"] --> BROWSER["Browser<br/>static/docent.js"]
+      BROWSER --> ROUTER["docent.php<br/>POST, Origin, CSRF, rate limit"]
+      ROUTER --> ACTION["includes/actions.php<br/>action dispatch"]
+
+      ACTION --> ANALYZE["Analyze question<br/>language, focus, keywords"]
+      ACTION --> NARRATIVE["Build narrative paths<br/>dated incidents and links"]
+      ANALYZE --> GQUERY["Graph query<br/>Text-to-Cypher and cross-check"]
+      NARRATIVE --> GQUERY
+      GQUERY --> CONTEXT["Assemble context<br/>paths -> graph evidence -> records"]
+      GQUERY --> FETCH["Fetch records<br/>record_refs and name search"]
+      FETCH --> CONTEXT
+      CONTEXT --> FACT["Gemini stage 1<br/>fact table"]
+      FACT --> EXPLAIN["Gemini stage 2<br/>evidence-based explanation"]
+      EXPLAIN --> RESPONSE["Graph, citations, and answer"]
+      RESPONSE --> BROWSER
+    end
+
+    GQUERY --> NEO
+    GQUERY --> NAMESDB
+    FETCH --> PG
+    NARRATIVE --> NEO
+    ANALYZE --> GEMINI[("Gemini API")]
+    FACT --> GEMINI
+    EXPLAIN --> GEMINI
+
+    %% Evaluation
+    subgraph EVAL["3. Evaluation pipeline"]
+      QUESTIONS["dataset/questions.json"] --> DATASET["evaluation dataset<br/>validate and create benchmark"]
+      DATASET --> BENCH["benchmark.json"]
+      BENCH --> RUN["evaluation run<br/>generate answers"]
+      RUN --> SYSTEMS{"Compared systems"}
+      SYSTEMS --> PASSAGE["passage<br/>string retrieval"]
+      SYSTEMS --> HYBRID["hybrid<br/>BM25, dense, RRF"]
+      SYSTEMS --> GRAPH_SYS["graph<br/>Neo4j retrieval"]
+      SYSTEMS --> DCENT["dcent<br/>web docent over HTTP"]
+      SYSTEMS --> ABLATIONS["controlled, no-paths,<br/>one-stage, hybrid-two-stage"]
+
+      PASSAGE --> ANSWERS["answers.json"]
+      HYBRID --> ANSWERS
+      GRAPH_SYS --> ANSWERS
+      DCENT --> ANSWERS
+      ABLATIONS --> ANSWERS
+
+      ANSWERS --> METRICS["metrics<br/>automatic scores"]
+      METRICS --> SCORES["scores.csv"]
+      ANSWERS --> JUDGE["evaluation judge<br/>context precision"]
+      JUDGE --> JUDGE_RESULT["judge.json"]
+      JUDGE --> OLLAMA[("Ollama")]
+
+      ANSWERS --> RATE_EXPORT["rate export<br/>blind rating workbooks"]
+      RATE_EXPORT --> HUMAN["human rating"]
+      HUMAN --> RATING["rating.json"]
+
+      GRAPH_SYS --> EXPERT_EXPORT["expert export<br/>annotation workbooks"]
+      EXPERT_EXPORT --> EXPERT["expert score"]
+      EXPERT --> EXPERT_RESULT["expert.json"]
+
+      SCORES --> REPORT["evaluation report<br/>combine all results"]
+      JUDGE_RESULT --> REPORT
+      RATING --> REPORT
+      EXPERT_RESULT --> REPORT
+      REPORT --> REPORT_OUT["report.md, LaTeX tables, statistics"]
+    end
+
+    PASSAGE -.-> PG
+    HYBRID -.-> PG
+    GRAPH_SYS -.-> NEO
+    DCENT -.-> ROUTER
+    ABLATIONS -.-> ROUTER
+  ```
+
 ## Installation and settings
 
 - Python 3.11+, PostgreSQL, Neo4j 5.x, PHP and Composer

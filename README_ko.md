@@ -43,6 +43,112 @@ evaluation/
   results/      실행별 결과 폴더, graph/(그래프 규모·전문가 검증)
 ```
 
+  ## 전체 시스템 흐름
+
+  ```mermaid
+  flowchart LR
+    %% 데이터 구축 파이프라인
+    subgraph DATA["1. 데이터 구축 파이프라인"]
+      RAW["data/*.csv<br/>원자료"]
+      INGEST["pipeline ingest<br/>raw_* 테이블 적재"]
+      ENTITY["pipeline entities<br/>TEI 생성 및 인명 태깅"]
+      AUTH["pipeline authority<br/>i815 인명사전 연결"]
+      CIDOC["pipeline cidoc<br/>CIDOC-CRM 매핑"]
+      INDEX["pipeline indexes<br/>PostgreSQL 검색 인덱스"]
+      GRAPH["pipeline graph<br/>Neo4j 노드 및 관계 생성"]
+      THESAURUS["pipeline thesaurus<br/>한국역사용어시소러스"]
+      NAMES["pipeline names<br/>독음·로마자 표기·namesIndex"]
+
+      RAW --> INGEST --> ENTITY --> AUTH --> CIDOC --> INDEX
+      INDEX --> GRAPH --> THESAURUS --> NAMES
+    end
+
+    PG[("PostgreSQL<br/>원문·TEI·인덱스")]
+    NEO[("Neo4j<br/>CIDOC 그래프")]
+    NAMESDB[("namesIndex<br/>인명 검색 색인")]
+
+    INGEST --> PG
+    INDEX --> PG
+    GRAPH --> NEO
+    NAMES --> NAMESDB
+
+    CHECK["pipeline check<br/>오프라인 자체 점검"] -.-> DATA
+    INSPECT["pipeline inspect<br/>DB 및 그래프 진단"] -.-> PG
+    INSPECT -.-> NEO
+
+    %% 웹 도슨트
+    subgraph WEB["2. 웹 도슨트 질의 흐름"]
+      USER["사용자"] --> BROWSER["브라우저<br/>static/docent.js"]
+      BROWSER --> ROUTER["docent.php<br/>POST·Origin·CSRF·rate limit"]
+      ROUTER --> ACTION["includes/actions.php<br/>action dispatch"]
+
+      ACTION --> ANALYZE["질의 분석<br/>언어·초점·키워드"]
+      ACTION --> NARRATIVE["서사 경로 생성<br/>날짜순 사건 및 연결"]
+      ANALYZE --> GQUERY["그래프 질의<br/>Text-to-Cypher 및 교차 확인"]
+      NARRATIVE --> GQUERY
+      GQUERY --> CONTEXT["문맥 조립<br/>서사 경로 → 그래프 근거 → 원문"]
+      GQUERY --> FETCH["원문 조회<br/>record_refs 및 이름 검색"]
+      FETCH --> CONTEXT
+      CONTEXT --> FACT["Gemini 1단계<br/>팩트 표"]
+      FACT --> EXPLAIN["Gemini 2단계<br/>근거 기반 해설"]
+      EXPLAIN --> RESPONSE["그래프·출처·답변"]
+      RESPONSE --> BROWSER
+    end
+
+    GQUERY --> NEO
+    GQUERY --> NAMESDB
+    FETCH --> PG
+    NARRATIVE --> NEO
+    ANALYZE --> GEMINI[("Gemini API")]
+    FACT --> GEMINI
+    EXPLAIN --> GEMINI
+
+    %% 평가 파이프라인
+    subgraph EVAL["3. 평가 파이프라인"]
+      QUESTIONS["dataset/questions.json"] --> DATASET["evaluation dataset<br/>문항 검증 및 benchmark 생성"]
+      DATASET --> BENCH["benchmark.json"]
+      BENCH --> RUN["evaluation run<br/>답변 생성"]
+      RUN --> SYSTEMS{"비교 시스템"}
+      SYSTEMS --> PASSAGE["passage<br/>문자열 검색"]
+      SYSTEMS --> HYBRID["hybrid<br/>BM25·dense·RRF"]
+      SYSTEMS --> GRAPH_SYS["graph<br/>Neo4j 검색"]
+      SYSTEMS --> DCENT["dcent<br/>웹 도슨트 HTTP 호출"]
+      SYSTEMS --> ABLATIONS["controlled·no-paths<br/>one-stage·hybrid-two-stage"]
+
+      PASSAGE --> ANSWERS["answers.json"]
+      HYBRID --> ANSWERS
+      GRAPH_SYS --> ANSWERS
+      DCENT --> ANSWERS
+      ABLATIONS --> ANSWERS
+
+      ANSWERS --> METRICS["metrics<br/>자동 점수"]
+      METRICS --> SCORES["scores.csv"]
+      ANSWERS --> JUDGE["evaluation judge<br/>문맥 정밀도 판정"]
+      JUDGE --> JUDGE_RESULT["judge.json"]
+      JUDGE --> OLLAMA[("Ollama")]
+
+      ANSWERS --> RATE_EXPORT["rate export<br/>블라인드 평가 워크북"]
+      RATE_EXPORT --> HUMAN["사람 평가"]
+      HUMAN --> RATING["rating.json"]
+
+      GRAPH_SYS --> EXPERT_EXPORT["expert export<br/>전문가 주석 워크북"]
+      EXPERT_EXPORT --> EXPERT["expert score"]
+      EXPERT --> EXPERT_RESULT["expert.json"]
+
+      SCORES --> REPORT["evaluation report<br/>전체 결과 통합"]
+      JUDGE_RESULT --> REPORT
+      RATING --> REPORT
+      EXPERT_RESULT --> REPORT
+      REPORT --> REPORT_OUT["report.md·LaTeX 표·통계"]
+    end
+
+    PASSAGE -.-> PG
+    HYBRID -.-> PG
+    GRAPH_SYS -.-> NEO
+    DCENT -.-> ROUTER
+    ABLATIONS -.-> ROUTER
+  ```
+
 ## 설치와 설정
 
 - Python 3.11 이상, PostgreSQL, Neo4j 5.x, PHP와 Composer
