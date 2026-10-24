@@ -97,6 +97,24 @@ def prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
     return precision, recall, 2 * precision * recall / (precision + recall)
 
 
+def gwet_ac1(labels_a: Sequence, labels_b: Sequence) -> float:
+    """Gwet's AC1 for two raters and nominal categories.
+
+    Unlike Cohen's kappa it stays stable when one category dominates (most items judged correct),
+    so it is reported next to kappa and raw agreement.
+    """
+    if len(labels_a) != len(labels_b):
+        raise ValueError("두 평가자의 항목 수가 다릅니다.")
+    n = len(labels_a)
+    categories = sorted(set(labels_a) | set(labels_b))
+    if n == 0 or len(categories) < 2:
+        return float("nan")
+    observed = sum(a == b for a, b in zip(labels_a, labels_b)) / n
+    shares = [(list(labels_a).count(c) + list(labels_b).count(c)) / (2 * n) for c in categories]
+    chance = sum(p * (1 - p) for p in shares) / (len(categories) - 1)
+    return float("nan") if chance == 1 else (observed - chance) / (1 - chance)
+
+
 def cohen_kappa(labels_a: Sequence, labels_b: Sequence, weights: str | None = None) -> float:
     """Cohen's kappa for two raters; ``weights='quadratic'`` for ordinal scales."""
     if len(labels_a) != len(labels_b):

@@ -40,6 +40,11 @@ evaluation/annotation/**/*.xlsx
 evaluation/annotation/rating_key/
 evaluation/dataset/validation/
 ~$*.xlsx
+# Not research data: simulated annotations (dry runs), the author's trial, set-aside workbooks
+evaluation/annotation/sim/
+evaluation/annotation/trial/
+evaluation/annotation/old*/
+evaluation/annotation/expert/*.json
 
-# Local caches
-.pg_meta_cache.json
+# Local caches (including renamed copies)
+.pg_meta_cache*.json

@@ -15,6 +15,7 @@ the rater reads the record and marks whether it supports the sentence.
 
 from __future__ import annotations
 
+import html
 import itertools
 import json
 import random
@@ -30,7 +31,7 @@ from pipeline.text import extract_ruby_parts
 
 from evaluation.common import (
     EXPERT_DIR, GRAPH_RESULTS, RATING_DIR, RATING_KEY_DIR,
-    add_sheet, bootstrap_ci, cohen_kappa, holm_adjust, new_workbook, paired_permutation_test, prf, read_json, read_sheet, write_json,
+    add_sheet, bootstrap_ci, cohen_kappa, gwet_ac1, holm_adjust, new_workbook, paired_permutation_test, prf, read_json, read_sheet, write_json,
 )
 from evaluation.metrics import ID_RE, record_key
 
@@ -39,15 +40,22 @@ from evaluation.metrics import ID_RE, record_key
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-# table -> column holding the event id of the row (None: no event link, entities only)
-SAMPLE_TABLES = {
-    "raw_event_info": "아이디",
-    "raw_source_info": "사건아이디",
-    "raw_bibliography": None,
-    "raw_detail_place": None,
-}
+# Sample of 150 records, stratified by table: (table, column with the event id or None, records, filter).
+# Source entries linked to an incident get the largest share, because there a person named in the
+# record may be a participant or only a witness or official, which is what the relation judgments test.
+SAMPLE_PLAN = [
+    ("raw_event_info", "아이디", 30, None),
+    ("raw_source_info", "사건아이디", 60, """"사건아이디" IS NOT NULL AND btrim("사건아이디") <> ''"""),
+    ("raw_bibliography", None, 30, None),
+    ("raw_detail_place", None, 30, None),
+]
 TYPES = ["Person", "Place", "P14_carried_out_by", "P7_took_place_at"]
 ENTITY_TYPES = {"Person", "Place"}
+RELATION_TYPES = [t for t in TYPES if t not in ENTITY_TYPES]
+# Missed items are collected for entities only: writing a missed relation would require the annotator to
+# reconstruct the incident, which few do, so relation recall would be overstated. Relations get precision only.
+MISSED_TYPES = ["Person", "Place"]
+SKIP_COLUMNS = {"제공", "제공일자", "tei_status"}   # administrative columns, not part of the record
 VERDICT_OK, VERDICT_WRONG = "O", "X"
 
 EXPERT_INSTRUCTIONS = [
@@ -56,7 +64,8 @@ EXPERT_INSTRUCTIONS = [
     "목적: 지식그래프가 사료에서 뽑아낸 인명·지명과 사건 관계가 맞는지, 무엇을 놓쳤는지 측정합니다 (논문 RQ3).",
     "사료 150건, 예상 소요 시간 4~6시간. 여러 번에 나누어 작업해도 됩니다.",
     "",
-    "1. [records] 시트에서 사료 원문(text)을 읽습니다. 원문은 한자 그대로이며, 파이프라인이 붙인 독음은 지웠습니다.",
+    "1. [records] 시트에서 사료 원문(text)을 읽습니다. 데이터베이스 표의 한 행이며, 한 줄에 '열 이름: 값' 하나씩 표시합니다.",
+    "   한자는 원문 그대로이고, 파이프라인이 붙인 독음은 지웠습니다.",
     "   event_title은 이 사료가 연결된 사건입니다. 비어 있으면 사건에 연결되지 않은 사료입니다.",
     "   source_id는 삼일운동 데이터베이스의 식별자로, 원문을 데이터베이스에서 직접 확인할 때 씁니다.",
     "2. [extracted] 시트는 파이프라인이 해당 사료에서 추출한 인명·지명·관계입니다. 각 행의 verdict에 O(맞음) 또는 X(틀림)를 기입합니다.",
@@ -64,17 +73,20 @@ EXPERT_INSTRUCTIONS = [
     "     예) O: 金容圭 (김용규)   X: 巡査 (순사, 직책)   X: 金容 (김용, 이름이 잘림)",
     "     괄호 안 한글은 파이프라인이 붙인 독음입니다. 이름은 맞지만 독음이 틀리면 X로 하고 corrected에 올바른 독음을 적습니다.",
     "     예) X: 車相晋 (거상진) → corrected: 차상진",
-    "   - Place: 실제 지명이면 O. 예) O: 水原郡   X: 警察署 (기관)",
+    "     일본인 이름(예: 塚原友太郞)은 사람 이름이면 O로 하고 note에 '일본인'이라고 적습니다. 한국식 독음은 판정하지 않습니다.",
+    "     단체명(예: 大韓人國民會)과 직함(예: 內閣總理大臣)은 X입니다.",
+    "   - Place: 장소를 가리키면 O. 세부장소 표에 등록된 주재소·관청·학교 같은 시설도 장소로 보아 O입니다.",
+    "     예) O: 水原郡, 蘭谷憲兵駐在所   X: 道內 1곳 (장소가 아님), 이름의 일부만 잘린 경우",
     "   - P14_carried_out_by: 그 인물이 해당 사건의 행위자·참여자로 사료에 기록되어 있으면 O.",
     "     단순 언급(증인, 수신자, 재판관, 순사, 피해자, 가족 등)이면 X이고 note에 역할을 적어 주십시오. 예) note: 증인",
     "   - P7_took_place_at: 그 사건이 해당 장소에서 일어난 것으로 사료에 기록되어 있으면 O.",
     "     예) X: 시위는 송산면에서 일어났고 水原郡 경찰서는 체포자를 보낸 곳일 뿐인 경우.",
     "   - X인 경우 corrected에 올바른 값을 적어 주시면 오류 유형 분석에 사용합니다 (선택).",
     "   - 사료만으로 판단할 수 없으면 verdict를 비워 두고 note에 이유를 적습니다. 빈 칸은 계산에서 제외됩니다.",
-    "3. [missed] 시트에는 사료에 있는데 파이프라인이 놓친 인명·지명·관계를 한 행에 하나씩 추가합니다 (record_id, type, value).",
+    "3. [missed] 시트에는 사료에 있는데 파이프라인이 놓친 인명·지명을 한 행에 하나씩 추가합니다 (record_id, type, value).",
+    "   관계는 놓친 것을 적지 않습니다. 관계는 추출된 항목이 맞는지만 판정합니다.",
     "   추출 항목이 하나도 없는 사료도 반드시 읽고, 놓친 것이 있으면 적어 주십시오.",
     "   예) record_id: raw_bibliography:123, type: Person, value: 李東輝",
-    "   예) record_id: raw_event_info:45, type: P14_carried_out_by, value: [사건명] → 李東輝",
     "4. 다른 검증자와 상의하지 말고 독립적으로 판정해 주십시오. item_id와 record_id는 수정하지 마십시오.",
 ]
 
@@ -88,10 +100,19 @@ def _surface(inner: str) -> str:
 
 
 def _body_text(tei: str) -> str:
-    body = re.search(r"<body>(.*?)</body>", tei, flags=re.DOTALL)
-    # Drop glosses so the annotator reads the source as written.
-    text = re.sub(r"<rt[^>]*>[^<]*</rt>", "", body.group(1) if body else tei)
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).strip()
+    """The record as 'column: value' lines, glosses dropped so the annotator reads the source as written."""
+    body = re.search(r"<body>(.*?)</body>", tei or "", flags=re.DOTALL)
+    body = re.sub(r"<rt[^>]*>[^<]*</rt>", "", body.group(1) if body else tei or "")
+    lines = []
+    # An empty column is serialized as a self-closing <p data-col="…"/>; match it as empty,
+    # or the next column's value would be shown under its name.
+    for col, inner in re.findall(r'<p\b[^>]*?data-col="([^"]*)"[^>]*?(?:/>|>(.*?)</p>)', body, flags=re.DOTALL):
+        value = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", inner))).strip()
+        if value and col not in SKIP_COLUMNS:
+            lines.append(f"{html.unescape(col)}: {value}")
+    if lines:
+        return "\n".join(lines)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()   # TEI without column labels
 
 
 def _refuse_overwrite(paths: list[Path]) -> None:
@@ -108,16 +129,18 @@ def sample_records(n: int, seed: int) -> list[dict[str, Any]]:
     cur.execute('SELECT "아이디", "사건명" FROM raw_event_info')
     event_titles = {str(i): str(t or "").strip() for i, t in cur.fetchall()}
 
-    per_table = -(-n // len(SAMPLE_TABLES))
+    planned = sum(k for _, _, k, _ in SAMPLE_PLAN)
     records = []
-    for table, event_col in SAMPLE_TABLES.items():
+    for table, event_col, share, condition in SAMPLE_PLAN:
+        quota = round(share * n / planned)
         event_expr = f'"{event_col}"' if event_col else "NULL"
         source_col = SOURCE_ID_COLUMNS.get(table)
         source_expr = f'"{source_col}"' if source_col else "NULL"
+        where = "tei IS NOT NULL" + (f" AND {condition}" if condition else "")
         cur.execute(
-            f'SELECT rowid, tei, {event_expr}, {source_expr} FROM "{table}" WHERE tei IS NOT NULL '
+            f'SELECT rowid, tei, {event_expr}, {source_expr} FROM "{table}" WHERE {where} '
             f"ORDER BY md5(rowid::text || %s) LIMIT %s",
-            (str(seed), per_table),
+            (str(seed), quota),
         )
         for rowid, tei, event_id, source_id in cur.fetchall():
             event_id = str(event_id).strip() if event_id else ""
@@ -174,7 +197,7 @@ def expert_export(n: int = 150, seed: int = 42, annotators: tuple[str, ...] = ("
                   widths={"item_id": 28, "record_id": 26, "type": 22, "value": 46, "corrected": 30, "note": 30},
                   choices={"verdict": [VERDICT_OK, VERDICT_WRONG]})
         add_sheet(wb, "missed", ["record_id", "type", "value", "note"], [],
-                  widths={"record_id": 26, "type": 22, "value": 46, "note": 30}, choices={"type": TYPES})
+                  widths={"record_id": 26, "type": 22, "value": 46, "note": 30}, choices={"type": MISSED_TYPES})
         path = out_dir / f"annotation_{annotator}.xlsx"
         wb.save(path)
         print(f"📝 {path}")
@@ -200,12 +223,16 @@ def _load_annotation(path: Path) -> dict[str, Any]:
             continue
         verdicts[row["item_id"]] = verdict
         counts[row["type"]][row["record_id"]]["tp" if verdict == VERDICT_OK else "fp"] += 1
+    ignored_missed = 0
     for row in read_sheet(path, "missed"):
-        if row["type"] not in TYPES:
+        if row["type"] in RELATION_TYPES:
+            ignored_missed += 1          # relations are scored for precision only
+            continue
+        if row["type"] not in MISSED_TYPES:
             raise ValueError(f"{path} [missed]: 알 수 없는 type '{row['type']}' (record {row['record_id']})")
         counts[row["type"]][row["record_id"]]["fn"] += 1
     records = [r["record_id"] for r in read_sheet(path, "records")]
-    return {"verdicts": verdicts, "counts": counts, "records": records, "unjudged": unjudged}
+    return {"verdicts": verdicts, "counts": counts, "records": records, "unjudged": unjudged, "ignored_missed": ignored_missed}
 
 
 def _score_type(per_record: dict[str, dict[str, int]], records: list[str], n_boot: int = 5000) -> dict[str, Any]:
@@ -231,6 +258,14 @@ def _score_type(per_record: dict[str, dict[str, int]], records: list[str], n_boo
             "recall": clean(recall), "recall_ci95": interval(boot_r), "f1": clean(f1)}
 
 
+def _precision_only_for_relations(scores: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Missed relations are not collected, so relation recall and F1 are not estimated."""
+    for t in [*RELATION_TYPES, "Relation (all)"]:
+        if t in scores:
+            scores[t].update(recall=None, recall_ci95=[None, None], f1=None)
+    return scores
+
+
 def expert_score(files: list[Path]) -> int:
     """Score completed annotation workbooks (default: every annotation_*.xlsx in annotation/expert/)."""
     files = files or sorted(EXPERT_DIR.glob("annotation_*.xlsx"))
@@ -249,7 +284,8 @@ def expert_score(files: list[Path]) -> int:
                 for key in c:
                     merged[group][record_id][key] += c[key]
         per_type = {**{t: ann["counts"][t] for t in TYPES}, **merged}
-        scores = {t: _score_type(per_record, ann["records"]) for t, per_record in per_type.items()}
+        scores = _precision_only_for_relations(
+            {t: _score_type(per_record, ann["records"]) for t, per_record in per_type.items()})
 
         # The same scores restricted to the records of one source table.
         tables = list(dict.fromkeys(r.rsplit(":", 1)[0] for r in ann["records"]))
@@ -257,7 +293,8 @@ def expert_score(files: list[Path]) -> int:
         for table in tables:
             table_records = [r for r in ann["records"] if r.rsplit(":", 1)[0] == table]
             by_table[table] = {"n_records": len(table_records),
-                               "scores": {t: _score_type(per_record, table_records) for t, per_record in per_type.items()}}
+                               "scores": _precision_only_for_relations(
+                                   {t: _score_type(per_record, table_records) for t, per_record in per_type.items()})}
 
         report["annotators"][name] = {
             "n_records": len(ann["records"]),
@@ -289,12 +326,18 @@ def expert_score(files: list[Path]) -> int:
             a, b = annotations[names[i]]["verdicts"], annotations[names[j]]["verdicts"]
             shared = sorted(set(a) & set(b))
             kappa = cohen_kappa([a[k] for k in shared], [b[k] for k in shared])
+            ac1 = gwet_ac1([a[k] for k in shared], [b[k] for k in shared])
             raw = sum(a[k] == b[k] for k in shared) / len(shared) if shared else float("nan")
+            share_ok = sum((a[k] == VERDICT_OK) + (b[k] == VERDICT_OK) for k in shared) / (2 * len(shared)) if shared else float("nan")
             report["agreement"][f"{names[i]} vs {names[j]}"] = {
                 "n_items": len(shared), "raw_agreement": None if raw != raw else round(raw, 4),
                 "cohen_kappa": None if kappa != kappa else round(kappa, 4),
+                "gwet_ac1": None if ac1 != ac1 else round(ac1, 4),
+                "share_judged_correct": None if share_ok != share_ok else round(share_ok, 4),
             }
-            print(f"\n🤝 {names[i]} vs {names[j]}: 공통 {len(shared)}개, 단순 일치율 {raw:.3f}, Cohen's κ {kappa:.3f}")
+            print(f"\n🤝 {names[i]} vs {names[j]}: 공통 {len(shared)}개, 단순 일치율 {raw:.3f}, Cohen's κ {kappa:.3f}, "
+                  f"Gwet's AC1 {ac1:.3f} (O 비율 {share_ok:.2f})")
+            print("   (O가 대부분이면 κ는 일치율이 높아도 낮게 나옵니다. AC1과 일치율을 함께 보고하세요.)")
             print("   (missed 시트는 자유 기입이라 κ에 포함되지 않습니다. 재현율 차이로 확인하세요.)")
 
     write_json(output, report)
@@ -395,9 +438,7 @@ def _source_texts(keys: set[str]) -> dict[str, tuple[str, str]]:
         id_expr = f'"{id_col}"' if id_col else "NULL"
         cur.execute(f'SELECT rowid, tei, {id_expr} FROM "raw_{table}" WHERE rowid = ANY(%s)', (sorted(rowids),))
         for rowid, tei, source_id in cur.fetchall():
-            body = re.search(r"<body>(.*?)</body>", tei or "", flags=re.DOTALL)
-            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body.group(1) if body else tei or "")).strip()
-            out[f"{table}:{int(rowid)}"] = (text, str(source_id or "").strip())
+            out[f"{table}:{int(rowid)}"] = (_body_text(tei or ""), str(source_id or "").strip())
     cur.close()
     conn.close()
     return out

@@ -359,7 +359,9 @@ def _graph_section() -> str:
                             + [f"{v['tp']}/{v['fp']}/{v['fn']}"])
         parts.append(_md_table(["검증자", "유형", "Precision", "Recall", "F1", "TP/FP/FN"], rows) if rows else "채점 결과가 비어 있습니다.")
         for pair, v in e.get("agreement", {}).items():
-            parts.append(f"\n검증자 일치도 {pair}: 공통 {v['n_items']}개, Cohen's κ {v['cohen_kappa']}")
+            parts.append(f"\n검증자 일치도 {pair}: 공통 {v['n_items']}개, 단순 일치율 {v.get('raw_agreement')}, "
+                         f"Cohen's κ {v['cohen_kappa']}, Gwet's AC1 {v.get('gwet_ac1')} (O 비율 {v.get('share_judged_correct')})")
+        parts.append("\n관계(P14, P7)는 놓친 항목을 받지 않으므로 정밀도만 보고합니다.")
     else:
         parts.append("\n- 전문가 검증: 아직 없음 (`python -m evaluation expert export` → 검증 → `expert score`).")
     return "\n".join(parts)
