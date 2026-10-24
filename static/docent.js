@@ -614,7 +614,7 @@
         return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
     }
 
-    const RECORD_LABELS = {raw_event_info:'사건정보', raw_bibliography:'서지정보', raw_source_info:'출처정보', raw_detail_place:'세부장소'};
+    const RECORD_LABELS = {raw_event_info:['사건정보','Event record'], raw_bibliography:['서지정보','Bibliography'], raw_source_info:['출처정보','Source record'], raw_detail_place:['세부장소','Place detail']};
 
     // Show a cited record key ("raw_source_info-14880") with the identifier of the record in the
     // March First Movement Database, which a reader can look up; the internal key stays in the tooltip.
@@ -622,7 +622,7 @@
         return String(html).replace(/\b(raw_[a-z_]+?)-(\d+)\b/g, (whole, table, rowid) => {
             const sid = recordSources[`${table}-${rowid}`];
             if (!sid) return whole;
-            const label = RECORD_LABELS[table] || table;
+            const label = RECORD_LABELS[table] ? tr(...RECORD_LABELS[table]) : table;
             return `<span class="record-cite" title="${escapeHtml(whole)}">${escapeHtml(label)} ${escapeHtml(sid)}</span>`;
         });
     }
@@ -708,7 +708,7 @@
             throw new Error(`[${action}] ${errorMsg}`);
         }
         try { const j=JSON.parse(raw); logSystem(`✓ ${action}`); return j; }
-        catch(e) { throw new Error(`[${action}] JSON 파싱 실패`); }
+        catch(e) { throw new Error(`[${action}] ${tr('JSON 파싱 실패', 'Invalid JSON response')}`); }
     }
 
     /* ━━━ Source Badges ━━━ */
@@ -719,11 +719,11 @@
         nodes.forEach(n=>{
             const lbl=(n.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();
             if(seen.has(lbl)||!lbl) return; seen.add(lbl);
-            const tp=n.type||(n.labels&&n.labels[0])||'개체';
+            const tp=n.type||(n.labels&&n.labels[0])||tr('개체', 'Entity');
             html+=`<button type="button" onclick="focusNode('${n.id}')" class="source-badge px-3 py-1.5 rounded-full border text-xs font-medium ${colorMap[tp]||'bg-ink-50 text-ink-600 border-ink-200'} cursor-pointer">${iconMap[tp]||'🔹'} ${escapeHtml(lbl)}</button>`;
         });
         if ($sourcesBadges) $sourcesBadges.innerHTML=html;
-        if ($sourcesCount) $sourcesCount.textContent=`${seen.size}건`;
+        if ($sourcesCount) $sourcesCount.textContent=tr(`${seen.size}건`, `${seen.size}`);
     }
 
     /* ━━━ Update Docent Explanation Language Badge ━━━ */
@@ -1056,24 +1056,24 @@
     /* ━━━ Node Info ━━━ */
     function showNodeInfo(node){
         const lbl=(node.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();
-        let h=`<div class="flex items-center justify-between mb-3"><h3 class="font-bold text-ink-900 text-base">${escapeHtml(lbl)}</h3><span class="px-2.5 py-1 rounded-full text-xs font-medium bg-taegeuk-blue-light text-taegeuk-blue">${escapeHtml(node.type||'개체')}</span></div>`;
+        let h=`<div class="flex items-center justify-between mb-3"><h3 class="font-bold text-ink-900 text-base">${escapeHtml(lbl)}</h3><span class="px-2.5 py-1 rounded-full text-xs font-medium bg-taegeuk-blue-light text-taegeuk-blue">${escapeHtml(node.type||tr('개체', 'Entity'))}</span></div>`;
         h+=`<div class="text-xs text-ink-400 mb-3 font-mono break-all">ID: ${escapeHtml(node.raw_id||node.id)}</div>`;
-        if(Array.isArray(node.aliases)&&node.aliases.length) h+=`<div class="mb-3"><span class="text-xs font-medium text-ink-500">이칭:</span> <span class="text-sm text-ink-700">${escapeHtml(node.aliases.join(', '))}</span></div>`;
+        if(Array.isArray(node.aliases)&&node.aliases.length) h+=`<div class="mb-3"><span class="text-xs font-medium text-ink-500">${tr('이칭', 'Aliases')}:</span> <span class="text-sm text-ink-700">${escapeHtml(node.aliases.join(', '))}</span></div>`;
 
         if(node.props&&Object.keys(node.props).length){
-            h+=`<div class="border-t border-ink-100 pt-3 mt-3"><h4 class="text-xs font-semibold text-ink-500 mb-2">메타데이터</h4><div class="max-h-[180px] overflow-y-auto"><table class="w-full text-xs">`;
+            h+=`<div class="border-t border-ink-100 pt-3 mt-3"><h4 class="text-xs font-semibold text-ink-500 mb-2">${tr('메타데이터', 'Metadata')}</h4><div class="max-h-[180px] overflow-y-auto"><table class="w-full text-xs">`;
             for(let k in node.props){if(['embedding','labels','id','uid'].includes(k))continue;const v=String(node.props[k]||'').trim();if(!v)continue;h+=`<tr class="border-b border-ink-50"><td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap">${escapeHtml(k)}</td><td class="py-1.5 text-ink-700 break-all" style="white-space:pre-wrap">${escapeHtml(v)}</td></tr>`;}
             h+=`</table></div></div>`;
         }
 
         const ce=currentEdges.filter(e=>e.from===node.id||e.to===node.id);
         if(ce.length){
-            h+=`<div class="border-t border-ink-100 pt-3 mt-3"><h4 class="text-xs font-semibold text-ink-500 mb-2">연결 (${ce.length}건)</h4><div class="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto">`;
+            h+=`<div class="border-t border-ink-100 pt-3 mt-3"><h4 class="text-xs font-semibold text-ink-500 mb-2">${tr(`연결 (${ce.length}건)`, `Connections (${ce.length})`)}</h4><div class="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto">`;
             ce.forEach(e=>{const o=e.from===node.id?e.to:e.from;const on=currentNodes.find(x=>x.id===o);if(on){const ol=(on.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();h+=`<button type="button" onclick="focusNode('${o}')" class="px-2.5 py-1 rounded-lg border border-ink-200 text-xs text-ink-600 hover:bg-ink-50 cursor-pointer"><span class="text-ink-400">${escapeHtml(e.label||'→')}</span> ${escapeHtml(ol)}</button>`;}});
             h+=`</div></div>`;
         }
 
-        h+=`<div id="node-pg-source-box" class="border-t border-ink-100 pt-3 mt-3"><div class="flex items-center gap-2 text-xs text-ink-400"><span class="w-3 h-3 border-2 border-ink-300 border-t-transparent rounded-full animate-spin"></span>원천 사료 조회 중...</div></div>`;
+        h+=`<div id="node-pg-source-box" class="border-t border-ink-100 pt-3 mt-3"><div class="flex items-center gap-2 text-xs text-ink-400"><span class="w-3 h-3 border-2 border-ink-300 border-t-transparent rounded-full animate-spin"></span>${tr('원천 사료 조회 중...', 'Loading source records...')}</div></div>`;
         if ($nodeInfoContent) $nodeInfoContent.innerHTML=h;
         if ($nodeInfoPanel) $nodeInfoPanel.classList.remove('hidden');
         loadNodePg(node);
@@ -1108,11 +1108,11 @@
             case 'persName': {
                 const ref = node.getAttribute('ref') || '';
                 const url = teiSafeUrl(ref);
-                if (url) return `<a class="tei-pers tei-linked" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="독립유공자 인명사전">${inner()}</a>`;
-                return `<span class="tei-pers" title="인물${ref ? ' ' + escapeHtml(ref) : ''}">${inner()}</span>`;
+                if (url) return `<a class="tei-pers tei-linked" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${tr('독립유공자 인명사전', 'Korean independence activists dictionary')}">${inner()}</a>`;
+                return `<span class="tei-pers" title="${tr('인물', 'Person')}${ref ? ' ' + escapeHtml(ref) : ''}">${inner()}</span>`;
             }
-            case 'placeName': return `<span class="tei-place" title="장소">${inner()}</span>`;
-            case 'orgName': return `<span class="tei-org" title="기관">${inner()}</span>`;
+            case 'placeName': return `<span class="tei-place" title="${tr('장소', 'Place')}">${inner()}</span>`;
+            case 'orgName': return `<span class="tei-org" title="${tr('기관', 'Organization')}">${inner()}</span>`;
             case 'lb': return '<br>';
             default: return inner();
         }
@@ -1131,7 +1131,7 @@
             rows.push(`<tr class="border-b border-ink-50">${col ? `<td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap align-top">${escapeHtml(col)}</td>` : '<td></td>'}<td class="py-1.5 text-ink-700 break-all tei-text" style="white-space:pre-wrap">${html}</td></tr>`);
         }
         if (!rows.length) return '';
-        return `<div class="tei-legend text-[11px] text-ink-400 mb-1"><span class="tei-pers">인물</span> <span class="tei-place">장소</span> <span class="tei-org">기관</span> · 한자 위 작은 글씨는 한글 독음</div><table class="w-full text-xs">${rows.join('')}</table>`;
+        return `<div class="tei-legend text-[11px] text-ink-400 mb-1"><span class="tei-pers">${tr('인물', 'Person')}</span> <span class="tei-place">${tr('장소', 'Place')}</span> <span class="tei-org">${tr('기관', 'Organization')}</span> · ${tr('한자 위 작은 글씨는 한글 독음', 'small text above Hanja is the Korean reading')}</div><table class="w-full text-xs">${rows.join('')}</table>`;
     }
 
     async function loadNodePg(node){
@@ -1142,14 +1142,14 @@
             const d=await api('node_detail',{table:tbl,rowid:rid,raw_id:node.raw_id||'',label:lbl,aliases:JSON.stringify(node.aliases||[])});
             if(d&&d.found&&d.columns&&Object.keys(d.columns).length){
                 const srcName=d.source_id?`${escapeHtml(d.source_label||d.table)} ${escapeHtml(d.source_id)}`:`${escapeHtml(d.table)} #${d.rowid}`;
-                let rh=`<h4 class="text-xs font-semibold text-green-600 mb-2" title="${escapeHtml(d.table)} #${d.rowid}">📋 원천 사료 [${srcName}]</h4><div class="max-h-[200px] overflow-y-auto"><table class="w-full text-xs">`;
+                let rh=`<h4 class="text-xs font-semibold text-green-600 mb-2" title="${escapeHtml(d.table)} #${d.rowid}">📋 ${tr('원천 사료', 'Source record')} [${srcName}]</h4><div class="max-h-[200px] overflow-y-auto"><table class="w-full text-xs">`;
                 for(let c in d.columns){const v=d.columns[c];if(v==null||v==='')continue;rh+=`<tr class="border-b border-ink-50"><td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap">${escapeHtml(c)}</td><td class="py-1.5 text-ink-700 break-all" style="white-space:pre-wrap">${escapeHtml(v)}</td></tr>`;}
                 rh+=`</table></div>`;
-                if(d.tei){const teiHtml=renderTeiHtml(d.tei); if(teiHtml) rh+=`<details class="mt-2" open><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 TEI 주석 보기</summary><div class="mt-1 bg-ink-50 p-3 rounded-lg overflow-auto max-h-[260px]">${teiHtml}</div></details>`;}
-                if(d.tei) rh+=`<details class="mt-2"><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 TEI XML 원문</summary><pre class="mt-1 text-xs bg-ink-50 p-3 rounded-lg overflow-auto max-h-[160px] font-mono text-ink-600" style="white-space:pre-wrap">${escapeHtml(d.tei)}</pre></details>`;
+                if(d.tei){const teiHtml=renderTeiHtml(d.tei); if(teiHtml) rh+=`<details class="mt-2" open><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 ${tr('TEI 주석 보기', 'TEI annotations')}</summary><div class="mt-1 bg-ink-50 p-3 rounded-lg overflow-auto max-h-[260px]">${teiHtml}</div></details>`;}
+                if(d.tei) rh+=`<details class="mt-2"><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 ${tr('TEI XML 원문', 'TEI XML source')}</summary><pre class="mt-1 text-xs bg-ink-50 p-3 rounded-lg overflow-auto max-h-[160px] font-mono text-ink-600" style="white-space:pre-wrap">${escapeHtml(d.tei)}</pre></details>`;
                 box.innerHTML=rh;
-            } else { box.innerHTML=`<div class="text-xs text-ink-300">원천 DB에 직접 대응 데이터 없음.</div>`; }
-        } catch(e){ box.innerHTML=`<div class="text-xs text-ink-300">조회 생략: ${escapeHtml(e.message)}</div>`; }
+            } else { box.innerHTML=`<div class="text-xs text-ink-300">${tr('원천 DB에 직접 대응 데이터 없음.', 'No matching record in the source database.')}</div>`; }
+        } catch(e){ box.innerHTML=`<div class="text-xs text-ink-300">${tr('조회 생략', 'Lookup skipped')}: ${escapeHtml(e.message)}</div>`; }
     }
 
     /* ━━━ Initialization ━━━ */
