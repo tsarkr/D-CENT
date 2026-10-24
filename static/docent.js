@@ -150,6 +150,9 @@
     let csrfToken = (typeof window !== 'undefined' && window.__PRELOADED_CSRF__) ? window.__PRELOADED_CSRF__ : '';
     let selectedUiLang = 'auto'; // 'auto' | 'ko' | 'en' | 'ja' | 'zh'
     let isSubmitting = false;
+    // Progress messages follow the query language: Korean for Korean queries, English otherwise.
+    let stepKo = true;
+    const tr = (ko, en) => (stepKo ? ko : en);
 
     /* ━━━ Backend endpoint ━━━ */
     const API_BASE = 'docent.php';
@@ -163,9 +166,9 @@
      * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
     const STRATEGY_LABELS = {
-        FULLTEXT: { label: '개체 조회', icon: '🔤', color: 'text-blue-600' },
-        VECTOR:   { label: '배경·서술형 질의', icon: '📖', color: 'text-purple-600' },
-        GRAPH:    { label: '관계·서사 탐색', icon: '🕸️', color: 'text-emerald-600' }
+        FULLTEXT: { label: '개체 조회', en: 'Entity lookup', icon: '🔤', color: 'text-blue-600' },
+        VECTOR:   { label: '배경·서술형 질의', en: 'Background / descriptive', icon: '📖', color: 'text-purple-600' },
+        GRAPH:    { label: '관계·서사 탐색', en: 'Relation / narrative', icon: '🕸️', color: 'text-emerald-600' }
     };
     // 서버 질의 분석(handle_action_analyze)의 intent_type 체계로 변환
     const SERVER_INTENT = { FULLTEXT: 'ENTITY_SEARCH', VECTOR: 'GENERAL_INFO', GRAPH: 'EVENT_RELATION' };
@@ -276,7 +279,7 @@
      */
     function classifyIntent(text) {
         if (!text || typeof text !== 'string') {
-            return { intent: 'FULLTEXT', keywords: [], reason: '빈 질의이므로 기본 전문 검색을 적용합니다.' };
+            return { intent: 'FULLTEXT', keywords: [], reason: tr('빈 질의이므로 기본 전문 검색을 적용합니다.', 'Empty query; using default full-text search.') };
         }
 
         const q = text.trim();
@@ -384,15 +387,21 @@
         switch (intent) {
             case 'GRAPH':
                 if (isTransition || /(?:에서|부터)\s+.*(?:로|으로|까지)/.test(q) || /(?:이동|전파|확산|이후|다른\s*지역)/.test(q)) {
-                    return `인물·사건의 이동 경로 및 인과관계(A에서 B로) 추적이 필요한 다중 홉 관계 탐색 질의입니다.`;
+                    return tr(`인물·사건의 이동 경로 및 인과관계(A에서 B로) 추적이 필요한 다중 홉 관계 탐색 질의입니다.`,
+                        `Multi-hop query tracing movement or cause and effect between people and events (A to B).`);
                 }
-                if (entities.length >= 2) return `복수 개체${entStr} 간의 관계 추적 또는 다중 홉 탐색이 필요한 질의입니다.`;
-                return `개체 간 연쇄적 관계 또는 연루자/인과 추적이 필요한 복합 추론 질의입니다.`;
+                if (entities.length >= 2) return tr(`복수 개체${entStr} 간의 관계 추적 또는 다중 홉 탐색이 필요한 질의입니다.`,
+                    `Query tracing relations among several entities${entStr} (multi-hop).`);
+                return tr(`개체 간 연쇄적 관계 또는 연루자/인과 추적이 필요한 복합 추론 질의입니다.`,
+                    `Query tracing chained relations, participants, or causes across entities.`);
             case 'VECTOR':
-                return `역사적 배경, 원인/결과, 사상/특징 등 문맥과 의미 해석이 필요한 서술형 질의입니다.`;
+                return tr(`역사적 배경, 원인/결과, 사상/특징 등 문맥과 의미 해석이 필요한 서술형 질의입니다.`,
+                    `Descriptive query about background, causes and effects, or ideas.`);
             case 'FULLTEXT':
-                if (entities.length === 1) return `특정 개체${entStr}의 단편적 사실/속성을 묻는 단순 조회 질의입니다.`;
-                return `특정 고유명사의 기본 정보를 묻는 키워드 검색 질의입니다.`;
+                if (entities.length === 1) return tr(`특정 개체${entStr}의 단편적 사실/속성을 묻는 단순 조회 질의입니다.`,
+                    `Simple lookup of facts about one entity${entStr}.`);
+                return tr(`특정 고유명사의 기본 정보를 묻는 키워드 검색 질의입니다.`,
+                    `Keyword lookup of basic facts about a proper noun.`);
         }
     }
 
@@ -734,6 +743,7 @@
         if (isSubmitting) return;
         const rawTerm = (typeof text === 'string') ? text : ($input ? $input.value : '');
         const term = (rawTerm || '').trim();
+        stepKo = ['ko', 'auto'].includes(detectInputLanguage(term));
         if (term.length < 2) { 
             if ($input) $input.focus(); 
             return; 
@@ -755,7 +765,7 @@
         if ($systemLogSection) $systemLogSection.classList.remove('hidden');
         if ($reasoningSteps) $reasoningSteps.innerHTML=''; 
         if ($sourcesBadges) $sourcesBadges.innerHTML='';
-        if ($explanationContent) $explanationContent.innerHTML='<p class="text-ink-400 italic">지식그래프 및 1차 사료를 탐색하고 있습니다...</p>';
+        if ($explanationContent) $explanationContent.innerHTML=`<p class="text-ink-400 italic">${tr('지식그래프 및 1차 사료를 탐색하고 있습니다...', 'Searching the knowledge graph and primary sources...')}</p>`;
         lastEvidences=[]; lastNarrative=null; narrativePromise=null; pgPrefetchTexts=[]; recordSources={}; currentNodes=[]; currentEdges=[]; analysisResult=null;
         logSystem(`검색 시작: "${term}"`);
 
@@ -763,15 +773,16 @@
             /* 0. Intent Router — 클라이언트 사전 분류 */
             const intentResult = classifyIntent(term);
             const strategyMeta = STRATEGY_LABELS[intentResult.intent] || STRATEGY_LABELS.FULLTEXT;
-            addStep(strategyMeta.icon, `[질의 유형] ${strategyMeta.label} — ${intentResult.reason}`, 'done');
+            addStep(strategyMeta.icon, `${tr('[질의 유형]', '[Query type]')} ${tr(strategyMeta.label, strategyMeta.en)} — ${intentResult.reason}`, 'done');
             logSystem(`[Router] intent=${intentResult.intent}, keywords=[${intentResult.keywords.join(',')}], reason=${intentResult.reason}`);
 
             const serverIntent = SERVER_INTENT[intentResult.intent] || 'ENTITY_SEARCH';
             const kws = (intentResult.keywords && intentResult.keywords.length > 0) ? intentResult.keywords : [term];
             const detectedLang = detectInputLanguage(term) || 'ko';
-            const langLabels = { ko: '🇰🇷 한국어 (Korean)', en: '🇺🇸 English (영문)', ja: '🇯🇵 日本語 (Japanese)', zh: '🇨🇳 中文 (Chinese)' };
+            const langLabels = { ko: '🇰🇷 한국어 (Korean)', en: '🇺🇸 English', ja: '🇯🇵 日本語 (Japanese)', zh: '🇨🇳 中文 (Chinese)' };
             const detectedName = langLabels[detectedLang] || `🌐 ${detectedLang.toUpperCase()}`;
-            addStep('🌐', `[다국어 감지] 질의 언어 감지: ${detectedName} → 한국어 지식그래프 교차 탐색`, 'done');
+            addStep('🌐', tr(`[언어 감지] 질의 언어: ${detectedName} → 한국어 지식그래프 직접 탐색`,
+                `[Language] Query language: ${detectedName} → translated to Korean to search the Korean knowledge graph`), 'done');
             updateExplainLangBadge(detectedLang);
 
             /* 서사 경로: graph와 동시에 별도 요청으로 계산 (해설 단계에서 재사용) */
@@ -780,8 +791,8 @@
                 .catch(err => { logSystem(`⚠️ narrative 생략: ${err.message}`); return null; });
 
             /* 1. Graph: 외국어는 analyze의 한국어 변환을 먼저 반영 */
-            const s2 = addStep('🔍',`지식그래프에서 "${kws.join(', ')}" 탐색 중...`);
-            if ($reasoningTitle) $reasoningTitle.textContent='지식그래프 사료 탐색 중...';
+            const s2 = addStep('🔍', tr(`지식그래프에서 "${kws.join(', ')}" 탐색 중...`, `Searching the knowledge graph for "${kws.join(', ')}"...`));
+            if ($reasoningTitle) $reasoningTitle.textContent=tr('지식그래프 사료 탐색 중...', 'Searching the knowledge graph...');
             logSystem(`의도: ${intentResult.intent}, KW: ${kws.join(', ')}, 감지언어: ${detectedLang}`);
 
             let gd;
@@ -840,15 +851,17 @@
 
             if (gd.generated_cypher) {
                 const cypherBadge = gd.cypher_executed 
-                    ? `[Text-to-Cypher] 동적 쿼리 생성 및 실행 성공 (${gd.cypher_record_count || 0}건 반환)`
-                    : `[Text-to-Cypher] 동적 쿼리 생성 완료`;
+                    ? tr(`[Text-to-Cypher] 동적 쿼리 생성 및 실행 성공 (${gd.cypher_record_count || 0}건 반환)`, `[Text-to-Cypher] Query generated and run (${gd.cypher_record_count || 0} rows)`)
+                    : tr(`[Text-to-Cypher] 동적 쿼리 생성 완료`, `[Text-to-Cypher] Query generated`);
                 addStep('🕸️', `${cypherBadge} — ${gd.generated_cypher}`, 'done');
                 logSystem(`[Text-to-Cypher] ${gd.generated_cypher} (매칭 ${gd.cypher_record_count || 0}건)`);
             }
 
             const graphDoneMsg = (gd.cypher_executed && gd.cypher_record_count > 0)
-                ? `동적 Cypher 탐색 완료 (${gd.cypher_record_count}건 매칭) — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`
-                : `그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`;
+                ? tr(`동적 Cypher 탐색 완료 (${gd.cypher_record_count}건 매칭) — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`,
+                    `Cypher search done (${gd.cypher_record_count} matches) — ${currentNodes.length} nodes, ${currentEdges.length} relations, ${lastEvidences.length} records`)
+                : tr(`그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`,
+                    `Graph search done — ${currentNodes.length} nodes, ${currentEdges.length} relations, ${lastEvidences.length} records`);
             doneStep(s2,'✅', graphDoneMsg);
             logSystem(`노드 ${currentNodes.length}, 엣지 ${currentEdges.length}, 사료 ${lastEvidences.length}`);
 
@@ -864,25 +877,25 @@
             /* 3. PG prefetch */
             const pn = (Array.isArray(gd.prefetch_names)&&gd.prefetch_names.length>0) ? gd.prefetch_names : currentNodes.map(n=>n.raw_id);
             if (pn.length>0 || (gd.record_refs||[]).length>0) {
-                const s3=addStep('📚','PostgreSQL 사료 원문 연동 중...');
+                const s3=addStep('📚', tr('PostgreSQL 사료 원문 연동 중...', 'Loading source texts from PostgreSQL...'));
                 const rows = await api('pg_prefetch',{names:JSON.stringify(pn), refs:JSON.stringify(gd.record_refs||[])});
                 rows.forEach(r=>{ if(r&&r.source_id) recordSources[`${r.table}-${r.rowid}`]=r.source_id; });
                 pgPrefetchTexts=rows.map(r=>{let s=[];for(let k in r.snippets){if(r.snippets[k])s.push(`${k}: ${r.snippets[k]}`);}return`[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${s.join('; ')}`;});
-                doneStep(s3,'✅',`PostgreSQL 사료 ${pgPrefetchTexts.length}건 연동 완료`);
+                doneStep(s3,'✅',tr(`PostgreSQL 사료 ${pgPrefetchTexts.length}건 연동 완료`, `Loaded ${pgPrefetchTexts.length} source texts from PostgreSQL`));
                 logSystem(`PG 사료: ${pgPrefetchTexts.length}건`);
             }
 
             /* 4. Automatically trigger docent explanation */
-            if ($reasoningTitle) $reasoningTitle.textContent='🔍 사료 탐색 완료 → AI 도슨트 해설 생성 중...';
+            if ($reasoningTitle) $reasoningTitle.textContent=tr('🔍 사료 탐색 완료 → AI 도슨트 해설 생성 중...', '🔍 Sources found → writing docent commentary...');
             if ($explainBtn) $explainBtn.classList.remove('hidden');
             await generateExplanation(detectedLang);
 
         } catch(e) {
             console.error(e);
             addStep('❌',e.message,'error');
-            if ($reasoningTitle) $reasoningTitle.textContent='오류가 발생했습니다';
+            if ($reasoningTitle) $reasoningTitle.textContent=tr('오류가 발생했습니다', 'An error occurred');
             if ($explanationContent) {
-                $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">데이터 탐색 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+                $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">${tr('데이터 탐색 실패', 'Search failed')}</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
             }
             logSystem(`오류: ${e.message}`);
         } finally {
@@ -916,10 +929,10 @@
                 <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot"></span>
                 <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.15s"></span>
                 <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.3s"></span>
-                <span>사료 비판 검증 및 학술 해설 작성 중... [${lang.toUpperCase()}]</span>
+                <span>${tr('사료 비판 검증 및 학술 해설 작성 중...', 'Checking sources and writing commentary...')} [${lang.toUpperCase()}]</span>
             </div>`;
         }
-        const sE=addStep('✍️',`AI 도슨트가 학술 해설을 작성 중입니다... [${lang.toUpperCase()}]`);
+        const sE=addStep('✍️',`${tr('AI 도슨트가 학술 해설을 작성 중입니다...', 'The AI docent is writing commentary...')} [${lang.toUpperCase()}]`);
         logSystem(`해설 생성 시작: lang=${lang}`);
 
         try {
@@ -977,16 +990,16 @@
                 }
             }
             if ($explanationContent) $explanationContent.innerHTML=renderMarkdown(full);
-            doneStep(sE,'✅',`AI 도슨트 해설 작성 완료 [${lang.toUpperCase()}]`);
-            if ($reasoningTitle) $reasoningTitle.textContent='✨ 도슨트 해설 완료';
+            doneStep(sE,'✅',`${tr('AI 도슨트 해설 작성 완료', 'Docent commentary complete')} [${lang.toUpperCase()}]`);
+            if ($reasoningTitle) $reasoningTitle.textContent=tr('✨ 도슨트 해설 완료', '✨ Commentary complete');
             if ($explainBtn) $explainBtn.classList.remove('hidden');
             logSystem(`해설 완료 [${lang.toUpperCase()}]`);
         } catch(e) {
             console.error(e);
             if ($explanationContent) {
-                $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">해설 생성 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+                $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">${tr('해설 생성 실패', 'Commentary failed')}</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
             }
-            doneStep(sE,'❌',`실패: ${e.message}`);
+            doneStep(sE,'❌',`${tr('실패', 'Failed')}: ${e.message}`);
             if ($explainBtn) $explainBtn.classList.remove('hidden');
             logSystem(`해설 오류: ${e.message}`);
         }
