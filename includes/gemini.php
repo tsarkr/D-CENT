@@ -14,6 +14,7 @@ function get_gemini_candidate_models() {
         'gemini-2.5-flash',
         'gemini-2.0-flash',
     ];
+    if (get_cfg('DOCENT_EVAL_MODE', '0') === '1') $candidates = [$configured];
     $clean = [];
     foreach ($candidates as $cand) {
         $cand = trim((string)$cand);
@@ -21,7 +22,8 @@ function get_gemini_candidate_models() {
             $clean[] = $cand;
         }
     }
-    return !empty($clean) ? $clean : ['gemini-flash-lite-latest'];
+    if (empty($clean)) throw new RuntimeException('Invalid Gemini model configuration.');
+    return $clean;
 }
 
 /**
@@ -29,7 +31,7 @@ function get_gemini_candidate_models() {
  */
 function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null, $timeout = 60) {
     $api_key = get_cfg('GEMINI_API_KEY') ?: get_cfg('API_KEY');
-    if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : docent_t("API Key가 설정되지 않았습니다.", "API key is not configured.");
+    if (!$api_key) throw new RuntimeException("Gemini API key is not configured.");
 
     $candidate_models = get_gemini_candidate_models();
     $payload = _build_gemini_payload($msgs, $is_json, $max_tokens, $temperature, $top_p);
@@ -37,7 +39,6 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
 
     $start_time = microtime(true);
     $total_timeout = max(5, (int)$timeout);
-    $last_error_message = '';
 
     foreach ($candidate_models as $model) {
         $elapsed = microtime(true) - $start_time;
@@ -65,12 +66,6 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
         $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
 
         if ($res === false || $curl_errno !== 0 || $http_code !== 200) {
-            $provider_message = '';
-            $error_data = json_decode((string)$res, true);
-            if (is_array($error_data['error'] ?? null)) {
-                $provider_message = docent_sanitize_text($error_data['error']['message'] ?? '', 240, false);
-            }
-            $last_error_message = $provider_message !== '' ? "Gemini 오류 ({$model}): {$provider_message}" : "AI 요청 실패 ({$model}, HTTP {$http_code}, cURL {$curl_errno})";
             error_log(sprintf('Gemini model %s failed: HTTP %d, cURL %d — trying next candidate', $model, $http_code, $curl_errno));
             if ($http_code === 429 || $http_code === 503) {
                 if (($total_timeout - (microtime(true) - $start_time)) > 3.0) {
@@ -81,13 +76,15 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
         }
 
         $content = _extract_gemini_text($res);
-        if (trim($content) !== '') return $content;
+        if (trim($content) !== '') {
+            $data = json_decode($res, true);
+            $version = $data['modelVersion'] ?? $model;
+            $GLOBALS['docent_model_versions'][$version] = ($GLOBALS['docent_model_versions'][$version] ?? 0) + 1;
+            return $content;
+        }
     }
 
-    $safe_message = $last_error_message !== '' ? $last_error_message : "AI 응답을 생성하지 못했습니다.";
-    return $is_json
-        ? json_encode(["explanation" => $safe_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE)
-        : $safe_message;
+    throw new RuntimeException('Gemini generation failed.');
 }
 
 /**
@@ -96,8 +93,7 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
 function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperature = null, $top_p = null) {
     $api_key = get_cfg('GEMINI_API_KEY') ?: get_cfg('API_KEY');
     if (!$api_key) {
-        $on_chunk(docent_t("API Key가 설정되지 않았습니다.", "API key is not configured."));
-        return;
+        throw new RuntimeException("Gemini API key is not configured.");
     }
 
     $candidate_models = get_gemini_candidate_models();
@@ -108,6 +104,7 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:streamGenerateContent?alt=sse";
         $buffer = '';
         $chunks_delivered = 0;
+        $finished = false;
 
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -118,7 +115,7 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
             CURLOPT_TIMEOUT => 90,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, &$chunks_delivered, $on_chunk) {
+            CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, &$chunks_delivered, &$finished, $on_chunk) {
                 $buffer .= $data;
                 while (preg_match('/^(.*?)(?:\r?\n\r?\n)/s', $buffer, $matches)) {
                     $block = $matches[1];
@@ -128,6 +125,7 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
                         $line = trim($line);
                         if (str_starts_with($line, 'data: ')) {
                             $parsed = json_decode(substr($line, 6), true);
+                            if (in_array($parsed['candidates'][0]['finishReason'] ?? '', ['STOP', 'MAX_TOKENS'], true)) $finished = true;
                             if (isset($parsed['candidates'][0]['content']['parts'])) {
                                 foreach ($parsed['candidates'][0]['content']['parts'] as $part) {
                                     if (isset($part['text']) && $part['text'] !== '') {
@@ -147,12 +145,14 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
         $curl_errno = curl_errno($ch);
         $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
 
-        if ($chunks_delivered > 0 && $curl_errno === 0) return;
+        if ($chunks_delivered > 0 && $finished && $curl_errno === 0 && $http_code === 200) return;
+        // Never concatenate a new model's answer after an interrupted partial response.
+        if ($chunks_delivered > 0) throw new RuntimeException('Gemini stream interrupted.');
 
         error_log(sprintf('stream_gemini model %s failed (HTTP %d, cURL %d) — trying next model', $model, $http_code, $curl_errno));
     }
 
-    $on_chunk("\n\n[AI 해설 생성 중 서비스 지연이 발생했습니다. 잠시 후 다시 시도해 주세요.]");
+    throw new RuntimeException('Gemini streaming generation failed.');
 }
 
 // ── 내부 헬퍼 ──

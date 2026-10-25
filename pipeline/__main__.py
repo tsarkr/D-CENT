@@ -14,12 +14,14 @@ or .streamlit/secrets.toml; see README.
 from __future__ import annotations
 
 import argparse
+import json
+import uuid
 import os
 import subprocess
 import sys
 import time
 
-from pipeline.config import ENTITIES_CSV, ENTITIES_XLSX, ROOT
+from pipeline.config import ENTITIES_CSV, ENTITIES_XLSX, ROOT, OUTPUT_DIR
 
 # (label, module arguments). Each step runs as `python -m pipeline.<module>` in its own process,
 # so a failing step stops the build and memory is released between steps.
@@ -53,6 +55,10 @@ def _run(label: str, module_args: list[str]) -> None:
 
 def build(stage: str, yes: bool) -> int:
     steps = {"all": RDBMS_STEPS + GRAPH_STEPS, "rdbms": RDBMS_STEPS, "graph": GRAPH_STEPS}[stage]
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    manifest_path = OUTPUT_DIR / "build_manifest.json"
+    manifest = {"build_id": uuid.uuid4().hex, "stage": stage, "complete": False}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     print(f"파이프라인 시작: {stage} ({len(steps)}단계)")
     for n, (label, module_args) in enumerate(steps, 1):
         _run(label, module_args)
@@ -60,6 +66,8 @@ def build(stage: str, yes: bool) -> int:
             sheet = ENTITIES_XLSX if ENTITIES_XLSX.exists() else ENTITIES_CSV
             print(f"\n⏸  개체 목록을 검토하세요: {sheet}\n   계속하려면 Enter, 중단하려면 Ctrl+C.")
             input()
+    manifest["complete"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     print("\n✅ 파이프라인 완료")
     return 0
 

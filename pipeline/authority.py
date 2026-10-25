@@ -21,11 +21,10 @@ from typing import List, Dict, Optional, Tuple
 
 
 import requests
-import tomllib
 import psycopg2
 import xml.etree.ElementTree as ET
 
-from pipeline.config import ENTITIES_CSV
+from pipeline.config import ENTITIES_CSV, get_pg_connection, load_secrets
 from pipeline.text import extract_ruby_parts
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -37,7 +36,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
 CACHE_PATH = DATA_DIR / 'i815_person_index.json'
 SUMMARY_PATH = DATA_DIR / 'persname_match_summary.csv'
-SECRETS_PATH = PROJECT_ROOT / '.streamlit' / 'secrets.toml'
 I815_TIMEOUT = 30
 I815_RETRIES = 3
 
@@ -201,24 +199,6 @@ def build_search_map(index: List[Dict[str, str]]) -> Dict[str, List[Dict[str, st
     return dict(search_map)
 
 
-def load_secrets() -> Dict[str, str]:
-    """Load database credentials from streamlit secrets.toml."""
-    if not SECRETS_PATH.exists():
-        raise FileNotFoundError(f"Secrets file not found at {SECRETS_PATH}")
-    with open(SECRETS_PATH, 'rb') as f:
-        return tomllib.load(f)
-
-
-def get_db_connection(secrets: Dict[str, str]):
-    """Establish connection to PostgreSQL."""
-    return psycopg2.connect(
-        host=secrets.get('PG_HOST'), 
-        user=secrets.get('PG_USER'),
-        password=secrets.get('PG_PASSWORD'), 
-        dbname=secrets.get('PG_DATABASE')
-    )
-
-
 def find_raw_tables(cur) -> List[str]:
     """Find all relevant raw_* tables containing a 'tei' column."""
     cur.execute("""
@@ -348,11 +328,7 @@ def main():
     candidates = extract_candidates(csv_path)
     logger.info(f"Found {len(candidates)} distinct 3-char candidates")
 
-    try:
-        secrets = load_secrets()
-    except FileNotFoundError as e:
-        logger.error(str(e))
-        sys.exit(1)
+    secrets = load_secrets()
 
     index = load_i815_index_cache()
     if index is not None:
@@ -370,7 +346,7 @@ def main():
     search_map = build_search_map(index)
     results = []
     try:
-        with get_db_connection(secrets) as conn:
+        with get_pg_connection(secrets) as conn:
             with conn.cursor() as cur:
                 tables = find_raw_tables(cur)
                 logger.info(f"Found {len(tables)} raw tables to process.")

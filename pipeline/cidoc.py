@@ -99,7 +99,18 @@ class CidocTimelineGenerator:
         return act_count
 
     def generate_and_save(self):
+        try:
+            self._generate_and_save()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        finally:
+            self.cur.close()
+            self.conn.close()
+
+    def _generate_and_save(self):
         self._ensure_mapping_table()
+        self.cur.execute("DELETE FROM tei_cidoc_mappings")
         
         # 1. 메인 온톨로지 선언 구조 구축
         ontology_uri = URIRef("http://example.org/historical-event-ontology")
@@ -189,18 +200,15 @@ class CidocTimelineGenerator:
                         DO UPDATE SET mapping_label = EXCLUDED.mapping_label, cidoc_ttl = EXCLUDED.cidoc_ttl;
                     """, (table, rowid, mapping_label, cidoc_ttl_text))
 
-            self.conn.commit()
+        self.conn.commit()
 
         if total_activities_mapped == 0:
             print("\n⚠️ [경고] 추출된 인명 마크업 태그가 없습니다.")
-            return
 
         print("\n💾 통합 온톨로지 파일 디스크 저장 중...")
         self.g.serialize(destination=self.output_ttl, format="turtle")
         print(f"🎉 클래스 계층 선언 완료 ➡️ {self.output_ttl}")
 
-        self.cur.close()
-        self.conn.close()
 
 if __name__ == "__main__":
     generator = CidocTimelineGenerator()

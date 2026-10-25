@@ -408,3 +408,11 @@ function _build_scope_comment($lang, $entity, $region, $event) {
     ];
     return $templates[$lang] ?? "<!-- 이 사료의 내용은 오직 {$scope} 서술에만 유효하며 타 지역/사건과 결합 금지 -->";
 }
+
+
+/** Evidence blocks in their actual prompt order, including any unwrapped narrative text. */
+function docent_context_items($context) {
+    $items = preg_split('/(<SOURCE_EVIDENCE\b[^>]*>[\s\S]*?<\/SOURCE_EVIDENCE>)/u',
+        $context, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
+    return array_values(array_filter(array_map('trim', $items ?: []), static fn($s) => $s !== ''));
+}

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import re
 from pathlib import Path
 from typing import Any, Sequence
@@ -42,8 +44,27 @@ def read_json(path: Path) -> Any:
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(data, ensure_ascii=False, indent=2)
-    path.write_text(re.sub(r"\bNaN\b", "null", text), encoding="utf-8")  # NaN is not valid JSON
+    def finite(value):
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {k: finite(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [finite(v) for v in value]
+        return value
+    text = json.dumps(finite(data), ensure_ascii=False, indent=2, allow_nan=False)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as f:
+            temporary = f.name
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
 
 
 # ── Statistics (paired / resampling based, numpy only) ──────────────────────

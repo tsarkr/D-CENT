@@ -1395,7 +1395,7 @@ function handle_action_explain() {
         error_log(sprintf('[Docent][timing] stage 1 fact table %.2fs', microtime(true) - $t_stage));
     } catch (\Throwable $extErr) {
         error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
-        $fact_table = '';
+        throw new RuntimeException('Fact extraction failed.', 0, $extErr);
     }
 
     // 3. [2단계 파이프라인] 학술 도슨트 해설 원고 작성
@@ -1434,6 +1434,7 @@ function handle_action_explain() {
     if ($eval_mode) {
         $out += [
             "context" => $context_str,
+            "context_items" => docent_context_items($context_str),
             "fact_table" => $fact_table,
             "graphrag_used" => $graphrag_used,
             "narrative_chars" => mb_strlen($narrative_block),

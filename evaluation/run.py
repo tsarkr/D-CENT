@@ -5,12 +5,14 @@ Each run writes a folder results/<date>_<time>[-quick]/ with
   answers.json  question, answer, evidence, reference per system (input of rating and judge)
   scores.csv    automatic scores per question and system
   report.md     the report (python -m evaluation report)
-Answers are saved after every question, so an interrupted run continues with --resume.
+Answers are saved after every answer, so an interrupted run continues with --resume.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
+import importlib.metadata
 import datetime as dt
 import platform
 import subprocess
@@ -22,7 +24,7 @@ from pipeline.config import ROOT, setting
 
 from evaluation import systems
 from evaluation.common import BENCHMARK, RESULTS_DIR, read_json, write_json
-from evaluation.metrics import clean_answer, is_generation_failure, score_answer
+from evaluation.metrics import average_precision, evidence_items, clean_answer, is_generation_failure, score_answer
 
 RETRIES = 2              # extra attempts for a failed generation (rate limits)
 QUICK_CATEGORIES = 3     # --quick: the first question of each of this many categories
@@ -41,6 +43,43 @@ def _git_commit() -> str:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     except OSError:
         return ""
+
+
+def _fingerprint(dataset: Path, keys: list[str]) -> dict[str, Any]:
+    """Record code/data/environment content, including uncommitted source changes."""
+    paths = [ROOT / "requirements.txt", ROOT / "composer.lock", ROOT / "mcp_server.py", ROOT / "docent.php"]
+    for directory, pattern in (("pipeline", "*.py"), ("evaluation", "*.py"), ("includes", "*.php"), ("static", "*.js")):
+        paths.extend((ROOT / directory).glob(pattern))
+    code = hashlib.sha256()
+    for path in sorted(paths):
+        if path.is_file():
+            code.update(str(path.relative_to(ROOT)).encode())
+            code.update(path.read_bytes())
+    manifest = ROOT / "data/output/build_manifest.json"
+    build = read_json(manifest) if manifest.exists() else None
+    if build and not build.get("complete"):
+        raise SystemExit("데이터 빌드가 미완료 상태입니다. 평가를 시작할 수 없습니다.")
+    if build and build.get("stage") == "rdbms" and any(k not in ("passage", "hybrid", "hybrid-two-stage") for k in keys):
+        raise SystemExit("PostgreSQL 구축 후 그래프를 아직 갱신하지 않았습니다.")
+    if build is None:
+        build_id = setting("EVAL_DATA_BUILD_ID", "")
+        if not build_id:
+            raise SystemExit("데이터 버전이 없습니다. 기존 DB 스냅샷에 EVAL_DATA_BUILD_ID를 지정하세요.")
+        build = {"build_id": build_id, "complete": True, "stage": "external"}
+    server = _check_server(keys)
+    if server and server.get("data_build_id") != build["build_id"]:
+        raise SystemExit("서버 DOCENT_DATA_BUILD_ID와 평가 데이터 빌드 ID가 다릅니다.")
+    if any(k in ("dcent", "no-paths") for k in keys) and setting("DOCENT_CONTEXT_CHARS", "11000") != str(systems.CONTEXT_CHARS):
+        raise SystemExit("DOCENT_CONTEXT_CHARS가 논문의 공통 문맥 예산과 다릅니다.")
+    return {
+        "code_sha256": code.hexdigest(),
+        "dataset_sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+        "data_build": build,
+        "generator": setting("GEMINI_MODEL", "gemini-flash-lite-latest"),
+        "python": platform.python_version(),
+        "packages": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions() if d.metadata["Name"]},
+        "server": server,
+    }
 
 
 def _select_questions(items: list[dict[str, Any]], quick: bool, limit: int) -> list[dict[str, Any]]:
@@ -77,12 +116,13 @@ def _run_one(item: dict[str, Any], key: str, delay: float) -> dict[str, Any]:
             break
     else:
         res["failed"] = True
+    res["contexts"] = evidence_items(res.get("contexts", []))
     res["model"] = label
     return res
 
 
 def _new_run_dir(quick: bool, limit: int) -> Path:
-    name = dt.datetime.now().strftime("%Y-%m-%d_%H%M") + ("-quick" if quick or limit else "")
+    name = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S_%f") + ("-quick" if quick or limit else "")
     run_dir = RESULTS_DIR / name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
@@ -95,7 +135,7 @@ def _unfinished_run() -> Path:
     return runs[-1]
 
 
-def _check_server(keys: list[str]) -> None:
+def _check_server(keys: list[str]) -> dict[str, Any] | None:
     """The dcent systems call a running docent.php in evaluation mode; stop early if it is not set up."""
     if not any(k in ("dcent", "no-paths") for k in keys):
         return
@@ -108,7 +148,14 @@ def _check_server(keys: list[str]) -> None:
             "  또는 기준 시스템만:  --systems passage,hybrid,graph")
     try:
         import requests
-        requests.get(url, params={"csrf": "1"}, timeout=10).raise_for_status()
+        response = requests.get(url, params={"csrf": "1"}, timeout=10)
+        response.raise_for_status()
+        metadata = response.json().get("evaluation")
+        if not metadata or metadata.get("context_chars") != systems.CONTEXT_CHARS:
+            raise ValueError("서버 평가 모드 또는 문맥 예산이 올바르지 않습니다.")
+        if metadata.get("model") != setting("GEMINI_MODEL", "gemini-flash-lite-latest"):
+            raise ValueError("서버와 평가 생성 모델이 다릅니다.")
+        return metadata
     except Exception as exc:
         raise SystemExit(f"DOCENT_URL({url})에 연결할 수 없습니다: {exc}\n"
                          "서버를 DOCENT_EVAL_MODE=1 php -S localhost:8000 으로 띄웠는지 확인하세요.")
@@ -120,15 +167,18 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
         config = read_json(run_dir / "config.json")
         dataset, keys = Path(config["dataset"]), config["systems"]
         quick, limit = config["quick"], config["limit"]
-        answers = [a for a in read_json(run_dir / "answers.json") if not a.get("generation_failed")]
+        answers = [a for a in (read_json(run_dir / "answers.json") if (run_dir / "answers.json").exists() else []) if not a.get("generation_failed")]
         print(f"↩️  {run_dir.name} 이어서 실행 (완료된 답변 {len(answers)}개)")
-        _check_server(keys)
+        if config.get("fingerprint") != _fingerprint(dataset, keys):
+            raise SystemExit("코드·데이터·환경·서버 조건이 달라 재개할 수 없습니다. 새 평가를 시작하세요.")
+        systems.MODEL_VERSIONS.update(config.get("model_versions", {}))
     else:
         dataset = dataset or BENCHMARK
         if not dataset.exists():
             raise SystemExit(f"{dataset}가 없습니다. 먼저 `python -m evaluation dataset`을 실행하세요.")
         keys = systems.resolve(selection)
-        _check_server(keys)
+        fingerprint = _fingerprint(dataset, keys)
+        systems.MODEL_VERSIONS.clear()
         run_dir = _new_run_dir(quick, limit)
         answers = []
         config = {
@@ -140,6 +190,7 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
                            "retries": RETRIES},
             "generator": setting("GEMINI_MODEL", "gemini-flash-lite-latest"),
             "docent_url": setting("DOCENT_URL", "") if any(k in ("dcent", "no-paths") for k in keys) else "",
+            "fingerprint": fingerprint,
             "code_version": _git_commit(), "python": platform.python_version(), "complete": False,
         }
         write_json(run_dir / "config.json", config)
@@ -168,9 +219,12 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
                 "cypher_record_count": res.get("cypher_record_count", ""), "narrative_used": res.get("narrative_used", ""),
             })
             print(" ⚠️ 생성 실패" if res["failed"] else f" {res.get('total_time', 0):.1f}s", flush=True)
+            write_json(run_dir / "answers.json", answers)
+            config["model_versions"] = dict(systems.MODEL_VERSIONS)
+            write_json(run_dir / "config.json", config)
             if delay > 0:
                 time.sleep(delay)
-        write_json(run_dir / "answers.json", answers)  # after every question, for --resume
+        write_json(run_dir / "answers.json", answers)  # for --resume
         config["model_versions"] = dict(systems.MODEL_VERSIONS)
         write_json(run_dir / "config.json", config)
 
@@ -201,10 +255,10 @@ def write_scores(run_dir: Path, items: list[dict[str, Any]]) -> None:
 JUDGE_PROMPT = """You are a strict retrieval evaluator.
 Judge whether each context is relevant evidence for answering the question and
 the reference. Return JSON only, with exactly this shape:
-{{"relevant":[0,1,0],"precision":0.3333}}
+{{"relevant":[0,1,0]}}
 Use 1 only when the context contains direct evidence for at least one
 reference claim. Use 0 for merely related names, metadata, or unsupported
-inference. precision is the mean of relevant values, rounded to 4 decimals.
+inference.
 Do not use outside knowledge.
 
 QUESTION:
@@ -235,13 +289,16 @@ def _judge_one(record: dict[str, Any], model: str, host: str) -> dict[str, Any]:
     for _ in range(3):
         response = requests.post(f"{host.rstrip('/')}/api/chat", timeout=300, json={
             "model": model, "messages": [{"role": "user", "content": prompt}], "format": "json",
-            "stream": False, "options": {"temperature": 0, "num_predict": 128}, "think": False})
+            "stream": False, "options": {"temperature": 0, "num_predict": max(128, len(contexts) * 4 + 32)}, "think": False})
         response.raise_for_status()
-        match = re.search(r"\{.*\}", response.json()["message"]["content"], re.DOTALL)
-        parsed = json.loads(match.group(0)) if match else {}
-        relevant = [int(v) for v in parsed.get("relevant", [])][:len(contexts)]
-        if len(relevant) == len(contexts) and all(v in (0, 1) for v in relevant):
-            return {**result, "relevant": relevant, "context_precision": round(sum(relevant) / len(relevant), 4)}
+        try:
+            match = re.search(r"\{.*\}", response.json()["message"]["content"], re.DOTALL)
+            parsed = json.loads(match.group(0)) if match else {}
+            relevant = parsed.get("relevant", []) if isinstance(parsed, dict) else []
+        except (ValueError, KeyError, TypeError):
+            continue
+        if isinstance(relevant, list) and len(relevant) == len(contexts) and all(type(v) is int and v in (0, 1) for v in relevant):
+            return {**result, "relevant": relevant, "context_precision": round(average_precision(relevant), 4)}
     raise RuntimeError(f"판정 결과를 해석할 수 없습니다: {record['query_id']} / {record['system']}")
 
 
@@ -256,5 +313,5 @@ def judge(run_dir: Path) -> Path:
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         results = list(pool.map(lambda r: _judge_one(r, model, host), records))
     out = run_dir / "judge.json"
-    write_json(out, {"judge_model": model, "results": results})
+    write_json(out, {"judge_model": model, "metric_definition": "average_precision_v2", "results": results})
     return out

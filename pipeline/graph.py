@@ -229,7 +229,7 @@ def _read_table_with_mapping(table_name, mapping, required=None):
         df = pd.read_sql(f'SELECT * FROM {table_name}', pg_engine)
     except Exception as e:
         print(f"⚠️ 테이블 {table_name} 로딩 실패: {e}")
-        return pd.DataFrame()
+        raise
 
     out = pd.DataFrame()
     for expected, candidates in mapping.items():
@@ -245,8 +245,7 @@ def _read_table_with_mapping(table_name, mapping, required=None):
     if required:
         for r in required:
             if r not in out.columns or out[r].astype(str).str.strip().eq("").all():
-                print(f"⚠️ 필수 컬럼 누락 또는 모두 빈 값: {r} (테이블: {table_name})")
-                return pd.DataFrame()
+                raise ValueError(f"Required column missing or empty: {table_name}.{r}")
 
     return out
 
@@ -315,12 +314,16 @@ def _ensure_schema(session):
                         safe_run(session, statement).consume()
                     except Exception as retry_err:
                         print(f"❌ 스키마 재생성 실패: {retry_err}")
+                        raise
                 else:
                     print(f"⚠️ 스키마 생성 실패 (이름 추출 불가): {e}")
+                    raise
             else:
                 print(f"⚠️ 스키마 생성 건너뜀: {e}")
+                raise
         except Exception as e:
             print(f"⚠️ 스키마 생성 건너뜀: {e}")
+            raise
 
 
 def _ensure_tei_status(table_name):
@@ -329,6 +332,7 @@ def _ensure_tei_status(table_name):
             conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN IF NOT EXISTS tei_status text'))
     except Exception as e:
         print(f"⚠️ {table_name} tei_status 컬럼 생성 실패: {e}")
+        raise
 
 
 def _clear_graph(session, batch_size=50000):
@@ -450,6 +454,7 @@ def apply_cidoc_mappings(session, mappings, event_ids=None, source_ids=None):
             except Exception:
                 rowid = None
             print(f"⚠️ CIDOC 매핑 처리 중 오류 (rowid={rowid}): {e}")
+            raise
             continue
 
     batch = 5000
@@ -523,8 +528,7 @@ def load_source_ids():
         try:
             df = pd.read_sql(f'SELECT rowid, "{column}" AS source_id FROM "{table_name}" WHERE "{column}" IS NOT NULL', pg_engine)
         except Exception as e:
-            print(f"⚠️ {table_name}: 원본 식별자를 읽지 못했습니다 ({e})")
-            continue
+            raise RuntimeError(f"Cannot load source identifiers: {table_name}") from e
         for rowid, source_id in df.itertuples(index=False, name=None):
             if str(source_id).strip():
                 source_ids[(table_name, int(rowid))] = str(source_id).strip()
@@ -750,7 +754,7 @@ def build_ultimate_graph():
             )
         except Exception as e:
             print(f"⚠️ 장소 마스터 로딩 실패: {e}")
-            df_place = pd.DataFrame()
+            raise
 
         place_records = []
         for _, row in df_place.iterrows():
@@ -842,7 +846,7 @@ def build_ultimate_graph():
                 )
             except Exception as e:
                 print(f"⚠️ {source_table} 로딩 실패: {e}")
-                continue
+                raise
 
             for _, row in df_source.iterrows():
                 source_id = str(row.get('source_id') or '').strip()
@@ -944,6 +948,7 @@ def build_ultimate_graph():
                     print(f"  ✓ {len(data_payload)}개 기관 추가됨")
             except Exception as e:
                 print(f"❌ {table_name} 처리 중 에러: {e}")
+                raise
 
         print("🔗 최종 관계망 구축 중... 사건 TEI에서 인물/장소 관계 생성")
         _ensure_tei_status('raw_event_info')
@@ -960,7 +965,7 @@ def build_ultimate_graph():
             df_tei = pd.concat([df_event_tei, df_source_tei], ignore_index=True)
         except Exception as e:
             print(f"⚠️ TEI 데이터 로딩 중 오류: {e}")
-            df_tei = pd.DataFrame()
+            raise
 
         if df_tei.empty:
             print("⚠️ 사건 TEI 데이터가 비어있어 TEI 기반 연결을 건너뜁니다.")
@@ -995,6 +1000,7 @@ def build_ultimate_graph():
                         )
                     except Exception as e:
                         print(f"⚠️ 인물 관계 배치 주입 중 오류: {e}")
+                        raise
                     person_acc = []
 
                 if place_acc:
@@ -1045,6 +1051,7 @@ def build_ultimate_graph():
                         )
                     except Exception as e:
                         print(f"⚠️ 장소 관계 배치 주입 중 오류: {e}")
+                        raise
                     place_acc = []
 
             for _, row in df_tei.iterrows():
@@ -1086,6 +1093,7 @@ def build_ultimate_graph():
                             _flush_acc()
                 except Exception as e:
                     print(f"⚠️ TEI 파싱 중 오류 (사건id={event_id}): {e}")
+                    raise
 
             _flush_acc()
 
@@ -1167,6 +1175,7 @@ def build_ultimate_graph():
 
                 except Exception as e:
                     print(f"⚠️ {table_name} 관계 분석 중 오류: {e}")
+                    raise
 
             print("📜 사료 본문 문맥(판결문 등) 기반 가족/인물 관계(P152_has_parent 등) 분석 및 주입 중...")
             text_rel_acc = []
@@ -1225,6 +1234,7 @@ def build_ultimate_graph():
                     print("    ℹ️ 사료 본문 문맥에서 추출된 인물 관계가 없습니다.")
             except Exception as e:
                 print(f"⚠️ 사료 본문 문맥 관계 분석 중 오류: {e}")
+                raise
 
             # Runs after the TEI step so ACTIVATED_AT keeps meaning "person and place tagged in the same event text".
             print("🧷 명시적 키(링크 테이블·아이디·행정구역코드) 기반 관계 생성 중...")
@@ -1232,6 +1242,7 @@ def build_ultimate_graph():
                 apply_explicit_links(session, collect_explicit_links())
             except Exception as e:
                 print(f"⚠️ 명시적 키 기반 관계 생성 실패: {e}")
+                raise
 
             # CIDOC-CRM 매핑 적용: Postgres의 tei_cidoc_mappings 테이블에서 TTL 불러와 병합
             print("🔧 CIDOC 매핑 적용을 시도합니다 (Postgres 테이블: tei_cidoc_mappings)")
@@ -1252,6 +1263,7 @@ def build_ultimate_graph():
                     print(f"  ✓ CIDOC 매핑 {total_processed}행 처리 중...")
             except Exception as e:
                 print(f"⚠️ tei_cidoc_mappings 로딩/처리 실패: {e}")
+                raise
 
     print("\n✨ 모든 데이터와 탄압 기구의 계층 구조까지 완벽하게 통합되었습니다!")
 

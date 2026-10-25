@@ -272,6 +272,17 @@ In evaluation mode, `explain` returns the context and fact table it generated fr
 generation conditions, and asks for record citations; retrieval and context assembly are those of the
 deployed system. `explain` allows five requests per minute, so keep `EVAL_DELAY` at 15 seconds or more.
 
+A new build writes `data/output/build_manifest.json`. For an existing database with
+no manifest, set `EVAL_DATA_BUILD_ID` to an identifier for its frozen snapshot.
+For end-to-end evaluation, set the PHP server's `DOCENT_DATA_BUILD_ID` to the same
+build identifier. Change the identifier whenever either database changes; keep both
+databases fixed during an evaluation. `--resume` rejects changed code, dataset,
+packages, model, server configuration, or build identifiers; old runs without a
+fingerprint must be restarted. Checkpoints are written atomically after each answer.
+Evaluation mode disables model fallback and records the actual server model versions.
+The numeric shared generation conditions are unchanged. Corrected metrics and evidence
+item boundaries require fresh runs; do not combine old and new results.
+
 ### Run results
 
 `results/<date_time>/` holds `config.json` (conditions, model, code version), `answers.json` (answers and
@@ -314,11 +325,24 @@ names. Give raters only `annotation/rating/`; the blinding key in `annotation/ra
 and `get_neo4j_schema`. Adjust the paths in [mcp_client_config.json](./mcp_client_config.json) and keep secrets in
 environment variables or secrets.toml, not in the client configuration.
 
+MCP requires separate, least-privilege accounts configured as `MCP_PG_USER` /
+`MCP_PG_PASSWORD` and `MCP_NEO4J_USER` / `MCP_NEO4J_PASSWORD`. Grant SELECT on the
+required PostgreSQL tables and read-only access to the Neo4j database; do not grant
+ownership, write/schema privileges, or unsafe procedure/function execution. Account
+provisioning is an administrator task. The server refuses missing or reused build
+usernames, uses read-only PostgreSQL transactions and Neo4j read access with a
+read-only plan check, and limits query execution to 15 seconds and 500 returned rows.
+User-supplied Cypher procedures, multi-statement queries, and comments are rejected.
+
 ## Checks
 
 ```bash
 .venv3.14/bin/python -m pipeline check
 php -l docent.php && php -l includes/actions.php
+.venv3.14/bin/python -B -m unittest discover -s tests -v
+php -n tests/gemini_safety.php
+# With jsdom@26.1.0 installed in an isolated test directory:
+NODE_PATH=/path/to/test/node_modules node tests/rendering_safety.cjs
 ```
 
 ## Operational notes

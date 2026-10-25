@@ -633,14 +633,22 @@
     }
 
     function renderMarkdown(md) {
-        const safeMarkdown = String(md == null ? '' : md)
-            .replace(/<\s*(script|iframe|object|embed)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-            .replace(/<\s*\/?\s*(script|iframe|object|embed)\b[^>]*>/gi, '')
-            .replace(/\bon(?:error|load)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-        if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-            try { return labelRecordCitations(marked.parse(safeMarkdown)); } catch (_) {}
+        const text = String(md == null ? '' : md);
+        if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+            try {
+                // Citation labels are inserted before sanitizing the final HTML.
+                return DOMPurify.sanitize(labelRecordCitations(marked.parse(text)), {
+                    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'del', 'blockquote', 'ul', 'ol', 'li',
+                        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'code', 'hr', 'a',
+                        'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span'],
+                    ALLOWED_ATTR: ['href', 'title', 'class'],
+                    ALLOW_DATA_ATTR: false,
+                    ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#)/i
+                });
+            } catch (_) {}
         }
-        return labelRecordCitations(escapeHtml(safeMarkdown).replace(/\n/g, '<br>'));
+        // Fail closed if Markdown or sanitization is unavailable.
+        return escapeHtml(text).replace(/\n/g, '<br>');
     }
 
     function setQuery(t) {
@@ -982,27 +990,29 @@
             if(!res.ok) throw new Error(`HTTP ${res.status}`);
 
             const reader=res.body.getReader(), dec=new TextDecoder('utf-8');
-            let full='', buf='';
+            let full='', buf='', completed=false;
             while(true){
                 const{value,done}=await reader.read(); if(done) break;
                 buf+=dec.decode(value,{stream:true});
                 const lines=buf.split('\n'); buf=lines.pop();
                 for(const l of lines){
                     const t=l.trim();
-                    if(t==='data: [DONE]') break;
+                    if(t==='data: [DONE]') { completed=true; break; }
                     if(t.startsWith('data: ')){
                         try{
                             const p=JSON.parse(t.substring(6));
+                            if(p.error) throw new Error(p.error);
                             if(p.chunk){
                                 full+=p.chunk;
                                 if ($explanationContent) {
                                     $explanationContent.innerHTML=renderMarkdown(full)+'<span class="typing-cursor">▌</span>';
                                 }
                             }
-                        }catch(e){}
+                        }catch(e){ if (!(e instanceof SyntaxError)) throw e; }
                     }
                 }
             }
+            if (!completed) throw new Error(tr('응답 전송이 중단되었습니다. 다시 시도해 주세요.', 'The response was interrupted. Please try again.'));
             if ($explanationContent) $explanationContent.innerHTML=renderMarkdown(full);
             doneStep(sE,'✅',`${tr('AI 도슨트 해설 작성 완료', 'Docent commentary complete')} [${lang.toUpperCase()}]`);
             if ($reasoningTitle) $reasoningTitle.textContent=tr('✨ 도슨트 해설 완료', '✨ Commentary complete');

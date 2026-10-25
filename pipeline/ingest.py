@@ -187,13 +187,12 @@ def process_task(file_name, table_name, skip_rows, dry_run=False):
 
     try:
         # Drop existing table completely to ensure full rewrite
-        with engine.begin() as conn:
-            conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
-
         # write table
         # Replace missing values with empty string to avoid literal 'None'/'nan' being written
         df = df.fillna("")
-        df.to_sql(table_name, engine, if_exists='replace', index=False, chunksize=500)
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
+            df.to_sql(table_name, conn, if_exists='replace', index=False, chunksize=500)
         print(f"   ✅ 성공! ({used_enc} / '{used_sep}' / {len(df)}행)")
         print(f"   Column mapping saved to: {map_path}")
         return True
@@ -219,7 +218,8 @@ def load_sources() -> None:
     global engine
     engine = get_pg_engine()
     for file, table, skip in tasks:
-        process_task(file, table, skip)
+        if not process_task(file, table, skip):
+            raise RuntimeError(f"Source ingestion failed: {table}; build stopped.")
     print("\n✨ 모든 테이블이 CSV 헤더와 100% 일치하게 재생성 및 적재되었습니다!")
 
 
@@ -600,7 +600,8 @@ def wrap_tei():
             print('Processing', t)
             load_table_to_tei(t, conn, entities)
         except Exception as e:
-            print(' Error processing', t, e)
+            conn.close()
+            raise RuntimeError(f'TEI generation failed: {t}; build stopped.') from e
     conn.close()
     print('Done')
     return 0

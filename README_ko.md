@@ -270,6 +270,15 @@ DOCENT_EVAL_MODE=1 php -S localhost:8000     # 다른 터미널에서
 식별자 인용을 요구합니다. 검색과 문맥 구성은 배포 경로 그대로입니다. `explain`은 분당 5회로 제한되므로
 `EVAL_DELAY`는 15초 이상으로 두십시오.
 
+새 빌드는 `data/output/build_manifest.json`에 빌드 식별자를 남깁니다. 매니페스트가 없는
+기존 DB는 고정한 스냅샷의 식별자를 `EVAL_DATA_BUILD_ID`로 지정합니다. 엔드투엔드 평가에서는
+PHP 서버의 `DOCENT_DATA_BUILD_ID`도 같은 식별자로 지정하세요. 어느 DB든 변경하면 식별자도
+갱신하고, 평가 중에는 두 DB를 고정합니다. `--resume`은 코드·벤치마크·패키지·모델·서버 설정·
+빌드 식별자가 달라지면 중단합니다. 지문이 없는 옛 실행은 새로 시작해야 합니다.
+답변마다 체크포인트를 원자적으로 저장하며, 평가 모드는 다른 모델로 전환하지 않고 실제 서버
+모델 버전을 기록합니다. 공통 생성 조건의 수치는 유지됩니다. 지표와 근거 항목 구분이 수정되었으므로
+새 평가를 실행하고 이전 결과와 합산하지 마세요.
+
 ### 실행 결과
 
 `results/<날짜_시각>/`에 `config.json`(조건·모델·코드 버전), `answers.json`(답변과 근거),
@@ -307,11 +316,22 @@ context precision, 전문가 평가, 그래프 규모, 직접 확인할 항목(�
 `get_neo4j_schema`를 제공합니다. [mcp_client_config.json](./mcp_client_config.json)의 경로를 환경에 맞게
 고쳐 등록하고, 비밀정보는 설정 파일이 아닌 환경변수나 secrets.toml에 두십시오.
 
+MCP에는 구축 계정과 다른 최소 권한 계정이 필요합니다. `MCP_PG_USER` / `MCP_PG_PASSWORD`,
+`MCP_NEO4J_USER` / `MCP_NEO4J_PASSWORD`를 설정하세요. PostgreSQL은 필요한 표의 SELECT만,
+Neo4j는 대상 DB 읽기만 허용하고 소유권·쓰기·스키마 변경·위험한 함수/프로시저 실행 권한은
+부여하지 마세요. 계정 생성과 권한 부여는 관리자가 수행해야 합니다. 계정 미설정 또는 구축 계정과
+같은 사용자명이면 연결을 거절합니다. PostgreSQL 읽기 전용 트랜잭션, Neo4j 읽기 모드와 실행 계획
+확인, 15초 제한, 반환 500행 제한을 적용하며 사용자 Cypher 프로시저·다중 문장·주석은 거부합니다.
+
 ## 점검
 
 ```bash
 .venv3.14/bin/python -m pipeline check
 php -l docent.php && php -l includes/actions.php
+.venv3.14/bin/python -B -m unittest discover -s tests -v
+php -n tests/gemini_safety.php
+# 별도 테스트 폴더에 jsdom@26.1.0 설치 후:
+NODE_PATH=/path/to/test/node_modules node tests/rendering_safety.cjs
 ```
 
 ## 운영상 주의

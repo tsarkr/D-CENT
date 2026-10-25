@@ -158,6 +158,10 @@ def _latex_main(table: list[list[str]], header: list[str], path: Path) -> None:
 def report(run_dirs: list[Path]) -> Path:
     run_dirs = sorted(run_dirs)
     configs = [read_json(d / "config.json") if (d / "config.json").exists() else {} for d in run_dirs]
+    if len(run_dirs) > 1:
+        fingerprints = [c.get("fingerprint") for c in configs]
+        if not fingerprints[0] or any(f != fingerprints[0] for f in fingerprints):
+            raise SystemExit("조건 지문이 없거나 다른 실행은 합산할 수 없습니다. 동일 조건으로 새 평가를 실행하세요.")
     rows = [r for d in run_dirs for r in _read_scores(d)]
     if not rows:
         raise SystemExit("점수가 없습니다 (scores.csv가 비어 있음).")

@@ -40,6 +40,14 @@ export보다 **먼저** 해야 합니다. PostgreSQL 표와 Neo4j 그래프를 �
 
 ## 3. 평가 실행 (RQ1, RQ2)
 
+안전성 보완 후에는 기존 결과와 섞지 않고 새 실행을 시작합니다. 수치로 정한 공통 생성 조건은
+유지되지만, 실패 판정·문장별 부정 처리·근거 항목 분리·문맥 평균 정밀도 계산이 수정되었습니다.
+
+- [ ] `data/output/build_manifest.json`의 `build_id` 확인. 기존 DB에 매니페스트가 없으면 고정된 스냅샷 이름을 `EVAL_DATA_BUILD_ID`로 지정
+- [ ] PHP 서버의 `DOCENT_DATA_BUILD_ID`를 같은 값으로 지정하고, 평가 중 PostgreSQL·Neo4j 변경 중지
+- [ ] `python -B -m unittest discover -s tests -v`, `php -n tests/gemini_safety.php` 통과 확인
+- [ ] `--resume`은 코드·데이터셋·패키지·모델·서버 설정·빌드 ID가 같을 때만 사용 (옛 실행은 재개 불가)
+
 - [ ] 다른 터미널에서 `DOCENT_EVAL_MODE=1 php -S localhost:8000`, `DOCENT_URL` 설정
 - [ ] `python -m evaluation run --quick` (세 문항 점검)
 - [ ] `python -m evaluation run` 2회 (각각 결과 폴더가 생김)

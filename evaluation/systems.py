@@ -54,7 +54,7 @@ def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> s
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     contents = []
     system_instruction = None
@@ -78,7 +78,7 @@ def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> s
 
     for attempt in range(4):
         try:
-            resp = requests.post(url, json=payload, timeout=60)
+            resp = requests.post(url, json=payload, headers={"x-goog-api-key": api_key}, timeout=60)
             if resp.status_code == 200:
                 data = resp.json()
                 MODEL_VERSIONS[data.get("modelVersion") or model] += 1
@@ -89,10 +89,10 @@ def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> s
                 time.sleep(wait_time)
                 continue
             else:
-                raise RuntimeError(f"Gemini API 호출 실패 (상태 코드 {resp.status_code}): {resp.text[:200]}")
-        except requests.RequestException as e:
+                raise RuntimeError(f"Gemini API 호출 실패 (상태 코드 {resp.status_code})")
+        except requests.RequestException:
             if attempt == 3:
-                raise RuntimeError(f"Gemini API 요청 실패: {e}")
+                raise RuntimeError("Gemini API 요청 실패 (연결 오류)") from None
             time.sleep(5)
 
     raise RuntimeError("Gemini API 재시도 한도 초과 (429/503)")
@@ -660,30 +660,40 @@ class DcentClient:
         self.cookies: dict[str, str] = {}
         self.token = ""
 
-    def _refresh_token(self) -> None:
-        resp = requests.get(self.url, params={"csrf": "1"}, cookies=self.cookies, timeout=30)
+    def _refresh_token(self, timeout: float = 30.0) -> None:
+        resp = requests.get(self.url, params={"csrf": "1"}, cookies=self.cookies, timeout=timeout)
         resp.raise_for_status()
         self.cookies.update(resp.cookies.get_dict())
         self.token = resp.json()["csrf_token"]
 
     def call(self, action: str, data: dict[str, Any], timeout: float = 180.0) -> Any:
+        deadline = time.monotonic() + timeout
         if not self.token:
-            self._refresh_token()
-        last = ""
+            self._refresh_token(timeout=max(0.01, deadline - time.monotonic()))
+        last = "request deadline exceeded"
         for _ in range(5):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             resp = requests.post(self.url, params={"ajax": action}, data={**data, "csrf_token": self.token},
-                                 headers={"X-CSRF-Token": self.token}, cookies=self.cookies, timeout=timeout)
+                                 headers={"X-CSRF-Token": self.token}, cookies=self.cookies, timeout=remaining)
             if resp.status_code == 200:
-                return resp.json()
+                result = resp.json()
+                if isinstance(result, dict):
+                    MODEL_VERSIONS.update(result.get("model_versions", {}))
+                return result
             last = f"{resp.status_code} {resp.text[:160]}"
             if resp.status_code == 403:
-                self._refresh_token()
-            elif resp.status_code == 429:
-                wait = int(resp.headers.get("Retry-After", "60") or 60)
-                print(f" (D-CENT {action} 요청 제한, {wait}초 대기)...", end="", flush=True)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._refresh_token(timeout=remaining)
+            elif resp.status_code == 429 or resp.status_code >= 500:
+                wait = max(0, int(resp.headers.get("Retry-After", "60") or 60)) if resp.status_code == 429 else 10
+                if wait >= deadline - time.monotonic():
+                    break
+                print(f" (D-CENT {action} 재시도, {wait}초 대기)...", end="", flush=True)
                 time.sleep(wait)
-            elif resp.status_code >= 500:
-                time.sleep(10)
             else:
                 break
         raise RuntimeError(f"D-CENT {action} 실패: {last}")
@@ -730,8 +740,9 @@ def run_dcent_e2e(query_item: dict[str, Any], use_paths: bool = True) -> dict[st
     client = _DCENT
     question = query_item["query"]
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        narrative_future = pool.submit(client.call, "narrative", {"term": question}) if use_paths else None
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        narrative_future = pool.submit(DcentClient(client.url).call, "narrative", {"term": question}, timeout=20.0) if use_paths else None
         analysis = client.call("analyze", {"term": question})
         keywords = client_keywords(question)
         graph = client.call("graph", {"term": question, "keywords": json.dumps(keywords, ensure_ascii=False),
@@ -749,6 +760,8 @@ def run_dcent_e2e(query_item: dict[str, Any], use_paths: bool = True) -> dict[st
                 narrative = None  # the client proceeds without it; explain then computes the paths itself
             except Exception as exc:
                 print(f" (narrative 생략: {exc})", end="", flush=True)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     t_retrieval = time.time() - t0
 
     data = {
@@ -772,7 +785,7 @@ def run_dcent_e2e(query_item: dict[str, Any], use_paths: bool = True) -> dict[st
     return {
         "model": "D-CENT (end-to-end)" if use_paths else "D-CENT without narrative paths (Ablation)",
         "answer": answer,
-        "contexts": [context] if context else [],
+        "contexts": out.get("context_items", [context] if context else []),
         # The server skips the fact table silently when that call fails; count it as a failed run.
         "fact_table": fact_table if (fact_table or not context) else "[Fact Extraction Error: empty]",
         "context_chars": len(context),

@@ -36,7 +36,20 @@ DECLINE_MARKERS = ("자료에서 확인되지 않", "확인할 수 없", "확인
 def is_generation_failure(answer: str) -> bool:
     """True when the pipeline produced no answer (API error), as opposed to a wrong one."""
     stripped = answer.strip()
-    return not stripped or bool(re.match(r"\[[A-Za-z ]*Error", stripped))
+    return not stripped or bool(re.match(r"\[[A-Za-z ]*Error", stripped)) or stripped.startswith((
+        "Gemini 오류", "AI 요청 실패", "AI 응답을 생성하지 못했습니다.",
+        "API Key가 설정되지 않았습니다.", "API key is not configured.",
+    ))
+
+
+def _sentences(text: str) -> list[str]:
+    return [s.strip() for s in re.split(r"(?<=[.!?。])\s+|\n+", text) if s.strip()]
+
+
+def _is_negative(text: str) -> bool:
+    return bool(re.search(
+        r"지\s*않|지\s*못|아니|아니다|없[다습는었음]|확인되지|불가능|허위|허구|"
+        r"사실과\s*다르|근거[가는]?\s*없|\b(?:not|never|cannot|unconfirmed|false)\b", text, re.I))
 
 
 def evaluate_faithfulness(answer: str, gold_facts: list[str]) -> tuple[float, int, int]:
@@ -47,11 +60,41 @@ def evaluate_faithfulness(answer: str, gold_facts: list[str]) -> tuple[float, in
     for fact in gold_facts:
         # Extract core keywords from fact
         keywords = [k for k in re.findall(r'[가-힣A-Za-z0-9]{2,}', fact) if k not in ['에서', '으로', '하고', '등이', '하여', '전개함', '받음', '형성됨']]
-        hit_count = sum(1 for kw in keywords if kw in answer)
-        if hit_count >= max(1, len(keywords) // 2):
+        # Keep the lexical proxy, but do not count an explicit denial as support.
+        if any(_is_negative(sentence) == _is_negative(fact)
+               and sum(kw in sentence for kw in keywords) >= max(1, (len(keywords) + 1) // 2)
+               for sentence in _sentences(answer)):
             covered += 1
     score = (covered / len(gold_facts)) * 100.0
     return round(score, 2), covered, len(gold_facts)
+
+
+def evidence_items(contexts: list[str]) -> list[str]:
+    """Use record envelopes or individual path/triple lines for every system."""
+    items = []
+    for context in contexts:
+        for part in re.split(r'(<SOURCE_EVIDENCE\b[\s\S]*?(?:</SOURCE_EVIDENCE>|(?=<SOURCE_EVIDENCE\b)|\Z))', context):
+            if part.startswith('<SOURCE_EVIDENCE'):
+                items.append(part)
+            else:
+                headers = {
+                    '<GRAPH_TOPOLOGY>', '</GRAPH_TOPOLOGY>',
+                    '[지식그래프 다중 홉 탐색 결과]', '[Knowledge Graph Multi-hop Results]',
+                    '[知識グラフ多重ホップ探索結果]', '[知识图谱多跳探索结果]',
+                    '[1차 사료 원문 (PostgreSQL)]', '[Primary Archival Sources (PostgreSQL)]',
+                    '[一次史料原文（PostgreSQL所蔵公文書）]', '[一手史料原文（PostgreSQL历史档案）]',
+                }
+                items.extend(line.strip() for line in part.splitlines() if line.strip() and line.strip() not in headers)
+    return items
+
+
+def average_precision(relevant: list[int]) -> float:
+    hits, weighted = 0, 0.0
+    for rank, value in enumerate(relevant, 1):
+        hits += value
+        if value:
+            weighted += hits / rank
+    return weighted / hits if hits else 0.0
 
 
 def evaluate_retrieval_direct(query_item: dict[str, Any], contexts: list[str]) -> dict[str, float]:
@@ -90,19 +133,13 @@ def evaluate_hallucination(
     """Evaluate hallucination: Did the model falsely claim or endorse any negative traps?
 
     A trap counts when one answer sentence contains two of its keywords and the
-    answer has no rejection phrase. One keyword is always a person name or
+    sentence has no rejection phrase. One keyword is always a person name or
     proper noun (the trap's leading noun or one of the question's entities);
     years, dates and province/county/city names alone never match. Returns
     (rate, traps triggered, the sentences that triggered them for manual review).
     """
     if not negative_traps:
         return 0.0, 0, ""
-    negation_markers = [
-        '아니다', '없다', '않았다', '불가능', '확인되지', '오류', '차이', '별개의',
-        '아닙니다', '없습니다', '않았습니다', '않습니다',
-        '허구', '허위', '부합하지 않', '사실이 아니', '사실과 다르', '확인할 수 없', '근거가 없', '근거는 없', '근거 없',
-    ]
-    has_negation = any(neg in answer for neg in negation_markers)
     hints = [str(e).strip() for e in entities or [] if str(e).strip() and not is_generic_token(str(e).strip())]
     sentences = [s.strip() for s in re.split(r"(?<=[.!?。])\s+|\n+", answer) if s.strip()]
     traps_triggered = 0
@@ -113,11 +150,11 @@ def evaluate_hallucination(
         tokens = list(dict.fromkeys(t for t in tokens if not DATE_TOKEN_RE.fullmatch(t)))
         anchors = [t for i, t in enumerate(tokens)
                    if not is_generic_token(t) and (i == 0 or any(h in t or h.startswith(t) for h in hints))]
-        if not anchors or has_negation:
+        if not anchors:
             continue  # a trap without a name or proper noun cannot be matched reliably
         # Prefer a second name/proper noun over an ordinary word as the other keyword.
         trap_keywords = [anchors[0]] + (anchors[1:] + [t for t in tokens if t not in anchors])[:1]
-        hits = [s for s in sentences if all(kw in s for kw in trap_keywords)]
+        hits = [s for s in sentences if all(kw in s for kw in trap_keywords) and not _is_negative(s)]
         if hits:
             traps_triggered += 1
             flagged += [s for s in hits if s not in flagged]

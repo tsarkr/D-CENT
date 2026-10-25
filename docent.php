@@ -40,7 +40,22 @@ if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) 
     }
     $token = docent_generate_csrf_token();
     $_SESSION['docent_csrf'] = $token;
-    echo json_encode(['csrf_token' => $token], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+    $token_response = ['csrf_token' => $token];
+    if (get_cfg('DOCENT_EVAL_MODE', '0') === '1') {
+        $files = array_merge(glob(__DIR__ . '/includes/*.php'), [__FILE__]);
+        sort($files);
+        $hash = hash_init('sha256');
+        foreach ($files as $file) hash_update_file($hash, $file);
+        $token_response['evaluation'] = [
+            'model' => get_cfg('GEMINI_MODEL', 'gemini-flash-lite-latest'),
+            'context_chars' => (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'),
+            'analysis_temperature' => (float)get_cfg('GEMINI_TEMPERATURE', '0.1'),
+            'analysis_top_p' => (float)get_cfg('GEMINI_TOP_P', '0.85'),
+            'code_sha256' => hash_final($hash),
+            'data_build_id' => get_cfg('DOCENT_DATA_BUILD_ID', ''),
+        ];
+    }
+    echo json_encode($token_response, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
     exit;
 }
 
@@ -55,6 +70,8 @@ if (isset($_GET['ajax'])) {
     header('X-Content-Type-Options: nosniff');
     header('X-Frame-Options: SAMEORIGIN');
 
+    $capture_eval = get_cfg('DOCENT_EVAL_MODE', '0') === '1' && !isset($_POST['stream']) && !isset($_GET['stream']);
+    if ($capture_eval) ob_start();
     try {
         match ($action) {
             'analyze'     => handle_action_analyze(),
@@ -65,12 +82,26 @@ if (isset($_GET['ajax'])) {
             'narrative'   => handle_action_narrative(),
             default       => throw new InvalidArgumentException("Unknown action: {$action}"),
         };
+        if ($capture_eval) {
+            $body = ob_get_clean();
+            $data = json_decode($body, true);
+            if (is_array($data) && !array_is_list($data)) {
+                $data['model_versions'] = $GLOBALS['docent_model_versions'] ?? new stdClass();
+                echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            } else { echo $body; }
+        }
     } catch (\Throwable $e) {
+        if ($capture_eval && ob_get_level()) ob_end_clean();
         $detail_msg = $e->getMessage();
         $file_name = basename($e->getFile());
         $line_no = $e->getLine();
         $class_name = get_class($e);
         error_log(sprintf('Docent AJAX failure [%s]: [%s] %s in %s:%d', $action, $class_name, $detail_msg, $file_name, $line_no));
+        if (isset($_POST['stream']) || isset($_GET['stream'])) {
+            header('Content-Type: text/event-stream; charset=utf-8');
+            echo "data: " . json_encode(['error' => '해설 생성이 중단되었습니다. 다시 시도해 주세요.'], JSON_UNESCAPED_UNICODE) . "\n\n";
+            exit;
+        }
         http_response_code(500);
         $error_response = ["error" => "요청을 처리하는 중 서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."];
         if (get_cfg('APP_DEBUG', '0') === '1') {

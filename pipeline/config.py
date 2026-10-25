@@ -8,6 +8,7 @@ Settings are read from environment variables first, then ``.streamlit/secrets.to
 from __future__ import annotations
 
 import os
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -55,7 +56,7 @@ def load_secrets(secret_file: str | Path | None = None) -> dict[str, Any]:
             values = tomllib.load(fh)
         return values if isinstance(values, dict) else {}
     except Exception as exc:
-        print(f"⚠️ secrets.toml 읽기 실패: {exc}")
+        print(f"⚠️ secrets.toml 읽기 실패 ({type(exc).__name__})", file=sys.stderr)
         return {}
 
 
@@ -135,6 +136,6 @@ def get_neo4j_driver(secrets: dict[str, Any] | None = None, **kwargs):
     cfg = get_neo4j_config(secrets)
     return GraphDatabase.driver(
         cfg["uri"],
-        auth=(cfg["user"], cfg["password"]),
+        auth=kwargs.pop("auth", (cfg["user"], cfg["password"])),
         **kwargs,
     )
