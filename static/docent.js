@@ -31,7 +31,8 @@
             explainBtn: "✨ 해설 생성",
             explainPlaceholder: "검색어를 입력하면 지식그래프 탐색 후 AI 도슨트 해설이 생성됩니다.",
             systemLogTitle: "시스템 로그",
-            footer: "제작: jo.gyungmin@gmail.com · AI API 비용은 개인 감당 · 적절한 사용 부탁드립니다",
+            footer: "제작 · AI API 비용은 개인 감당 · 적절한 사용 부탁드립니다",
+            footerDiscussion: "디스커션",
             footerSourcesLabel: "원본 자료:",
             srcSamil: "국사편찬위원회 삼일운동 데이터베이스",
             srcI815: "독립기념관 한국독립운동인명사전",
@@ -61,7 +62,8 @@
             explainBtn: "✨ Generate Commentary",
             explainPlaceholder: "Enter a question above to retrieve archival records and generate an AI docent commentary.",
             systemLogTitle: "System Logs",
-            footer: "Author: jo.gyungmin@gmail.com · Powered by Knowledge Graph RAG & Gemini AI",
+            footer: "Author · Powered by Knowledge Graph RAG & Gemini AI",
+            footerDiscussion: "Discussion",
             footerSourcesLabel: "Data sources:",
             srcSamil: "NIKH March First Movement Database",
             srcI815: "Independence Hall of Korea Biographical Dictionary",
@@ -91,7 +93,8 @@
             explainBtn: "✨ 解説を生成",
             explainPlaceholder: "質問を入力すると、知識グラフの探索後にAIドーセントによる学術解説が生成されます。",
             systemLogTitle: "システムログ",
-            footer: "制作: jo.gyungmin@gmail.com · 知識グラフRAG＆Gemini AI搭載",
+            footer: "制作 · 知識グラフRAG＆Gemini AI搭載",
+            footerDiscussion: "ディスカッション",
             footerSourcesLabel: "原資料:",
             srcSamil: "国史編纂委員会 三・一運動データベース",
             srcI815: "独立記念館 韓国独立運動人名辞典",
@@ -121,7 +124,8 @@
             explainBtn: "✨ 生成导览解说",
             explainPlaceholder: "输入查询内容后，系统将检索知识图谱并生成AI历史学者级导览解说。",
             systemLogTitle: "系统运行日志",
-            footer: "制作: jo.gyungmin@gmail.com · 知识图谱RAG与AI技术驱动",
+            footer: "制作 · 知识图谱RAG与AI技术驱动",
+            footerDiscussion: "讨论区",
             footerSourcesLabel: "原始资料:",
             srcSamil: "国史编纂委员会 三一运动数据库",
             srcI815: "独立纪念馆 韩国独立运动人名辞典",
@@ -464,6 +468,7 @@
         if ($('system-log-title')) $('system-log-title').textContent = activeDict.systemLogTitle;
         if ($('reexplain-label')) $('reexplain-label').textContent = activeDict.reExplainLabel;
         if ($('footer-text')) $('footer-text').textContent = activeDict.footer;
+        if ($('footer-discussion')) $('footer-discussion').textContent = activeDict.footerDiscussion;
         if ($('footer-sources-label')) $('footer-sources-label').textContent = activeDict.footerSourcesLabel;
         if ($('src-samil')) $('src-samil').textContent = activeDict.srcSamil;
         if ($('src-i815')) $('src-i815').textContent = activeDict.srcI815;
