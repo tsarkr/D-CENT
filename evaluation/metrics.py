@@ -47,8 +47,10 @@ def _sentences(text: str) -> list[str]:
 
 
 def _is_negative(text: str) -> bool:
+    # Connectives and idioms that read as affirmative ("뿐만 아니라", "굴하지 않고", "틀림없다") are not denials.
+    text = re.sub(r"뿐(?:만)?\s*아니라|지\s*(?:않|못하)고|(?:틀림|어김|빠짐|끊임|거침|아낌)\s*없", " ", text)
     return bool(re.search(
-        r"지\s*않|지\s*못|아니|아니다|없[다습는었음]|확인되지|불가능|허위|허구|"
+        r"지\s*않|지\s*못|아니[다었며]|아닙니|아님|없[다습는었음]|확인되지|불가능|허위|허구|"
         r"사실과\s*다르|근거[가는]?\s*없|\b(?:not|never|cannot|unconfirmed|false)\b", text, re.I))
 
 

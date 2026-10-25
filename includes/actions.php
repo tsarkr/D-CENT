@@ -42,10 +42,15 @@ function handle_action_analyze() {
     $search_strategy = docent_sanitize_text($_POST['search_strategy'] ?? '', 50, false);
 
     // analyze는 경량 분류이므로 짧은 타임아웃(10초)으로 실행하여 게이트웨이 504 타임아웃 차단
-    $res = call_gemini([
-        ["role" => "system", "content" => $system_prompt],
-        ["role" => "user", "content" => (string)$term]
-    ], true, 500, 0.0, 0.8, 10);
+    try {
+        $res = call_gemini([
+            ["role" => "system", "content" => $system_prompt],
+            ["role" => "user", "content" => (string)$term]
+        ], true, 500, 0.0, 0.8, 10);
+    } catch (\Throwable $e) {
+        error_log('Analyze fell back to local keywords: ' . $e->getMessage());
+        $res = '';
+    }
     
     $parsed = json_decode((string)$res, true);
 
@@ -1395,7 +1400,9 @@ function handle_action_explain() {
         error_log(sprintf('[Docent][timing] stage 1 fact table %.2fs', microtime(true) - $t_stage));
     } catch (\Throwable $extErr) {
         error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
-        throw new RuntimeException('Fact extraction failed.', 0, $extErr);
+        // Evaluation counts this as a failed run; the public docent continues without the fact table.
+        if ($eval_mode) throw new RuntimeException('Fact extraction failed.', 0, $extErr);
+        $fact_table = '';
     }
 
     // 3. [2단계 파이프라인] 학술 도슨트 해설 원고 작성
