@@ -64,15 +64,26 @@ def _read_scores(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def _per_question(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One record per (system, question): metric means over the runs in which it did not fail."""
+    """One record per (system, question): metric means over the runs in which *every* system of that run
+    answered the question. Averaging each system over its own successful runs would compare, say, one run of
+    a system with the mean of two runs of another; keeping only complete (question, run) cells keeps the pairs."""
+    systems_in_run: dict[str, set[str]] = defaultdict(set)
+    cells: dict[tuple[str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
+    for r in rows:
+        systems_in_run[r["run"]].add(r["system"])
+        cells[(r["query_id"], r["run"])][r["system"]] = r
+    complete = {(q, run) for (q, run), by_system in cells.items()
+                if set(by_system) == systems_in_run[run] and not any(x["failed"] for x in by_system.values())}
+
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         groups[(r["system"], r["query_id"])].append(r)
     merged = []
-    for (_, _), rs in groups.items():
-        ok = [r for r in rs if not r["failed"]] or rs
+    for (_, query_id), rs in groups.items():
+        ok = [r for r in rs if (query_id, r["run"]) in complete]
         rec = {k: rs[0][k] for k in ("query_id", "category", "source", "system", "model")}
-        rec["generation_failed"] = all(r["failed"] for r in rs)
+        rec["generation_failed"] = not ok        # no run in which all systems answered this question
+        rec["n_runs"] = len(ok)
         for k in METRICS:
             vals = [r[k] for r in ok if r[k] is not None]
             rec[k] = sum(vals) / len(vals) if vals else None
@@ -113,10 +124,13 @@ def _citations(rows: list[dict[str, Any]], systems: list[str]) -> list[list[str]
         valid = sum(r["cite_ids_valid"] or 0 for r in rs)
         ids = sum(r["cite_ids_total"] or 0 for r in rs)
         labels = sum(r["cite_internal_labels"] or 0 for r in rs)
-        pointers = ids + labels
-        no_pointer = sum(1 for r in rs if not (r["cite_ids_total"] or r["cite_internal_labels"]))
-        out.append([s, len(rs), int(ids), int(valid), int(ids - valid), int(labels),
-                    f"{valid / pointers:.2f}" if pointers else "–", f"{no_pointer / len(rs):.0%}" if rs else "–"])
+        # Incident names are valid citations too (the graph-only baseline can cite nothing else).
+        named = sum(r.get("cite_named_total") or 0 for r in rs)
+        named_ok = sum(r.get("cite_named_found") or 0 for r in rs)
+        pointers = ids + labels + named
+        no_pointer = sum(1 for r in rs if not (r["cite_ids_total"] or r["cite_internal_labels"] or r.get("cite_named_total")))
+        out.append([s, len(rs), int(ids), int(valid), int(ids - valid), int(named), int(named_ok), int(labels),
+                    f"{(valid + named_ok) / pointers:.2f}" if pointers else "–", f"{no_pointer / len(rs):.0%}" if rs else "–"])
     return out
 
 
@@ -253,9 +267,10 @@ def report(run_dirs: list[Path]) -> Path:
 
     # 5. Citations
     md.append("\n## 5. 인용 (검증기 적용 전 답변 기준)\n")
-    md.append(_md_table(["System", "답변", "기록 ID 인용", "유효", "무효", "내부 표지", "포인터 유효율", "포인터 없는 답변"],
+    md.append(_md_table(["System", "답변", "기록 ID 인용", "유효", "무효", "사건명 인용", "근거에 있음", "내부 표지", "포인터 유효율", "인용 없는 답변"],
                         [[labels.get(r[0], r[0])] + r[1:] for r in _citations(rows, systems)]))
-    md.append("\n포인터 유효율 = 근거에 실제로 있는 기록 ID 인용 / (기록 ID 인용 + 내부 표지). 인용이 문장을 뒷받침하는지는 전문가 평가(6절)로 판단합니다.")
+    md.append("\n포인터 유효율 = (근거에 있는 기록 ID 인용 + 근거에 있는 사건명 인용) / (기록 ID 인용 + 사건명 인용 + 내부 표지). "
+              "인용 없는 답변 = 기록 ID, 사건명, 내부 표지 중 어떤 인용도 없는 답변. 인용이 문장을 뒷받침하는지는 전문가 평가(6절)로 판단합니다.")
 
     # 6. Secondary and human measures
     md.append("\n## 6. 보조 지표와 전문가 평가\n")

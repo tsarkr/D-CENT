@@ -955,11 +955,11 @@ def build_ultimate_graph():
         _ensure_tei_status('raw_source_info')
         try:
             df_event_tei = pd.read_sql(
-                'SELECT "아이디" AS event_id, tei FROM raw_event_info WHERE tei IS NOT NULL',
+                'SELECT "아이디" AS event_id, tei, \'raw_event_info\' AS src_table, rowid FROM raw_event_info WHERE tei IS NOT NULL',
                 pg_engine,
             )
             df_source_tei = pd.read_sql(
-                'SELECT "사건아이디" AS event_id, tei FROM raw_source_info WHERE tei IS NOT NULL AND "사건아이디" IS NOT NULL',
+                'SELECT "사건아이디" AS event_id, tei, \'raw_source_info\' AS src_table, rowid FROM raw_source_info WHERE tei IS NOT NULL AND "사건아이디" IS NOT NULL',
                 pg_engine,
             )
             df_tei = pd.concat([df_event_tei, df_source_tei], ignore_index=True)
@@ -988,7 +988,8 @@ def build_ultimate_graph():
                             ON MATCH SET p.name = coalesce(p.name, row.person_name), p.type = '인물', p.한글독음 = coalesce(p.한글독음, row.gloss), p.한글명칭 = coalesce(p.한글명칭, row.gloss, row.person_name)
                             MERGE (e)-[r:P14_carried_out_by]->(p)
                             SET r.context = row.context_text,
-                                r.source_tag = 'persName'
+                                r.source_tag = 'persName',
+                                r.sources = CASE WHEN coalesce(row.source, '') = '' OR row.source IN coalesce(r.sources, []) THEN coalesce(r.sources, []) ELSE coalesce(r.sources, []) + row.source END
                             WITH p, row
                             WHERE row.gloss IS NOT NULL AND row.gloss <> '' AND row.gloss <> row.person_name
                             MERGE (p_ko:Person:인물 {명칭: row.gloss})
@@ -1017,7 +1018,8 @@ def build_ultimate_graph():
                                 MERGE (e)-[r:P7_took_place_at]->(p)
                                 SET p.한글독음 = coalesce(p.한글독음, row.gloss),
                                     r.context = row.context_text,
-                                    r.source_tag = 'placeName'
+                                    r.source_tag = 'placeName',
+                                    r.sources = CASE WHEN coalesce(row.source, '') = '' OR row.source IN coalesce(r.sources, []) THEN coalesce(r.sources, []) ELSE coalesce(r.sources, []) + row.source END
                                 """,
                                 place_by_id,
                                 batch_size=2000,
@@ -1032,7 +1034,8 @@ def build_ultimate_graph():
                                 MERGE (e)-[r:P7_took_place_at]->(p)
                                 SET p.한글독음 = coalesce(p.한글독음, row.gloss),
                                     r.context = row.context_text,
-                                    r.source_tag = 'placeName'
+                                    r.source_tag = 'placeName',
+                                    r.sources = CASE WHEN coalesce(row.source, '') = '' OR row.source IN coalesce(r.sources, []) THEN coalesce(r.sources, []) ELSE coalesce(r.sources, []) + row.source END
                                 """,
                                 place_by_name,
                                 batch_size=2000,
@@ -1059,6 +1062,8 @@ def build_ultimate_graph():
                 tei_text = row.get('tei') or ''
                 if not event_id or not tei_text:
                     continue
+                # citation key of the attesting record, in the form the generator cites ("raw_source_info-123")
+                source_key = f"{row.get('src_table')}-{int(row.get('rowid'))}" if row.get('rowid') is not None else ''
 
                 try:
                     soup = BeautifulSoup(tei_text, 'xml')
@@ -1075,6 +1080,7 @@ def build_ultimate_graph():
                                     'person_name': person_name,
                                     'gloss': gloss_text,
                                     'context_text': context_text,
+                                    'source': source_key,
                                 })
 
                         for place in section.find_all('placeName'):
@@ -1087,6 +1093,7 @@ def build_ultimate_graph():
                                     'place_id': place_ref,
                                     'gloss': gloss_text,
                                     'context_text': context_text,
+                                    'source': source_key,
                                 })
 
                         if len(person_acc) + len(place_acc) >= flush_every:
@@ -1125,6 +1132,7 @@ def build_ultimate_graph():
                     rel_p_p_acc = [] # (src_name, rel_type, dst_name)
 
                     for _, row in df_rel.iterrows():
+                        source_key = f"{table_name}-{int(row['rowid'])}" if 'rowid' in row and row['rowid'] is not None else ''
                         subjects = []
                         for sc in subject_cols:
                             subjects.extend(_split_names(row.get(sc)))
@@ -1149,13 +1157,13 @@ def build_ultimate_graph():
                                     # 방향성 및 타입 결정
                                     if matched_key in ("딸", "아들", "자녀"):
                                         # 자녀 -> 부모 (Subject가 부모)
-                                        rel_p_p_acc.append({'src': p_related, 'rel': rel_type, 'dst': p_subject})
+                                        rel_p_p_acc.append({'src': p_related, 'rel': rel_type, 'dst': p_subject, 'source': source_key})
                                     elif matched_key in ("부친", "모친"):
                                         # 자녀 -> 부모 (Subject가 자녀)
-                                        rel_p_p_acc.append({'src': p_subject, 'rel': rel_type, 'dst': p_related})
+                                        rel_p_p_acc.append({'src': p_subject, 'rel': rel_type, 'dst': p_related, 'source': source_key})
                                     else:
                                         # 기본: 주체 -> 관계인물
-                                        rel_p_p_acc.append({'src': p_subject, 'rel': rel_type, 'dst': p_related})
+                                        rel_p_p_acc.append({'src': p_subject, 'rel': rel_type, 'dst': p_related, 'source': source_key})
 
                     if rel_p_p_acc:
                         # 관계 타입별로 묶어서 실행
@@ -1168,7 +1176,8 @@ def build_ultimate_graph():
                                 SET a.name = coalesce(a.name, row.src), a.type = '인물'
                                 MERGE (b:Person:인물 {명칭: row.dst})
                                 SET b.name = coalesce(b.name, row.dst), b.type = '인물'
-                                MERGE (a)-[:`REL_TYPE`]->(b)
+                                MERGE (a)-[r:`REL_TYPE`]->(b)
+                                SET r.sources = CASE WHEN coalesce(row.source, '') = '' OR row.source IN coalesce(r.sources, []) THEN coalesce(r.sources, []) ELSE coalesce(r.sources, []) + row.source END
                             """.replace("REL_TYPE", rt)
                             _run_batches(session, query, batch, batch_size=5000)
                         print(f"    ✓ {len(rel_p_p_acc)}개 인물 관계 추가됨")

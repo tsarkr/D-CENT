@@ -330,7 +330,7 @@ function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_cha
         $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
                   . "  {$comment_str}\n  [{$labels['doc']}] {$doc}\n  [{$labels['body']}] {$body}\n</SOURCE_EVIDENCE>";
 
-        $line_len = mb_strlen($envelope);
+        $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);   // + the "\n\n" separator before it
         if ($line_len > ($total_char_budget - $used_chars)) break;
         $lines[] = $envelope;
         $used_chars += $line_len;
@@ -340,7 +340,9 @@ function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_cha
 
 function build_budgeted_pg_context($pg_texts, $lang, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
     if (is_bool($lang)) $lang = $lang ? 'en' : 'ko';
-    $lines = []; $used_chars = 0;
+    $headers = ['ja' => '[一次史料原文（PostgreSQL所蔵公文書）]', 'zh' => '[一手史料原文（PostgreSQL历史档案）]', 'en' => '[Primary Archival Sources (PostgreSQL)]'];
+    $header = ($headers[$lang] ?? '[1차 사료 원문 (PostgreSQL)]') . "\n";
+    $lines = []; $used_chars = mb_strlen($header);   // the header counts against the budget
 
     foreach (array_values((array)$pg_texts) as $idx => $t) {
         if (count($lines) >= $max_items) break;
@@ -377,15 +379,13 @@ function build_budgeted_pg_context($pg_texts, $lang, $max_items, $min_chars, $ma
         $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
                   . "  {$comment_str}\n  {$body}\n</SOURCE_EVIDENCE>";
 
-        $line_len = mb_strlen($envelope);
+        $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);   // + the "\n\n" separator before it
         if ($line_len > ($total_char_budget - $used_chars)) break;
         $lines[] = $envelope;
         $used_chars += $line_len;
     }
 
     if (empty($lines)) return '';
-    $headers = ['ja' => '[一次史料原文（PostgreSQL所蔵公文書）]', 'zh' => '[一手史料原文（PostgreSQL历史档案）]', 'en' => '[Primary Archival Sources (PostgreSQL)]'];
-    $header = ($headers[$lang] ?? '[1차 사료 원문 (PostgreSQL)]') . "\n";
     return $header . implode("\n\n", $lines);
 }
 

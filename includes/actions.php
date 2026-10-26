@@ -192,17 +192,38 @@ function graphrag_detect_entities(string $query): array {
  * @param  string $entity_name  탐색 시작 인물/개체명
  * @return array  레코드 배열 (각 행: ['연관인물'=>.., '사건이름'=>.., '발생일자'=>..])
  */
+/** Record citation keys ("raw_source_info-123") from a Neo4j list or client input; at most three. */
+function docent_record_keys($value): array {
+    if (is_object($value) && method_exists($value, 'toArray')) $value = $value->toArray();
+    $keys = [];
+    foreach ((array)$value as $key) {
+        $key = trim((string)$key);
+        if (preg_match('/^raw_[a-z_]+-\d+$/', $key) && !in_array($key, $keys, true)) $keys[] = $key;
+        if (count($keys) >= 3) break;
+    }
+    return $keys;
+}
+
+/** The text line for a fetched record, in the format static/docent.js builds from a pg_prefetch row. */
+function docent_pg_row_text(array $r): string {
+    $parts = [];
+    foreach ((array)($r['snippets'] ?? []) as $k => $v) if ($v !== '' && $v !== null) $parts[] = "{$k}: {$v}";
+    return "[{$r['schema']}.{$r['table']}] node={$r['node_id']} rowid={$r['rowid']} :: " . implode('; ', $parts);
+}
+
 function graphrag_run_multihop(object $client, string $entity_name): array {
     $entity_name = trim($entity_name);
     if ($entity_name === '') return [];
 
     // ── 3-hop Person → Event → Person → Event 탐색 ──
     $cypher_person = "
-        MATCH (p1:Person)-[:P14_carried_out_by]-(common_e:Event)-[:P14_carried_out_by]-(p2:Person)
+        MATCH (p1:Person)-[r1:P14_carried_out_by]-(common_e:Event)-[r2:P14_carried_out_by]-(p2:Person)
         WHERE (p1.명칭 = \$name OR p1.name = \$name) AND p1 <> p2
-        MATCH (p2)-[:P14_carried_out_by]-(target_e:Event)
+        MATCH (p2)-[r3:P14_carried_out_by]-(target_e:Event)
         WHERE target_e <> common_e
         RETURN
+            [x IN [head(coalesce(r1.sources, [])), head(coalesce(r2.sources, [])), head(coalesce(r3.sources, []))]
+             WHERE x IS NOT NULL]                                     AS 근거,
             COALESCE(p2.명칭, p2.name)                                AS 연관인물,
             COALESCE(target_e.사건명, target_e.제목, target_e.name)   AS 사건이름,
             target_e.날짜                                              AS 발생일자,
@@ -214,10 +235,11 @@ function graphrag_run_multihop(object $client, string $entity_name): array {
 
     // ── 직접 참여 사건 보완 (1-hop: 인물 → 사건) ──
     $cypher_direct = "
-        MATCH (p:Person)-[:P14_carried_out_by]-(e:Event)
+        MATCH (p:Person)-[r:P14_carried_out_by]-(e:Event)
         WHERE (p.명칭 = \$name OR p.name = \$name)
         OPTIONAL MATCH (e)-[:P7_took_place_at|ACTIVATED_AT]-(loc:Place)
         RETURN
+            coalesce(r.sources, [])[0..2]                         AS 근거,
             COALESCE(p.명칭, p.name)                              AS 연관인물,
             COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
             e.날짜                                                AS 발생일자,
@@ -231,8 +253,9 @@ function graphrag_run_multihop(object $client, string $entity_name): array {
     $cypher_place = "
         MATCH (e:Event)
         WHERE e.사건명 CONTAINS \$name OR e.제목 CONTAINS \$name OR e.명칭 CONTAINS \$name
-        OPTIONAL MATCH (e)-[:P14_carried_out_by]-(p:Person)
+        OPTIONAL MATCH (e)-[r:P14_carried_out_by]-(p:Person)
         RETURN
+            coalesce(r.sources, [])[0..2]                         AS 근거,
             COALESCE(p.명칭, p.name, '(인물 미상)')               AS 연관인물,
             COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
             e.날짜                                                AS 발생일자,
@@ -250,8 +273,9 @@ function graphrag_run_multihop(object $client, string $entity_name): array {
         LIMIT 1
         MATCH (anchor)-[*1..2]-(p:Person)
         WITH DISTINCT anchor, p LIMIT 50
-        MATCH (p)-[:P14_carried_out_by]-(e:Event)
+        MATCH (p)-[r:P14_carried_out_by]-(e:Event)
         RETURN
+            coalesce(r.sources, [])[0..2]                         AS 근거,
             COALESCE(p.명칭, p.name, '(인물 미상)')               AS 연관인물,
             COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
             e.날짜                                                AS 발생일자,
@@ -284,6 +308,7 @@ function graphrag_run_multihop(object $client, string $entity_name): array {
                 '발생일자' => trim((string)($record->get('발생일자') ?? '')),
                 '공통사건' => trim((string)($record->get('공통사건') ?? '')),
                 '기준인물' => trim((string)($record->get('기준인물') ?? '')),
+                '근거'     => docent_record_keys($record->get('근거')),
             ];
 
             // 의미 없는 행 스킵
@@ -369,6 +394,12 @@ function graphrag_serialize_results(array $multihop_rows, string $entity_name, s
                       . " '{$person}'과(와) 연결됩니다."
                       . " '{$person}'은(는) [{$event}]"
                       . ($date ? " ({$date})" : '') . "에 참여한 기록이 있습니다.";
+        }
+
+        $keys = docent_record_keys($row['근거'] ?? []);
+        if ($keys) {
+            $cue = ['en' => 'records', 'ja' => '根拠', 'zh' => '依据'][$lang] ?? '근거';
+            $body .= " ({$cue}: " . implode(', ', $keys) . ")";
         }
 
         $id_attr     = 'graphrag_' . ($i + 1);
@@ -481,6 +512,7 @@ function graphrag_build_hybrid_context(string $query, string $vector_context, st
         'context'       => $graphrag_block . $sep . $vector_context,
         'graphrag_used' => true,
         'entities'      => $entities,
+        'rows'          => $rows,
     ];
 }
 
@@ -1333,6 +1365,7 @@ function handle_action_explain() {
                 foreach (['연관인물', '사건이름', '발생일자', '공통사건', '기준인물'] as $k) {
                     $clean[$k] = docent_sanitize_text((string)($row[$k] ?? ''), 200, false);
                 }
+                $clean['근거'] = docent_record_keys($row['근거'] ?? []);
                 $clean_rows[] = $clean;
             }
             $clean_entities = array_values(array_filter(array_map(
@@ -1344,14 +1377,38 @@ function handle_action_explain() {
     error_log(sprintf('[Docent][timing] narrative paths %.2fs', microtime(true) - $t_stage));
     $graphrag_used = $graphrag_result['graphrag_used'];
 
+    // 서사 경로가 인용하는 기록을 원천 기록 근거의 맨 앞에 넣어, 경로의 근거가 생성 문맥 안에 있게 합니다(P1).
+    $path_refs = [];
+    foreach (($graphrag_result['rows'] ?? []) as $row) {
+        foreach (docent_record_keys($row['근거'] ?? []) as $key) {
+            if (preg_match('/^(raw_[a-z_]+)-(\d+)$/', $key, $km)) {
+                $path_refs[$key] = ['table' => $km[1], 'rowid' => (int)$km[2], 'node_id' => (string)($row['사건이름'] ?? '')];
+            }
+        }
+    }
+    if ($path_refs && ($pdo_paths = get_pg())) {
+        $have = [];
+        foreach ($pg_texts as $line) {
+            if (preg_match('/^\[[^\].]*\.([A-Za-z0-9_]+)\]\s+node=\S*\s+rowid=(\S+)/u', (string)$line, $hm)) $have["{$hm[1]}-{$hm[2]}"] = true;
+        }
+        $missing = array_values(array_diff_key($path_refs, $have));
+        $path_texts = array_map('docent_pg_row_text',
+            $missing ? fetch_pg_rows_for_refs($pdo_paths, $missing, get_pg_tables_metadata($pdo_paths)) : []);
+        $pg_texts = array_merge($path_texts, $pg_texts);
+    }
+
     // ── 2. 하나의 문맥 예산(기본 11,000자)을 서사 경로 → 그래프 사료(최대 5,000자) → 원천 기록 순으로 나눔 ──
     // 서사 경로는 생성 문맥의 맨 앞에 놓여 사건의 시간 순서를 먼저 전달합니다.
+    // 서사 경로와 그래프 근거에 상한을 두어 원천 기록이 늘 예산의 일부(기본 약 2,000자)를 확보하게 하고,
+    // 블록 사이 구분자("\n\n")도 예산에 포함합니다.
     $total_budget = max(2000, (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'));
-    $narrative_block = mb_substr((string)$graphrag_result['context'], 0, $total_budget);
-    $remaining = $total_budget - mb_strlen($narrative_block);
+    $narrative_cap = max(0, min($total_budget, (int)get_cfg('DOCENT_NARRATIVE_CHARS', '4000')));
+    $evidence_cap = 5000;
+    $narrative_block = mb_substr((string)$graphrag_result['context'], 0, $narrative_cap);
+    $remaining = $total_budget - mb_strlen($narrative_block) - ($narrative_block !== '' ? 2 : 0);
     $evidence_context = $remaining > 0
-        ? build_budgeted_evidence_context($evidences, $explain_lang, 20, 250, 600, min(5000, $remaining), $term, $focus) : '';
-    $remaining -= mb_strlen($evidence_context);
+        ? build_budgeted_evidence_context($evidences, $explain_lang, 20, 250, 600, min($evidence_cap, $remaining), $term, $focus) : '';
+    $remaining -= mb_strlen($evidence_context) + ($evidence_context !== '' ? 2 : 0);
     $pg_context = $remaining > 0
         ? build_budgeted_pg_context($pg_texts, $explain_lang, 25, 180, 450, $remaining, $term, $focus) : '';
     $context_str = trim(implode("\n\n", array_filter([$narrative_block, $evidence_context, $pg_context], fn($b) => $b !== '')));

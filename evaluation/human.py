@@ -34,7 +34,7 @@ from evaluation.common import (
     EXPERT_DIR, GRAPH_RESULTS, RATING_DIR, RATING_KEY_DIR,
     add_sheet, bootstrap_ci, cohen_kappa, gwet_ac1, holm_adjust, new_workbook, paired_permutation_test, prf, read_json, read_sheet, write_json,
 )
-from evaluation.metrics import ID_RE, record_key
+from evaluation.metrics import GROUP_RE, ID_RE, record_key, verify_answer
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Expert validation of extracted entities and relations
@@ -481,17 +481,25 @@ RECORD_TABLES = {"bibliography", "source_info", "event_info", "detail_place"}
 
 
 def _source_texts(keys: set[str]) -> dict[str, tuple[str, str]]:
-    """Record text and source-database identifier for citation keys "table:rowid" (see metrics.record_key)."""
+    """Record text and source-database identifier for citation keys: "table:rowid" (see metrics.record_key),
+    or "event_name:<incident name>" for an incident cited by name, resolved to its register entry."""
     by_table: dict[str, list[int]] = defaultdict(list)
+    names = sorted(k.split(":", 1)[1] for k in keys if k.startswith("event_name:"))
     for key in keys:
+        if key.startswith("event_name:"):
+            continue
         table, rowid = key.split(":")
         if table in RECORD_TABLES:
             by_table[table].append(int(rowid))
-    if not by_table:
+    if not by_table and not names:
         return {}
     conn = get_pg_connection()
     cur = conn.cursor()
     out = {}
+    if names:
+        cur.execute('SELECT "사건명", tei, "아이디" FROM raw_event_info WHERE "사건명" = ANY(%s)', (names,))
+        for title, tei, source_id in cur.fetchall():
+            out.setdefault(f"event_name:{title}", (_body_text(tei or ""), str(source_id or "").strip()))
     for table, rowids in by_table.items():
         id_col = SOURCE_ID_COLUMNS.get(f"raw_{table}")
         id_expr = f'"{id_col}"' if id_col else "NULL"
@@ -503,16 +511,28 @@ def _source_texts(keys: set[str]) -> dict[str, tuple[str, str]]:
     return out
 
 
-def _neutral_citations(text: str) -> tuple[str, dict[int, str]]:
-    """Replace record citations with "[근거 n]", numbered per answer; return the text and n -> record key."""
+def _neutral_citations(text: str, contexts: list[str] | None = None) -> tuple[str, dict[int, str]]:
+    """Replace citations with "[근거 n]", numbered per answer; return the text and n -> citation key.
+
+    Record identifiers and incident names cited in parentheses (the graph-only baseline can cite only
+    names) are both replaced, so that neither the cited table nor the citation style reveals the system."""
     numbers: dict[str, int] = {}
 
-    def label(m: re.Match) -> str:
-        key = record_key(m.group(1), m.group(2))
+    def number(key: str) -> str:
         numbers.setdefault(key, len(numbers) + 1)
         return f"[{CITE_LABEL} {numbers[key]}]"
 
-    return ID_RE.sub(label, text), {n: k for k, n in numbers.items()}
+    named = {c["text"] for c in verify_answer(text, contexts or []) if c["kind"] == "named_source"}
+    if named:
+        def fix_group(m: re.Match) -> str:
+            group = m.group(1) if m.group(1) is not None else m.group(2)
+            parts = [p.strip() for p in re.split(r"[,;，、]|\s/\s", group)]
+            if not any(p.strip(" `[]") in named for p in parts):
+                return m.group(0)
+            return "(" + ", ".join(number(f"event_name:{p.strip(' `[]')}") if p.strip(" `[]") in named else p
+                                   for p in parts) + ")"
+        text = GROUP_RE.sub(fix_group, text)
+    return ID_RE.sub(lambda m: number(record_key(m.group(1), m.group(2))), text), {n: k for k, n in numbers.items()}
 
 
 def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tuple[str, ...] = ("A", "B")) -> int:
@@ -548,7 +568,7 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
         rng.shuffle(answers)
         for label, record in zip("ABCDEFGH", answers):
             item_id = f"{query_id}-{label}"
-            shown, cited_keys = _neutral_citations(record["response"])
+            shown, cited_keys = _neutral_citations(record["response"], record.get("retrieved_contexts", []))
             found = []    # (claim, citation number), in order, one per sentence and record
             for sentence in re.split(r"(?<=[.!?。])\s+|\n+", shown):
                 for n in dict.fromkeys(int(m.group(1)) for m in re.finditer(rf"\[{CITE_LABEL} (\d+)\]", sentence)):

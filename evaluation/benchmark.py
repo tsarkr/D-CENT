@@ -256,6 +256,10 @@ def validate_dataset(dataset_path: Path, out_dir: Path = VALIDATION_DIR, seed: i
     try:
         events = load_event_index()
     except Exception as exc:  # the rules that do not need the database still run
+        if save_passed:
+            # A benchmark is written only when every question was checked against the event register.
+            raise SystemExit(f"raw_event_info를 읽지 못해 DB 대조(사건명·날짜·참여자)를 할 수 없습니다. "
+                             f"DB 대조 없이는 {save_passed.name}를 저장하지 않습니다: {str(exc)[:200]}")
         events = None
         print(f"⚠️ raw_event_info를 읽지 못해 DB 대조(사건명·날짜·참여자)를 건너뜁니다: {str(exc)[:200]}")
 
