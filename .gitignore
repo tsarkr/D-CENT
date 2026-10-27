@@ -35,7 +35,8 @@ vendor/
 vector_store/
 
 Latex/
-# Evaluation: annotation workbooks, blinding key, validation workbook
+# Evaluation: results, annotation workbooks, blinding key, validation workbook
+evaluation/results/
 evaluation/annotation/**/*.xlsx
 evaluation/annotation/rating_key/
 evaluation/dataset/validation/

@@ -211,7 +211,28 @@ function docent_pg_row_text(array $r): string {
     return "[{$r['schema']}.{$r['table']}] node={$r['node_id']} rowid={$r['rowid']} :: " . implode('; ', $parts);
 }
 
-function graphrag_run_multihop(object $client, string $entity_name): array {
+/** Per-query server-side timeout (seconds) for GraphRAG multi-hop lookups. */
+const GRAPHRAG_QUERY_TIMEOUT_SEC = 8.0;
+
+/**
+ * Runs a read query with a server-side transaction timeout. Neo4j aborts the query when the
+ * timeout passes and the client throws, so one slow query can no longer block the PHP request
+ * until max_execution_time. Results are fully fetched inside the transaction.
+ */
+function graphrag_run_with_timeout(object $client, string $cypher, array $params, float $timeout_sec) {
+    $config = \Laudis\Neo4j\Databags\TransactionConfiguration::default()->withTimeout($timeout_sec);
+    return $client->readTransaction(
+        static fn($tsx) => $tsx->run($cypher, $params),
+        null,
+        $config
+    );
+}
+
+/**
+ * @param float|null $deadline  microtime(true) value after which no further query is started;
+ *                              each query's timeout is also capped to the time remaining.
+ */
+function graphrag_run_multihop(object $client, string $entity_name, ?float $deadline = null): array {
     $entity_name = trim($entity_name);
     if ($entity_name === '') return [];
 
@@ -290,12 +311,18 @@ function graphrag_run_multihop(object $client, string $entity_name): array {
 
     $queries = [$cypher_person, $cypher_direct, $cypher_place, $cypher_anchor];
     foreach ($queries as $cypher) {
+        $timeout = GRAPHRAG_QUERY_TIMEOUT_SEC;
+        if ($deadline !== null) {
+            $remaining = $deadline - microtime(true);
+            if ($remaining < 1.0) break; // time budget used up: keep what we have
+            $timeout = min($timeout, $remaining);
+        }
         try {
             $params = [
                 'name' => $entity_name,
                 'lucene_name' => $escaped_entity !== '' ? $escaped_entity : $entity_name
             ];
-            $res = $client->run($cypher, $params);
+            $res = graphrag_run_with_timeout($client, $cypher, $params, $timeout);
         } catch (\Throwable $e) {
             error_log("GraphRAG multi-hop query failed for [{$entity_name}]: " . $e->getMessage());
             continue;
@@ -455,7 +482,7 @@ function graphrag_collect_rows(string $query): array {
     $all_rows = [];
     $t0 = microtime(true);
     foreach (array_slice($ner['entities'], 0, 3) as $entity) {
-        $all_rows = array_merge($all_rows, graphrag_run_multihop($client, $entity));
+        $all_rows = array_merge($all_rows, graphrag_run_multihop($client, $entity, $t0 + 15.0));
         if (count($all_rows) >= 25 || microtime(true) - $t0 > 15.0) break;
     }
 
