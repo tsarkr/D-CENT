@@ -1,0 +1,6 @@
+# Vercel serves only the static wrapper page (index.html), which embeds the PHP site hosted elsewhere.
+# Everything else is excluded, so Vercel does not detect a Python app from requirements.txt or mcp_server.py
+# and does not publish the source, evaluation files, or paper.
+/*
+!index.html
+!vercel.json

@@ -573,7 +573,8 @@ def load_table_to_tei(table, conn, entities):
     cur.execute(f"ALTER TABLE \"{table}\" ADD COLUMN IF NOT EXISTS tei text;")
 
     # retrieve rowids and full rows to generate TEI
-    cur.execute(f'SELECT rowid, {",".join([f"\"{c}\"" for c in headers])} FROM "{table}"')
+    quoted_cols = ",".join(f'"{c}"' for c in headers)
+    cur.execute(f'SELECT rowid, {quoted_cols} FROM "{table}"')
     allrows = cur.fetchall()
     updates = []
     for rec in allrows:
