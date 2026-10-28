@@ -274,8 +274,8 @@ deployed system. `explain` allows five requests per minute, so keep `EVAL_DELAY`
 
 A new build writes `data/output/build_manifest.json`. For an existing database with
 no manifest, set `EVAL_DATA_BUILD_ID` to an identifier for its frozen snapshot.
-For end-to-end evaluation, set the PHP server's `DOCENT_DATA_BUILD_ID` to the same
-build identifier. Change the identifier whenever either database changes; keep both
+For end-to-end evaluation, the PHP server reports the build in the same manifest; set its
+`DOCENT_DATA_BUILD_ID` only for a database without a manifest, to the same identifier. Change the identifier whenever either database changes; keep both
 databases fixed during an evaluation. `--resume` rejects changed code, dataset,
 packages, model, server configuration, or build identifiers; old runs without a
 fingerprint must be restarted. Checkpoints are written atomically after each answer.

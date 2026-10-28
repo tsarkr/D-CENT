@@ -46,13 +46,20 @@ if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) 
         sort($files);
         $hash = hash_init('sha256');
         foreach ($files as $file) hash_update_file($hash, $file);
+        // The data build the server reads: DOCENT_DATA_BUILD_ID if set (a snapshot without a manifest),
+        // otherwise the completed build recorded by `python -m pipeline build`.
+        $data_build_id = get_cfg('DOCENT_DATA_BUILD_ID', '');
+        if ($data_build_id === '') {
+            $manifest = json_decode((string)@file_get_contents(__DIR__ . '/data/output/build_manifest.json'), true);
+            if (is_array($manifest) && !empty($manifest['complete'])) $data_build_id = (string)($manifest['build_id'] ?? '');
+        }
         $token_response['evaluation'] = [
             'model' => get_cfg('GEMINI_MODEL', 'gemini-flash-lite-latest'),
             'context_chars' => (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'),
             'analysis_temperature' => (float)get_cfg('GEMINI_TEMPERATURE', '0.1'),
             'analysis_top_p' => (float)get_cfg('GEMINI_TOP_P', '0.85'),
             'code_sha256' => hash_final($hash),
-            'data_build_id' => get_cfg('DOCENT_DATA_BUILD_ID', ''),
+            'data_build_id' => $data_build_id,
         ];
     }
     echo json_encode($token_response, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);

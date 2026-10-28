@@ -48,7 +48,7 @@ export보다 **먼저** 해야 합니다. PostgreSQL 표와 Neo4j 그래프를 �
 유지되지만, 실패 판정·문장별 부정 처리·근거 항목 분리·문맥 평균 정밀도 계산이 수정되었습니다.
 
 - [ ] `data/output/build_manifest.json`의 `build_id` 확인. 기존 DB에 매니페스트가 없으면 고정된 스냅샷 이름을 `EVAL_DATA_BUILD_ID`로 지정
-- [ ] PHP 서버의 `DOCENT_DATA_BUILD_ID`를 같은 값으로 지정하고, 평가 중 PostgreSQL·Neo4j 변경 중지
+- [ ] PHP 서버는 매니페스트의 `build_id`를 자동으로 씁니다 (매니페스트가 없는 DB만 `DOCENT_DATA_BUILD_ID` 지정). 평가 중 PostgreSQL·Neo4j 변경 중지
 - [ ] `python -B -m unittest discover -s tests -v`, `php -n tests/gemini_safety.php` 통과 확인
 - [ ] `--resume`은 코드·데이터셋·패키지·모델·서버 설정·빌드 ID가 같을 때만 사용 (옛 실행은 재개 불가)
 
