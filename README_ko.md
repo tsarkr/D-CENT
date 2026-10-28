@@ -263,7 +263,7 @@ php -S 127.0.0.1:8000      # 저장소 루트에서
 `dcent`와 `no-paths`는 실행 중인 웹 도슨트를 호출하므로 서버를 평가 모드로 띄우고 `DOCENT_URL`을 설정합니다.
 
 ```bash
-DOCENT_EVAL_MODE=1 php -S localhost:8000     # 다른 터미널에서
+PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000     # 다른 터미널에서
 ```
 
 평가 모드의 `explain`은 생성에 쓴 문맥과 팩트 표를 함께 돌려주고, 공통 생성 조건을 적용하며, 기록

@@ -265,7 +265,7 @@ Choose `main` (the first four), `ablations` (the last four), `all` (default), or
 `dcent` and `no-paths` call a running web docent: start the server in evaluation mode and set `DOCENT_URL`.
 
 ```bash
-DOCENT_EVAL_MODE=1 php -S localhost:8000     # in another terminal
+PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000     # in another terminal
 ```
 
 In evaluation mode, `explain` returns the context and fact table it generated from, applies the shared

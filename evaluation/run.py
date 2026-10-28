@@ -143,7 +143,7 @@ def _check_server(keys: list[str]) -> dict[str, Any] | None:
     if not url:
         raise SystemExit(
             "dcent·no-paths 시스템은 실행 중인 웹 도슨트를 호출합니다.\n"
-            "  1) 다른 터미널에서:  DOCENT_EVAL_MODE=1 php -S localhost:8000\n"
+            "  1) 다른 터미널에서:  PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000\n"
             "  2) secrets.toml에:   DOCENT_URL = \"http://localhost:8000/docent.php\"\n"
             "  또는 기준 시스템만:  --systems passage,hybrid,graph")
     try:
@@ -158,7 +158,7 @@ def _check_server(keys: list[str]) -> dict[str, Any] | None:
         return metadata
     except Exception as exc:
         raise SystemExit(f"DOCENT_URL({url})에 연결할 수 없습니다: {exc}\n"
-                         "서버를 DOCENT_EVAL_MODE=1 php -S localhost:8000 으로 띄웠는지 확인하세요.")
+                         "서버를 PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000 으로 띄웠는지 확인하세요.")
 
 
 def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Path | None = None, resume: bool = False) -> Path:
