@@ -47,6 +47,26 @@ ABLATIONS = ["controlled", "no-paths", "one-stage", "hybrid-two-stage"]
 
 
 # ── Generator ────────────────────────────────────────────────────────────────
+def _quota_violation(resp: Any) -> str:
+    """The quota a 429 names (e.g. 'GenerateRequestsPerDayPerProjectPerModel'), or ''.
+
+    A project that has reached its monthly spending cap is reported as 'MonthlySpendCap', and is
+    treated like a daily quota: waiting does not lift it.
+    """
+    try:
+        error = resp.json().get("error", {})
+    except ValueError:
+        return ""
+    if "spending cap" in str(error.get("message", "")).lower():
+        return "MonthlySpendCap (PerDay 이상)"
+    details = error.get("details", [])
+    for detail in details:
+        for violation in detail.get("violations", []) or []:
+            if violation.get("quotaId") or violation.get("quotaMetric"):
+                return str(violation.get("quotaId") or violation.get("quotaMetric"))
+    return ""
+
+
 def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> str:
     """Call Google Gemini API using configured key."""
     temperature, top_p = TEMPERATURE, TOP_P
@@ -87,8 +107,13 @@ def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> s
                 MODEL_VERSIONS[data.get("modelVersion") or model] += 1
                 return data["candidates"][0]["content"]["parts"][0]["text"].strip()
             elif resp.status_code in (429, 503):
+                quota = _quota_violation(resp)
+                if "PerDay" in quota:
+                    # A daily quota does not recover by waiting a minute; stop instead of failing every answer.
+                    raise SystemExit(f"Gemini 사용량 한도에 도달했습니다 ({quota}). 기다려도 풀리지 않습니다. "
+                                     "AI Studio에서 한도를 확인한 뒤 새로 실행하세요.")
                 wait_time = max(15, (attempt + 1) * 10)
-                print(f" (재시도 대기 {wait_time}초: {resp.status_code})...", end="", flush=True)
+                print(f" (재시도 대기 {wait_time}초: {resp.status_code}{' ' + quota if quota else ''})...", end="", flush=True)
                 time.sleep(wait_time)
                 continue
             else:
@@ -140,8 +165,16 @@ def chunk_block(chunk: dict[str, Any]) -> str:
 _ENTITY_CACHE: dict[str, list[str]] = {}
 
 
+QUOTED_NAME_RE = re.compile(r"['‘’\"“”「『]([^'‘’\"“”「」『』\n]{2,80})['‘’\"“”」』]")
+
+
 def question_entities(query: str) -> list[str]:
-    """Extract search entities from the question text (one LLM call per question, shared by all pipelines)."""
+    """Search entities of the question (one LLM call per question, shared by all pipelines).
+
+    Names the question quotes (incident names such as '3월 2일 전후 평남 평양부 격문 배포') come first and
+    are always kept: for questions that name incidents but no person, the model often returns an
+    empty list, which left every system that retrieves by name without evidence.
+    """
     if query not in _ENTITY_CACHE:
         raw = call_llm([
             {"role": "system", "content": (
@@ -153,7 +186,9 @@ def question_entities(query: str) -> list[str]:
         match = re.search(r"\[.*\]", raw, flags=re.DOTALL)
         if not match:
             raise RuntimeError(f"질의 개체 추출 결과를 해석할 수 없습니다: {raw[:80]}")
-        _ENTITY_CACHE[query] = [str(e).strip() for e in json.loads(match.group(0)) if str(e).strip()]
+        quoted = [m.strip() for m in QUOTED_NAME_RE.findall(query) if m.strip()]
+        extracted = [str(e).strip() for e in json.loads(match.group(0)) if str(e).strip()]
+        _ENTITY_CACHE[query] = list(dict.fromkeys(quoted + extracted))[:8]
     return _ENTITY_CACHE[query]
 
 

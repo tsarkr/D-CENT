@@ -154,6 +154,13 @@ class DcentSafety(unittest.TestCase):
             client.call('explain', {})
             versions.update.assert_called_once_with({'dated-server-model': 2})
 
+    def test_quoted_incident_names_survive_an_empty_extraction(self):
+        question = "'3월 2일 전후 평남 평양부 격문 배포'와 '3월 1일 평남 평양 시내 연합 시위'의 관련 인물은?"
+        systems._ENTITY_CACHE.pop(question, None)
+        with patch.object(systems, 'call_llm', return_value='```json\n[]\n```'):
+            self.assertEqual(systems.question_entities(question),
+                             ['3월 2일 전후 평남 평양부 격문 배포', '3월 1일 평남 평양 시내 연합 시위'])
+
     def test_non_json_reply_is_reported_with_its_body(self):
         client = systems.DcentClient('http://offline.invalid')
         client.token = 'offline'

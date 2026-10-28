@@ -210,6 +210,7 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
             answers.append({
                 "query_id": item["id"], "category": item["category"], "source": item.get("source", ""),
                 "system": key, "model": res["model"], "user_input": item["query"],
+                "query_entities": systems.question_entities(item["query"]) if key in ("passage", "graph", "controlled", "one-stage") else [],
                 "response": res["answer"], "response_cleaned": clean_answer(res["answer"], res.get("contexts", [])),
                 "retrieved_contexts": res.get("contexts", []),
                 "reference": "\n".join(item.get("ground_truth", item["gold_facts"])),
