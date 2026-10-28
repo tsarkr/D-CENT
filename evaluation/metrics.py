@@ -26,7 +26,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from evaluation.benchmark import DATE_TOKEN_RE, is_generic_token, strip_josa
+from evaluation.benchmark import ADMIN_UNIT_RE, DATE_TOKEN_RE, is_generic_token, strip_josa
 from evaluation.common import bootstrap_ci, holm_adjust, paired_permutation_test
 
 # ── Answer scores ────────────────────────────────────────────────────────────
@@ -50,25 +50,84 @@ def _is_negative(text: str) -> bool:
     # Connectives and idioms that read as affirmative ("뿐만 아니라", "굴하지 않고", "틀림없다") are not denials.
     text = re.sub(r"뿐(?:만)?\s*아니라|지\s*(?:않|못하)고|(?:틀림|어김|빠짐|끊임|거침|아낌)\s*없", " ", text)
     return bool(re.search(
-        r"지\s*않|지\s*못|아니[다었며]|아닙니|아님|없[다습는었음]|확인되지|불가능|허위|허구|"
+        r"지\s*않|지\s*못|아니[다었며라고]|아닌|아닙니|아님|없[다습는었음으이고]|확인되지|확인할\s*수|찾을\s*수|"
+        r"찾아볼\s*수|단정할\s*수|어렵|불가능|불분명|부재|무관(?!학교)|허위|허구|사실무근|모순|상반|배치(?:되|됩)|범위를\s*벗어|"
         r"사실과\s*다르|근거[가는]?\s*없|\b(?:not|never|cannot|unconfirmed|false)\b", text, re.I))
 
 
-def evaluate_faithfulness(answer: str, gold_facts: list[str]) -> tuple[float, int, int]:
-    """Check how many gold facts are covered accurately in the answer."""
-    if not gold_facts:
-        return 100.0, 0, 0
-    covered = 0
+# Version of the automatic answer scores; `report --rescore` rewrites scores.csv with the current one.
+METRICS_VERSION = 2
+
+# Words of the reference facts and traps that state the kind of claim rather than its content
+# ("관련 인물로 … 기록되어 있음"). They occur in almost every answer and are never matched.
+FACT_FUNCTION_WORDS = {
+    "에서", "으로", "하고", "하여", "등이", "등", "또는", "이후", "당시", "직후", "직접",
+    "기록", "기록되어", "기록된", "기록에", "기록은", "있음", "있다", "없음", "없다", "않음", "확인되지",
+    "관련", "인물", "인물로", "이름은", "사건", "사건의", "참여자로", "대장은", "연결함", "먼저", "일어남",
+    "일어났으며", "검색", "검색된", "근거의", "근거에는", "근거만으로는", "그래프에는", "전개함", "받음", "형성됨",
+}
+_VERB_END_RE = re.compile(
+    r"(?:하였다|하였으며|하였고|했다는|했다|했으며|했고|하여|하며|하고|되었다|되었으며|되었고|되어|된|"
+    r"이다|였다|었다|았다|한다|하다|함|됨|으며)$")
+
+
+def _stem(token: str) -> str:
+    """'김상열이' -> '김상열', '지휘했다는' -> '지휘', '체포되었다' -> '체포'."""
+    stem = strip_josa(token)
+    cut = _VERB_END_RE.sub("", stem)
+    return cut if len(cut) >= 2 else stem
+
+
+def _clauses(sentence: str) -> list[str]:
+    """Clauses of a sentence, so that a denial in one clause does not cancel a list in another."""
+    return [c for c in re.split(r"[,;，、]\s*", sentence) if c.strip()]
+
+
+def fact_keywords(fact: str, question: str = "") -> list[str]:
+    """Content words of a reference fact that the question does not already contain.
+
+    A fact is scored only on what an answer must add to the question. Without this, an answer that
+    restates the question's incident names covers most generated facts (they repeat those names).
+    """
+    words = []
+    for token in re.findall(r"[가-힣A-Za-z0-9]{2,}", fact):
+        stem = _stem(token)
+        if token in FACT_FUNCTION_WORDS or stem in FACT_FUNCTION_WORDS or DATE_TOKEN_RE.fullmatch(stem):
+            continue
+        if question and stem in question:
+            continue
+        words.append(stem)
+    return list(dict.fromkeys(words))
+
+
+def evaluate_faithfulness(answer: str, gold_facts: list[str], question: str = "") -> tuple[float | None, int, int]:
+    """Recall of the reference facts: (percent of scorable facts covered, covered, scorable).
+
+    A fact is covered when one answer sentence contains at least half of its content words
+    (``fact_keywords``) in clauses of the same polarity as the fact. Facts whose content is entirely
+    in the question (the order of two named incidents, that a figure is not recorded) cannot be
+    scored lexically and are left to the raters; with no scorable fact the score is None.
+    """
+    covered = scorable = 0
     for fact in gold_facts:
-        # Extract core keywords from fact
-        keywords = [k for k in re.findall(r'[가-힣A-Za-z0-9]{2,}', fact) if k not in ['에서', '으로', '하고', '등이', '하여', '전개함', '받음', '형성됨']]
-        # Keep the lexical proxy, but do not count an explicit denial as support.
-        if any(_is_negative(sentence) == _is_negative(fact)
-               and sum(kw in sentence for kw in keywords) >= max(1, (len(keywords) + 1) // 2)
-               for sentence in _sentences(answer)):
-            covered += 1
-    score = (covered / len(gold_facts)) * 100.0
-    return round(score, 2), covered, len(gold_facts)
+        keywords = fact_keywords(fact, question)
+        if not keywords:
+            continue
+        scorable += 1
+        need = max(1, (len(keywords) + 1) // 2)
+        negative_fact = _is_negative(fact)
+        for sentence in _sentences(answer):
+            if negative_fact:
+                hits = sum(kw in sentence for kw in keywords) if _is_negative(sentence) else 0
+            else:
+                text = " ".join(c for c in _clauses(sentence) if not _is_negative(c))
+                hits = sum(kw in text for kw in keywords)
+            if hits >= need:
+                covered += 1
+                break
+    if not scorable:
+        return None, 0, 0
+    return round(covered / scorable * 100.0, 2), covered, scorable
 
 
 def evidence_items(contexts: list[str]) -> list[str]:
@@ -129,52 +188,112 @@ def citation_stats(answer: str, contexts: list[str]) -> dict[str, int]:
     }
 
 
-def evaluate_hallucination(
-    answer: str, negative_traps: list[str], category: str, entities: list[str] | None = None,
-) -> tuple[float, int, str]:
-    """Evaluate hallucination: Did the model falsely claim or endorse any negative traps?
+# Predicates too general to identify what a trap asserts.
+GENERIC_PREDICATES = {"진행", "발생", "전개", "참여", "활동", "기록", "관련", "시위", "만세", "사건"}
+# A sentence that restates or asks the question does not assert it ("…지휘했는지 질의하였다").
+NON_ASSERTIVE_RE = re.compile(r"는지|인지|여부|질의|질문|묻는|물었")
+QUESTION_VERB_RE = re.compile(r"([가-힣]{2,})(?:하고|하며|하여|했는가|하였는가|했는지|하였는지|했나|하였나)(?![가-힣])")
 
-    A trap counts when one answer sentence contains two of its keywords and the
-    sentence has no rejection phrase. One keyword is always a person name or
-    proper noun (the trap's leading noun or one of the question's entities);
-    years, dates and province/county/city names alone never match. Returns
-    (rate, traps triggered, the sentences that triggered them for manual review).
+
+def _assertions(answer: str) -> list[str]:
+    """Answer sentences that can assert a claim: headings and restated questions are left out."""
+    out = []
+    for line in re.split(r"\n+", answer or ""):
+        line = line.strip()
+        if not line or line.startswith("#") or (line.startswith("**") and line.endswith("**")):
+            continue
+        for s in re.split(r"(?<=[.!?。])\s+", line):
+            s = s.strip().lstrip("*-• ").strip()
+            ends = s.rstrip("*.)! ").endswith(("다", "음", "함", "됨", "요")) or s.endswith((".", "!", "。"))
+            if s and (ends or len(s) >= 60) and not NON_ASSERTIVE_RE.search(s):
+                out.append(s)
+    return out
+
+
+# "X가 …지휘했다는 기록은 확인되지 않는다": the denial covers the whole embedded claim.
+EMBEDDED_DENIAL_RE = re.compile(r"(?:다는|다고|다거나|했는가|하였는가|는가에)\s*(?:\S+\s*){0,2}?(?:기록|주장|증거|내용|전제|가설|사실|점|정황|근거|흔적|대한)")
+
+
+def _endorsed(sentences: list[str], subject: str, predicates: list[str], context: list[str]) -> list[str]:
+    """Sentences in which one non-negated clause has the subject, a predicate, and (if given) a context term."""
+    hits = []
+    for s in sentences:
+        if _is_negative(s) and EMBEDDED_DENIAL_RE.search(s):
+            continue
+        if any(subject in c and any(p in c for p in predicates) and not _is_negative(c)
+               and (not context or any(x in re.sub(r"\s+", "", c) for x in context)) for c in _clauses(s)):
+            hits.append(s)
+    return hits
+
+
+def evaluate_hallucination(
+    answer: str, negative_traps: list[str], category: str, entities: list[str] | None = None, question: str = "",
+) -> tuple[float | None, int, str]:
+    """Trap endorsement: (percent of judged traps asserted, traps asserted, flagged sentences).
+
+    A trap is asserted when an answer sentence states, in a clause without negation, the trap's
+    subject (its leading name, or a question entity) together with what the trap claims (the stems of
+    its last two content words that the question does not contain: "지휘", "연행", "작성"). Merely
+    naming the subject next to a place, as an answer listing the recorded participants does, is not
+    an assertion. For false-premise questions the premise of the question is judged as one more trap:
+    the figure, the action asked about ("지휘", "낭독"), and the incident or place of the question.
+    Headings and sentences that restate the question are skipped. Traps without a recognizable
+    subject or claim are not judged; with none judged the score is None.
     """
-    if not negative_traps:
-        return 0.0, 0, ""
     hints = [str(e).strip() for e in entities or [] if str(e).strip() and not is_generic_token(str(e).strip())]
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?。])\s+|\n+", answer) if s.strip()]
-    traps_triggered = 0
+    sentences = _assertions(answer)
+    judged = triggered = 0
     flagged: list[str] = []
 
-    for trap in negative_traps:
-        tokens = [strip_josa(k) for k in re.findall(r'[가-힣A-Za-z0-9]{2,}', trap) if k not in ['에서', '으로', '하고', '직접', '했다', '시작했다']]
-        tokens = list(dict.fromkeys(t for t in tokens if not DATE_TOKEN_RE.fullmatch(t)))
+    def record(hits: list[str]) -> None:
+        nonlocal triggered
+        if hits:
+            triggered += 1
+            flagged.extend(s for s in hits if s not in flagged)
+
+    for trap in negative_traps or []:
+        tokens = [_stem(k) for k in re.findall(r"[가-힣A-Za-z0-9]{2,}", trap)]
+        tokens = list(dict.fromkeys(t for t in tokens if t not in FACT_FUNCTION_WORDS and not DATE_TOKEN_RE.fullmatch(t)))
         anchors = [t for i, t in enumerate(tokens)
                    if not is_generic_token(t) and (i == 0 or any(h in t or h.startswith(t) for h in hints))]
         if not anchors:
-            continue  # a trap without a name or proper noun cannot be matched reliably
-        # Prefer a second name/proper noun over an ordinary word as the other keyword.
-        trap_keywords = [anchors[0]] + (anchors[1:] + [t for t in tokens if t not in anchors])[:1]
-        hits = [s for s in sentences if all(kw in s for kw in trap_keywords) and not _is_negative(s)]
-        if hits:
-            traps_triggered += 1
-            flagged += [s for s in hits if s not in flagged]
+            continue  # no name or proper noun: cannot be matched reliably
+        content = [t for t in tokens if t not in anchors and t not in GENERIC_PREDICATES and not is_generic_token(t)]
+        predicates = [t for t in content[-2:] if not (question and t in question)]
+        if not predicates:
+            continue  # what the trap claims is already in the question
+        # the trap's county- or township-level place, if it names one, must be in the sentence as well
+        places = [t for t in dict.fromkeys(_stem(k) for k in re.findall(r"[가-힣]{2,}", trap))
+                  if ADMIN_UNIT_RE.fullmatch(t) and not t.endswith("도")]
+        judged += 1
+        record(_endorsed(sentences, anchors[0], predicates, places))
 
-    rate = (traps_triggered / len(negative_traps)) * 100.0
-    return round(rate, 2), traps_triggered, " ‖ ".join(flagged)
+    if category == "Zero-Correlation Trap" and question and entities:
+        people = [str(e).strip() for e in entities if re.fullmatch(r"[가-힣]{2,4}", str(e).strip()) and not is_generic_token(str(e).strip())]
+        verbs = [v for v in dict.fromkeys(QUESTION_VERB_RE.findall(question)) if v not in GENERIC_PREDICATES]
+        if people and verbs:
+            subject = people[0]
+            context = [re.sub(r"\s+", "", str(e)) for e in entities if str(e).strip() and str(e).strip() not in people]
+            judged += 1
+            record(_endorsed(sentences, subject, verbs, [c for c in context if c]))
+
+    if not judged:
+        return None, 0, ""
+    return round(triggered / judged * 100.0, 2), triggered, " ‖ ".join(flagged)
 
 
-def is_decline(answer: str, fact_recall: float) -> bool:
+def is_decline(answer: str, fact_recall: float | None) -> bool:
     """Declined: the answer says the records do not confirm it and states none of the reference facts."""
-    return fact_recall == 0 and any(marker in answer for marker in DECLINE_MARKERS)
+    return not fact_recall and any(marker in answer for marker in DECLINE_MARKERS)
 
 
 def score_answer(item: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """All automatic scores of one answer (one row of scores.csv, without the identifying columns)."""
     answer, contexts = result["answer"], result.get("contexts", [])
-    recall, covered, total = evaluate_faithfulness(answer, item["gold_facts"])
-    trap_rate, traps, flagged = evaluate_hallucination(answer, item["negative_traps"], item["category"], item.get("target_entities"))
+    question = item.get("query", "")
+    recall, covered, total = evaluate_faithfulness(answer, item["gold_facts"], question)
+    trap_rate, traps, flagged = evaluate_hallucination(answer, item["negative_traps"], item["category"],
+                                                       item.get("target_entities"), question)
     return {
         "faithfulness": recall,
         "hallucination_rate": trap_rate,
@@ -213,7 +332,8 @@ LABEL_RE = re.compile(
       | E\d+(?:_[A-Za-z_]+)?                 # CIDOC-CRM classes
       | <?/?GRAPH_TOPOLOGY>? | GRAPH_\d+      # context block tags
       | <?/?SOURCE_EVIDENCE>?
-      | S\d+ | g_\d+                         # item labels
+      | S\d+ | g_\d+(?:\s*~\s*(?:g_)?\d+)?     # item labels and ranges of them (g_22~g_30)
+      | graphrag_\d+(?:\s*~\s*\d+)?
       | 블록\s*\d+
       | graph\s*db(?:\s*컨텍스트)?
       | 그래프\s*db | 지식\s*그래프(?:\s*(?:문맥|컨텍스트|톱놀로지|토폴로지))?
@@ -226,7 +346,7 @@ LABEL_RE = re.compile(
 
 # Label fragments inside a longer citation ("사료 ID: P106i", "GRAPH_TOPOLOGY 구간 1").
 LABEL_FRAGMENT_RE = re.compile(
-    r"\bP\d+[a-z]?(?:_[A-Za-z0-9_]+)?\b|GRAPH_|SOURCE_EVIDENCE|그래프\s*(?:톱|토)폴로지|블록\s*\d|사료\s*ID\s*:",
+    r"\bP\d+[a-z]?(?:_[A-Za-z0-9_]+)?\b|GRAPH_|SOURCE_EVIDENCE|\bg_\d+|\bgraphrag_\d+|그래프\s*(?:톱|토)폴로지|블록\s*\d|사료\s*ID\s*:",
     re.IGNORECASE,
 )
 
@@ -256,8 +376,28 @@ def _split(group: str) -> list[str]:
     return [p.strip(" `[]") for p in re.split(r"[,;，、]|\s/\s", group) if p.strip(" `[]")]
 
 
+# Evidence tags copied into an answer as citations: <SOURCE_EVIDENCE id="raw_source_info-12" entity="…"/>,
+# or <SOURCE_EVIDENCE id="g_3">incident name</SOURCE_EVIDENCE>.
+CITE_TAG_RE = re.compile(r"<SOURCE_EVIDENCE\b([^<>]*?)/?>(?:([^<>]{1,200})</SOURCE_EVIDENCE>)?", re.IGNORECASE)
+INTERNAL_LABEL_RE = re.compile(r"(?<![A-Za-z0-9_])(?:g_\d+(?:\s*~\s*(?:g_)?\d+)?|graphrag_\d+(?:\s*~\s*\d+)?)(?![A-Za-z0-9_])")
+
+
+def normalize_citation_tags(answer: str) -> str:
+    """Replace an evidence tag by what it cites: its record id, else the incident name it wraps, else its label."""
+    def rep(m: re.Match) -> str:
+        found = re.search(r"\bid\s*=\s*\"?([^\"\s>/]+)", m.group(1) or "")
+        ident = found.group(1) if found else ""
+        inner = (m.group(2) or "").strip()
+        if ident.lower().startswith("raw_"):
+            return ident
+        return inner or ident
+    text = CITE_TAG_RE.sub(rep, answer or "")
+    return re.sub(r"</?SOURCE_EVIDENCE[^>]*>", "", text, flags=re.IGNORECASE)
+
+
 def verify_answer(answer: str, contexts: list[str]) -> list[dict[str, Any]]:
     """Return one entry per citation: text, kind, valid."""
+    answer = normalize_citation_tags(answer)
     ids = context_ids(contexts)
     norm_ctx = _norm("\n".join(contexts))
     found: list[dict[str, Any]] = []
@@ -298,8 +438,10 @@ def clean_answer(answer: str, contexts: list[str]) -> str:
             return ""
         return f"({', '.join(kept)})" if m.group(1) is not None else f"`{', '.join(kept)}`"
 
-    cleaned = GROUP_RE.sub(fix, answer or "")
-    return re.sub(r"[ \t]+([.,。])", r"\1", re.sub(r"\(\s*\)", "", cleaned))
+    cleaned = GROUP_RE.sub(fix, normalize_citation_tags(answer))
+    cleaned = INTERNAL_LABEL_RE.sub("", cleaned)   # labels outside parentheses
+    cleaned = re.sub(r"\(\s*(?:[,~]\s*)*\)", "", cleaned)
+    return re.sub(r"[ \t]+([.,。])", r"\1", cleaned)
 
 
 # ── Paired comparison of systems ─────────────────────────────────────────────

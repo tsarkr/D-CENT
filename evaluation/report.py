@@ -24,7 +24,7 @@ import random
 from evaluation.common import (
     GRAPH_RESULTS, RESULTS_DIR, add_sheet, bootstrap_ci, holm_adjust, new_workbook, paired_permutation_test, read_json, read_sheet,
 )
-from evaluation.metrics import METRICS, SOURCE_ORDER, analyze, verify_answer
+from evaluation.metrics import METRICS, METRICS_VERSION, SOURCE_ORDER, analyze, verify_answer
 
 LABEL = {
     "faithfulness": "Fact recall (%) ↑",
@@ -45,6 +45,7 @@ CONTRASTS = [
     ("RQ2 evidence (same generation)", "controlled", "hybrid-two-stage"),
 ]
 TEST_METRICS = ["faithfulness", "hallucination_rate", "entity_hit_rate_at_k"]
+MIN_CATEGORY_N = 5   # categories with fewer analysed questions are listed without means
 
 
 # ── Loading ──────────────────────────────────────────────────────────────────
@@ -169,8 +170,19 @@ def _latex_main(table: list[list[str]], header: list[str], path: Path) -> None:
 
 
 # ── Report ───────────────────────────────────────────────────────────────────
-def report(run_dirs: list[Path]) -> Path:
+def rescore(run_dirs: list[Path]) -> None:
+    """Rewrite scores.csv of finished runs with the current scoring code (answers are not regenerated)."""
+    from evaluation.run import write_scores
+    for d in run_dirs:
+        config = read_json(d / "config.json")
+        write_scores(d, read_json(Path(config["dataset"])))
+        print(f"🔁 {d.name}: 채점 v{METRICS_VERSION}로 다시 채점했습니다.")
+
+
+def report(run_dirs: list[Path], rescore_first: bool = False) -> Path:
     run_dirs = sorted(run_dirs)
+    if rescore_first:
+        rescore(run_dirs)
     configs = [read_json(d / "config.json") if (d / "config.json").exists() else {} for d in run_dirs]
     if len(run_dirs) > 1:
         fingerprints = [c.get("fingerprint") for c in configs]
@@ -209,12 +221,17 @@ def report(run_dirs: list[Path]) -> Path:
         ["공통 조건", f"temperature {cond.get('temperature')}, top-p {cond.get('top_p')}, 근거 {cond.get('context_chars')}자, "
                    f"출력 {cond.get('answer_max_tokens')}토큰"],
         ["코드 버전", ", ".join(sorted({c.get('code_version') or '?' for c in configs}))],
+        ["채점 버전", ", ".join(sorted({f"v{c.get('metrics_version', 1)}" for c in configs}))],
         ["분석 대상", f"{counts['questions_used']}/{counts['questions_total']}문항 "
                   f"(생성 실패 제외 {counts['questions_excluded_generation_failed']}, 일부 시스템 누락 제외 {counts['questions_excluded_incomplete']})"],
     ]))
 
+    stale = [d.name for d, c in zip(run_dirs, configs) if c.get("metrics_version", 1) != METRICS_VERSION]
+    if stale:
+        md.append(f"\n> ⚠️ {', '.join(stale)}의 점수는 이전 채점 기준입니다. `python -m evaluation report --rescore`로 다시 채점하십시오.\n")
+
     # 1. Overall
-    header = ["System"] + [LABEL[m] for m in METRICS] + ["Context chars", "Prompt tokens", "Latency (s)"]
+    header = ["System"] + [LABEL[m] for m in METRICS] + ["Failed", "Context chars", "Prompt tokens", "Latency (s)"]
     table = []
     for s in systems:
         lab = labels.get(s, s)
@@ -222,11 +239,16 @@ def report(run_dirs: list[Path]) -> Path:
         table.append([lab] + [_fmt_ci(cell[(m, "Overall", lab)]["mean"], cell[(m, "Overall", lab)]["ci95_low"],
                                       cell[(m, "Overall", lab)]["ci95_high"], 1 if m in ("faithfulness", "hallucination_rate", "declined") else 2)
                               if (m, "Overall", lab) in cell else "–" for m in METRICS]
-                     + [f"{_mean([r['context_chars'] for r in raw]):.0f}", f"{_mean([r['prompt_tokens'] for r in raw]):.0f}",
+                     + [f"{sum(r['failed'] for r in rows if r['system'] == s)}/{sum(1 for r in rows if r['system'] == s)}",
+                        f"{_mean([r['context_chars'] for r in raw]):.0f}", f"{_mean([r['prompt_tokens'] for r in raw]):.0f}",
                         f"{_mean([r['latency_sec'] for r in raw]):.1f}"])
     md.append("\n## 1. 시스템별 자동 지표 (평균 [95% 부트스트랩 CI])\n")
     md.append(_md_table(header, table))
-    md.append("\n사실 재현율·함정 동의율·거절률은 어휘 일치에 기반한 근사치입니다. 함정 동의로 표시된 문장은 9절에서 직접 확인하십시오.")
+    md.append("\n사실 재현율·함정 동의율·거절률은 어휘 일치에 기반한 근사치입니다. 사실 재현율은 질문에 이미 있는 단어를 빼고 "
+              "답변이 더해야 하는 내용(주로 기록된 인물)만으로 채점하며, 내용이 모두 질문에 있는 사실(두 사건의 선후, 인물이 기록에 없다는 것)은 "
+              "채점하지 않고 평가자에게 맡깁니다. 함정 동의는 함정의 주어와 그 주장(지휘·연행·작성 등)이 부정 없는 한 절에 함께 나올 때만 표시하고, "
+              "거짓 전제 문항은 질문의 전제 자체도 함정으로 봅니다. 표시된 문장은 9절에서 직접 확인하십시오. "
+              "Failed는 생성 실패 답변 수/전체 답변 수입니다. 실패한 문항은 모든 시스템에서 제외되므로, 실패율이 다르면 그 제외는 실패한 시스템에 유리하게 작용합니다.")
     _latex_main(table, header, out_dir / "table_main.tex")
 
     # 2. Planned comparisons
@@ -248,10 +270,13 @@ def report(run_dirs: list[Path]) -> Path:
     cats = [c for c in dict.fromkeys(r["category"] for r in by_cat) if c != "Overall"]
     for metric in ("faithfulness", "hallucination_rate"):
         md.append(f"\n**{LABEL[metric]}**\n")
-        md.append(_md_table(["Category", "n"] + [labels.get(s, s) for s in systems], [
-            [c, cell.get((metric, c, labels.get(systems[0], systems[0])), {}).get("n", "")]
-            + [f"{cell[(metric, c, labels.get(s, s))]['mean']:.1f}" if (metric, c, labels.get(s, s)) in cell else "–" for s in systems]
-            for c in cats]))
+        rows_c = []
+        for c in cats:
+            n = cell.get((metric, c, labels.get(systems[0], systems[0])), {}).get("n", 0)
+            rows_c.append([c, n] + [f"{cell[(metric, c, labels.get(s, s))]['mean']:.1f}"
+                                    if (metric, c, labels.get(s, s)) in cell and n >= MIN_CATEGORY_N else "–" for s in systems])
+        md.append(_md_table(["Category", "n"] + [labels.get(s, s) for s in systems], rows_c))
+    md.append(f"\n채점 가능한 문항이 {MIN_CATEGORY_N}개 미만인 범주는 평균을 표시하지 않습니다.")
     _latex_by_category(by_cat, systems, labels, out_dir / "table_by_category.tex")
 
     # 4. By source
@@ -328,7 +353,7 @@ def report(run_dirs: list[Path]) -> Path:
     failed = [r for r in rows if r["failed"]]
     md.append(f"**생성 실패** {len(failed)}건" + (": " + ", ".join(f"{r['query_id']}/{r['system']}" for r in failed[:30]) if failed else ""))
     flagged = [r for r in rows if (r.get("trap_flagged_text") or "").strip()]
-    md.append(f"\n**함정 동의로 표시된 문장** {len(flagged)}건 (부정 표현 없이 함정의 고유명 두 개가 한 문장에 나온 경우)\n")
+    md.append(f"\n**함정 동의로 표시된 문장** {len(flagged)}건 (부정 없는 한 절에 함정의 주어와 주장이 함께 나온 경우)\n")
     for r in flagged[:40]:
         md.append(f"- `{r['query_id']}` {labels.get(r['system'], r['system'])}: {r['trap_flagged_text'][:200]}")
 
@@ -353,8 +378,9 @@ def _latex_by_category(by_cat: list[dict[str, Any]], systems: list[str], labels:
              r"\label{tab:by_category}", r"\begin{tabular}{lc" + "c" * len(names) + "}", r"\toprule",
              r"\textbf{Category} & \textbf{N} & " + " & ".join(rf"\textbf{{{n}}}" for n in names) + r" \\", r"\midrule"]
     for c in cats:
-        n = cell.get((c, names[0]), {}).get("n", "")
-        vals = [f"{cell[(c, m)]['mean']:.1f} [{cell[(c, m)]['ci95_low']:.1f}, {cell[(c, m)]['ci95_high']:.1f}]" if (c, m) in cell else "--" for m in names]
+        n = cell.get((c, names[0]), {}).get("n", 0)
+        vals = [f"{cell[(c, m)]['mean']:.1f} [{cell[(c, m)]['ci95_low']:.1f}, {cell[(c, m)]['ci95_high']:.1f}]"
+                if (c, m) in cell and n >= MIN_CATEGORY_N else "--" for m in names]
         lines.append(f"{c.replace('&', chr(92) + '&')} & {n} & " + " & ".join(vals) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}", r"\end{table*}", ""]
     path.write_text("\n".join(lines), encoding="utf-8")

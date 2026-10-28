@@ -34,6 +34,9 @@ for (const attack of [
 }
 assert.equal(context.renderMarkdown('<strong>safe</strong>'), '<strong>safe</strong>');
 assert(context.renderMarkdown('[safe](https://example.test)').includes('href="https://example.test"'));
+assert.equal(context.normalizeEvidenceTags('시위(<SOURCE_EVIDENCE id="raw_source_info-12" entity="a_1"/>, <SOURCE_EVIDENCE id="g_3">평양 시위</SOURCE_EVIDENCE>, g_4~g_6).'),
+    '시위(raw_source_info-12, 평양 시위).');
+assert.equal(context.normalizeEvidenceTags('전개하였다 (g_1, g_2). 끝'), '전개하였다. 끝');
 context.DOMPurify = undefined;
 assert.equal(context.renderMarkdown('<svg onmouseover="evil()">'), '&lt;svg onmouseover=&quot;evil()&quot;&gt;');
 console.log('Rendering safety checks passed (8 attack cases, safe markup, fail-closed fallback)');

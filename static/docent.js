@@ -632,8 +632,25 @@
         });
     }
 
+    // The model sometimes copies the evidence tags into its answer as citations
+    // (<SOURCE_EVIDENCE id="raw_source_info-12" .../>, <SOURCE_EVIDENCE id="g_3">incident</SOURCE_EVIDENCE>).
+    // Keep what they cite: the record key, else the incident name; drop block labels (g_3, graphrag_1).
+    function normalizeEvidenceTags(text) {
+        return String(text)
+            .replace(/<SOURCE_EVIDENCE\b([^<>]*?)\/?>(?:([^<>]{1,200})<\/SOURCE_EVIDENCE>)?/gi, (whole, attrs, inner) => {
+                const id = ((attrs || '').match(/\bid\s*=\s*"?([^"\s>\/]+)/) || [])[1] || '';
+                if (/^raw_/i.test(id)) return id;
+                return (inner || '').trim() || id;
+            })
+            .replace(/<\/?SOURCE_EVIDENCE[^>]*>/gi, '')
+            .replace(/(^|[^A-Za-z0-9_])(?:g_\d+(?:\s*~\s*(?:g_)?\d+)?|graphrag_\d+(?:\s*~\s*\d+)?)(?![A-Za-z0-9_])/g, '$1')
+            .replace(/\(\s*(?:[,~]\s*)*\)/g, '')
+            .replace(/\(\s*,\s*/g, '(').replace(/\s*,\s*\)/g, ')').replace(/,\s*,/g, ',')
+            .replace(/[ \t]+([.,。])/g, '$1');
+    }
+
     function renderMarkdown(md) {
-        const text = String(md == null ? '' : md);
+        const text = normalizeEvidenceTags(md == null ? '' : md);
         if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
             try {
                 // Citation labels are inserted before sanitizing the final HTML.

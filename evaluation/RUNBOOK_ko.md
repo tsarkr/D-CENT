@@ -54,6 +54,12 @@ export보다 **먼저** 해야 합니다. PostgreSQL 표와 Neo4j 그래프를 �
 
 - [ ] 다른 터미널에서 `DOCENT_EVAL_MODE=1 php -S localhost:8000`, `DOCENT_URL` 설정
 - [ ] `python -m evaluation run --quick` (세 문항 점검)
+- [ ] 10월 27일 1차 실행은 파일럿으로만 씁니다 (실행 중 `actions.php` 변경, 기준선이 서지정보만 검색, 채점 v1).
+      `python -m evaluation report --rescore 2026-10-27_093400_076070`로 채점 v2 결과만 확인합니다.
+- [ ] 기준선이 세 테이블(사건정보·출처정보·서지정보)을 검색하므로 하이브리드 기준선의 밀집 색인을 처음 한 번 다시 만듭니다
+      (Ollama `nomic-embed-text`, 첫 실행에서 자동).
+- [ ] `--limit 10`으로 시범 실행: 생성 실패가 없는지, 실패하면 answers.json의 `[Error: …]`에 서버 오류 내용이 남는지 확인
+- [ ] 평가 중에는 코드를 고치지 않습니다 (`php -S`는 요청마다 파일을 다시 읽으므로 실행 중 수정이 그대로 섞입니다)
 - [ ] `python -m evaluation run` 2회 (각각 결과 폴더가 생김)
 - [ ] `python -m evaluation report RUN1 RUN2` → `report.md`, `table_main.tex`, `table_by_category.tex`
 - [ ] `python -m evaluation judge` (문맥 정밀도, Ollama 필요)

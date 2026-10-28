@@ -24,7 +24,7 @@ from pipeline.config import ROOT, setting
 
 from evaluation import systems
 from evaluation.common import BENCHMARK, RESULTS_DIR, read_json, write_json
-from evaluation.metrics import average_precision, evidence_items, clean_answer, is_generation_failure, score_answer
+from evaluation.metrics import METRICS_VERSION, average_precision, evidence_items, clean_answer, is_generation_failure, score_answer
 
 RETRIES = 2              # extra attempts for a failed generation (rate limits)
 QUICK_CATEGORIES = 3     # --quick: the first question of each of this many categories
@@ -229,6 +229,7 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
         write_json(run_dir / "config.json", config)
 
     write_scores(run_dir, read_json(dataset))
+    config["metrics_version"] = METRICS_VERSION
     config["model_versions"] = dict(systems.MODEL_VERSIONS)  # calls of this harness; the server uses the same key and alias
     config["complete"] = True
     config["finished"] = dt.datetime.now().isoformat(timespec="seconds")
@@ -249,6 +250,11 @@ def write_scores(run_dir: Path, items: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(f, fieldnames=SCORE_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+    config_path = run_dir / "config.json"
+    if config_path.exists():   # which scoring rules produced scores.csv
+        config = read_json(config_path)
+        config["metrics_version"] = METRICS_VERSION
+        write_json(config_path, config)
 
 
 # ── Context precision with a local LLM judge (secondary measure) ─────────────

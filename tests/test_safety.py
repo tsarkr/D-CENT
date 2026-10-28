@@ -32,6 +32,33 @@ class MetricsSafety(unittest.TestCase):
         self.assertEqual(score('유관순이 독립선언서를 작성했다. 다른 인물은 확인되지 않습니다.'), 100)
         self.assertEqual(score('유관순이 독립선언서를 작성하지 않았다.'), 0)
 
+    def test_restating_the_question_covers_no_fact(self):
+        question = "'3월 1일 평남 평양부 독립선언서 배포'에 관련 인물로 기록된 사람은 누구인가?"
+        facts = ['3월 1일 평남 평양부 독립선언서 배포의 관련 인물로 김상열, 김형국, 김성진 등이 기록되어 있음']
+        wrong = '3월 1일 평남 평양부 독립선언서 배포의 관련 인물로 홍길동이 기록되어 있습니다.'
+        right = '3월 1일 평남 평양부 독립선언서 배포에는 김상열, 김형국이 기록되어 있습니다.'
+        self.assertEqual(metrics.evaluate_faithfulness(wrong, facts, question)[0], 0)
+        self.assertEqual(metrics.evaluate_faithfulness(right, facts, question)[0], 100)
+        # a fact whose content is all in the question is not scored
+        self.assertIsNone(metrics.evaluate_faithfulness(right, ['3월 1일 평남 평양부 독립선언서 배포'], question)[0])
+
+    def test_rejected_premise_and_listed_names_are_not_endorsements(self):
+        question = '이동휘가 충남 천안 아우내 장터 만세 시위를 직접 현장에서 기획하고 지휘했는가?'
+        entities = ['이동휘', '아우내장터', '천안', '유관순']
+        trap = ['이동휘가 4월 1일 아우내 장터에서 태극기를 흔들며 군중을 지휘했다']
+        score = lambda answer: metrics.evaluate_hallucination(answer, trap, 'Zero-Correlation Trap', entities, question)[0]
+        self.assertEqual(score('이동휘가 아우내 장터 시위를 기획하고 지휘했다는 기록은 확인되지 않는다.'), 0)
+        self.assertEqual(score('### 이동휘의 아우내 장터 시위 지휘 여부'), 0)
+        self.assertEqual(score('이동휘는 연해주에서 무장투쟁을 지휘했다.'), 0)
+        self.assertGreater(score('이동휘가 아우내 장터 시위를 직접 기획하고 지휘했다.'), 0)
+
+    def test_copied_evidence_tags_become_citations(self):
+        answer = '시위를 전개하였다(<SOURCE_EVIDENCE id="raw_source_info-12" entity="a_0033"/>, <SOURCE_EVIDENCE id="g_3">평양 시위</SOURCE_EVIDENCE>). 또 g_5 확인된다.'
+        contexts = ['<SOURCE_EVIDENCE id="raw_source_info-12">x</SOURCE_EVIDENCE>', '평양 시위']
+        self.assertEqual(metrics.clean_answer(answer, contexts), '시위를 전개하였다(raw_source_info-12, 평양 시위). 또  확인된다.')
+        kinds = [(c['kind'], c['valid']) for c in metrics.verify_answer(answer, contexts)]
+        self.assertEqual(kinds, [('record_id', True), ('named_source', True)])
+
     def test_ranked_items_preserve_mrr(self):
         self.assertEqual(metrics.evaluate_retrieval_direct({'target_entities': ['유관순']},
                          ['무관한 기록', '유관순 기록'])['entity_mrr'], 0.5)
@@ -126,6 +153,15 @@ class DcentSafety(unittest.TestCase):
              patch.object(systems, 'MODEL_VERSIONS') as versions:
             client.call('explain', {})
             versions.update.assert_called_once_with({'dated-server-model': 2})
+
+    def test_non_json_reply_is_reported_with_its_body(self):
+        client = systems.DcentClient('http://offline.invalid')
+        client.token = 'offline'
+        response = MagicMock(status_code=200, text='<br /><b>Fatal error</b>: Maximum execution time exceeded')
+        response.json.side_effect = ValueError('Expecting value')
+        with patch.object(systems.requests, 'post', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'Maximum execution time'):
+                client.call('explain', {})
 
 
 class PipelineSafety(unittest.TestCase):

@@ -71,6 +71,27 @@ if (isset($_GET['ajax'])) {
     header('X-Frame-Options: SAMEORIGIN');
 
     $capture_eval = get_cfg('DOCENT_EVAL_MODE', '0') === '1' && !isset($_POST['stream']) && !isset($_GET['stream']);
+    $show_details = get_cfg('DOCENT_EVAL_MODE', '0') === '1' || get_cfg('APP_DEBUG', '0') === '1';
+
+    // Warnings and fatal errors must not be printed into a JSON response: a client would see a body
+    // that is not JSON. They go to the log, and a fatal error (time limit, memory) becomes a JSON 500.
+    ini_set('display_errors', '0');
+    register_shutdown_function(function () use ($action, $show_details) {
+        $err = error_get_last();
+        if (!$err || !in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true)) return;
+        while (ob_get_level()) ob_end_clean();
+        if (!headers_sent()) {
+            http_response_code(500);
+            header('Content-Type: application/json; charset=utf-8');
+        }
+        error_log(sprintf('Docent AJAX fatal [%s]: %s in %s:%d', $action, $err['message'], basename($err['file']), $err['line']));
+        $resp = ['error' => '요청을 처리하는 중 서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.'];
+        if ($show_details) {
+            $resp['details'] = ['class' => 'FatalError', 'message' => $err['message'], 'file' => basename($err['file']), 'line' => $err['line']];
+        }
+        echo json_encode($resp, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+    });
+
     if ($capture_eval) ob_start();
     try {
         match ($action) {
@@ -104,7 +125,7 @@ if (isset($_GET['ajax'])) {
         }
         http_response_code(500);
         $error_response = ["error" => "요청을 처리하는 중 서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."];
-        if (get_cfg('APP_DEBUG', '0') === '1') {
+        if ($show_details) {
             $error_response["details"] = [
                 "class" => $class_name,
                 "message" => $detail_msg,

@@ -13,11 +13,14 @@ Shared conditions (fixed, as stated in the paper): generator Gemini (GEMINI_MODE
 gemini-flash-lite-latest alias), temperature 0, top-p 0.8, at most 1,500 output tokens per answer,
 an evidence budget of 11,000 characters per question (the deployed system's), and entities
 extracted from the question text once by the same model (no system sees the gold entities).
+Every system that reads record text searches the same records: register entries, source entries,
+and bibliographic records (CORPUS_TABLES), the records the end-to-end system reaches and cites.
 """
 
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -156,7 +159,10 @@ def question_entities(query: str) -> list[str]:
 
 # ── Hybrid baseline index (BM25 + dense + rerank) ────────────────────────────
 CACHE_DIR = ROOT / "vector_store" / "baselines"   # dense index of the hybrid baseline, built on first use
-CORPUS_TABLES = ("raw_bibliography",)              # the record pool the baselines search
+# The record pool of every system that reads record text: the records the end-to-end system reaches
+# through its document nodes. Searching bibliographic records alone left the baselines without the
+# register entries and source entries that name the participants of an incident.
+CORPUS_TABLES = ("raw_event_info", "raw_source_info", "raw_bibliography")
 EMBED_MODEL = "nomic-embed-text"                   # dense retriever (Ollama, OLLAMA_HOST)
 RERANK_MODEL = "BAAI/bge-reranker-v2-m3"           # cross-encoder
 ALLOWED_TABLES = {"raw_bibliography", "raw_source_info", "raw_event_info"}
@@ -166,7 +172,7 @@ RRF_K = 60
 
 
 def corpus_tables() -> list[str]:
-    """Tables searched by the baselines (default: the same pool Docent cites)."""
+    """Tables searched by the systems that read record text (the same pool D-CENT cites)."""
     names = list(CORPUS_TABLES)
     unknown = set(names) - ALLOWED_TABLES
     if unknown:
@@ -195,6 +201,21 @@ def load_documents(tables: list[str] | None = None) -> list[dict[str, Any]]:
     cur.close()
     conn.close()
     return docs
+
+
+def records_containing(cur: Any, entity: str, limit: int) -> list[tuple[str, int, str]]:
+    """Up to `limit` records whose text contains `entity`, as (table, rowid, body text).
+
+    Records are taken in turn from each corpus table, in row order within a table, so that no table
+    fills the list before another is reached and the selection does not depend on the database's
+    scan order.
+    """
+    per_table = []
+    for table in corpus_tables():
+        cur.execute(f'SELECT rowid, tei FROM "{table}" WHERE tei LIKE %s ORDER BY rowid LIMIT %s', (f"%{entity}%", limit))
+        per_table.append([(table, rowid, _strip_tei(tei)) for rowid, tei in cur.fetchall()])
+    out = [r for group in itertools.zip_longest(*per_table) for r in group if r and r[2]]
+    return out[:limit]
 
 
 def chunk_documents(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -358,14 +379,8 @@ def retrieve_vector_chunks(query: str, target_entities: list[str], top_k: int = 
     cur = conn.cursor()
     chunks = []
     for ent in target_entities[:3]:
-        cur.execute("""
-            SELECT rowid, tei FROM raw_bibliography WHERE tei LIKE %s LIMIT %s
-        """, (f"%{ent}%", top_k))
-        for rowid, tei in cur.fetchall():
-            clean = re.sub(r'<[^>]+>', ' ', tei)
-            clean = re.sub(r'\s+', ' ', clean).strip()
-            if clean:
-                chunks.append(record_block("raw_bibliography", rowid, clean[:400]))
+        for table, rowid, text in records_containing(cur, ent, top_k):
+            chunks.append(record_block(table, rowid, text[:400]))
         if len(chunks) >= top_k:
             break
     cur.close()
@@ -532,15 +547,10 @@ def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
     # 2. Scoped PostgreSQL primary sources (more candidates when a shared budget decides the cut-off)
     n_entities, per_entity = (3, max(4, CONTEXT_CHARS // 1500)) if CONTEXT_CHARS > 0 else (2, 2)
     for ent in target_entities[:n_entities]:
-        cur.execute("""
-            SELECT rowid, tei FROM raw_bibliography WHERE tei LIKE %s LIMIT %s
-        """, (f"%{ent}%", per_entity))
-        for rowid, tei in cur.fetchall():
-            clean = re.sub(r'<[^>]+>', ' ', tei)
-            clean = re.sub(r'\s+', ' ', clean).strip()[:500]
+        for table, rowid, text in records_containing(cur, ent, per_entity):
             envelopes.append(
-                f'<SOURCE_EVIDENCE id="raw_bibliography-{rowid}" entity="{ent}">\n'
-                f'  [사료 원문: {clean}]\n'
+                f'<SOURCE_EVIDENCE id="{table}-{rowid}" entity="{ent}">\n'
+                f'  [사료 원문: {text[:500]}]\n'
                 f'</SOURCE_EVIDENCE>'
             )
 
@@ -678,11 +688,18 @@ class DcentClient:
             resp = requests.post(self.url, params={"ajax": action}, data={**data, "csrf_token": self.token},
                                  headers={"X-CSRF-Token": self.token}, cookies=self.cookies, timeout=remaining)
             if resp.status_code == 200:
-                result = resp.json()
+                try:
+                    result = resp.json()
+                except ValueError:
+                    # PHP printed something other than JSON (a warning, a fatal error, or nothing):
+                    # keep the start of the body so that the failure can be traced in answers.json.
+                    body = re.sub(r"<[^>]+>", " ", resp.text or "")
+                    body = re.sub(r"\s+", " ", body).strip()[:300] or "(빈 응답)"
+                    raise RuntimeError(f"D-CENT {action} 응답이 JSON이 아닙니다 (HTTP 200): {body}") from None
                 if isinstance(result, dict):
                     MODEL_VERSIONS.update(result.get("model_versions", {}))
                 return result
-            last = f"{resp.status_code} {resp.text[:160]}"
+            last = f"{resp.status_code} {resp.text[:400]}"
             if resp.status_code == 403:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

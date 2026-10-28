@@ -3,7 +3,9 @@
   python -m evaluation dataset [--generate]     validate questions -> dataset/benchmark.json
   python -m evaluation run [--quick | --limit N] [--systems all|main|ablations|a,b] [--resume]
                                                 run the systems, score, and write the report
-  python -m evaluation report [RUN ...]         report of the latest run, or of several runs combined
+  python -m evaluation report [RUN ...] [--rescore]
+                                                report of the latest run, or of several runs combined;
+                                                --rescore re-scores the saved answers with the current rules
   python -m evaluation judge [RUN]              context precision with a local LLM judge (secondary)
   python -m evaluation expert export|score      historians validate the extracted entities and relations
   python -m evaluation rate export [RUN] [--n N] | rate score
@@ -49,6 +51,7 @@ def main() -> int:
 
     p = sub.add_parser("report", help="write the report of one or more runs")
     p.add_argument("runs", nargs="*")
+    p.add_argument("--rescore", action="store_true", help="re-score the saved answers with the current scoring rules first")
 
     p = sub.add_parser("judge", help="context precision with a local LLM judge")
     p.add_argument("run", nargs="?")
@@ -75,7 +78,7 @@ def main() -> int:
         return 0
     if args.command == "report":
         from evaluation.report import report
-        report([_run_dir(name) for name in args.runs] or [latest_run()])
+        report([_run_dir(name) for name in args.runs] or [latest_run()], rescore_first=args.rescore)
         return 0
     if args.command == "judge":
         from evaluation.report import report
