@@ -316,16 +316,8 @@ function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_cha
         if (preg_match('/(평안[남북]도|함경[남북]도|충청[남북]도|전라[남북]도|경상[남북]도|강원도|경기도|황해도|평양|함흥|천안|병천|단천|간도|연해주|상해|진천|청주|용산|종로|보신각|대구|부산|통영|의주|해주|원산)[^\s,]*/u', $text . ' ' . $doc, $rm)) $region = $rm[0];
         if (preg_match('/([가-힣\w]+(?:시위|만세|선언식|의거|봉기|집회|행진|사건|파견|회합))/u', $doc . ' ' . $text, $em)) $event = $em[0];
 
-        // 초점 필터링
-        $is_spatial_query = preg_match('/(장소|지역|확산|전개|시위|만세)/u', $term . ' ' . $focus);
-        $is_diplomatic = preg_match('/(파리강화회의|외교청원|청원서\s*서명|강화회의\s*파견)/u', $text . ' ' . $doc);
-
-        if ($is_spatial_query && $is_diplomatic) {
-            $body = "[외교 및 기타 활동 약력 기록: {$event} 관련 명단 수록 (장소적 시위 확산과 직접 무관)]";
-        } else {
-            $remaining = $total_char_budget - $used_chars;
-            $body = mb_substr($text, 0, max($min_chars, min($max_chars, $remaining - 120)));
-        }
+        // Preserve source text: topic keywords alone cannot establish irrelevance.
+        $body = mb_substr($text, 0, $max_chars);
 
         $labels = _get_envelope_labels($lang);
         $comment_str = _build_scope_comment($lang, $entity_attr, $region, $event);
@@ -333,7 +325,17 @@ function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_cha
                   . "  {$comment_str}\n  [{$labels['doc']}] {$doc}\n  [{$labels['body']}] {$body}\n</SOURCE_EVIDENCE>";
 
         $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);   // + the "\n\n" separator before it
-        if ($line_len > ($total_char_budget - $used_chars)) break;
+        $available = $total_char_budget - $used_chars;
+        if ($line_len > $available) {
+            $body_budget = mb_strlen($body) - ($line_len - $available);
+            if ($body_budget < min($min_chars, mb_strlen($body))) continue;
+            // Trim only the body, preserving the source identifier and closing tag.
+            $offset = mb_strrpos($envelope, $body);
+            $envelope = mb_substr($envelope, 0, $offset)
+                . mb_substr($body, 0, $body_budget)
+                . mb_substr($envelope, $offset + mb_strlen($body));
+            $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);
+        }
         $lines[] = $envelope;
         $used_chars += $line_len;
     }
@@ -367,22 +369,24 @@ function build_budgeted_pg_context($pg_texts, $lang, $max_items, $min_chars, $ma
         if (preg_match('/(사건명|제목):\s*([^;]+)/u', $text, $ev_m)) $event = trim($ev_m[2]);
         elseif (preg_match('/([가-힣\w]+(?:시위|만세|선언식|의거|봉기|집회|행진|사건|파견))/u', $text, $em2)) $event = $em2[0];
 
-        $is_spatial_query = preg_match('/(장소|지역|확산|전개|시위|만세)/u', $term . ' ' . $focus);
-        $is_diplomatic = preg_match('/(파리강화회의|외교청원|청원서\s*서명|강화회의\s*파견)/u', $text);
-
-        if ($is_spatial_query && $is_diplomatic) {
-            $body = "[외교 및 기타 활동 약력 기록: {$event} 관련 명단 수록 (장소적 시위 확산과 직접 무관)]";
-        } else {
-            $remaining = $total_char_budget - $used_chars;
-            $body = mb_substr($text, 0, max($min_chars, min($max_chars, $remaining - 120)));
-        }
+        $body = mb_substr($text, 0, $max_chars);
 
         $comment_str = _build_scope_comment($lang, $entity_attr, $region, $event);
         $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
                   . "  {$comment_str}\n  {$body}\n</SOURCE_EVIDENCE>";
 
         $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);   // + the "\n\n" separator before it
-        if ($line_len > ($total_char_budget - $used_chars)) break;
+        $available = $total_char_budget - $used_chars;
+        if ($line_len > $available) {
+            $body_budget = mb_strlen($body) - ($line_len - $available);
+            if ($body_budget < min($min_chars, mb_strlen($body))) continue;
+            // Trim only the body, preserving the source identifier and closing tag.
+            $offset = mb_strrpos($envelope, $body);
+            $envelope = mb_substr($envelope, 0, $offset)
+                . mb_substr($body, 0, $body_budget)
+                . mb_substr($envelope, $offset + mb_strlen($body));
+            $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);
+        }
         $lines[] = $envelope;
         $used_chars += $line_len;
     }

@@ -38,5 +38,18 @@ check(str_contains($block, 'id="raw_event_info-5"'), 'block cited by its record'
 check(!str_contains($block, 'id="graphrag_'), 'no internal block label when a record or incident is known');
 check(str_contains($block, '관련 사건으로 연결합니다'), 'related incident wording');
 check(graphrag_incident_rows($client, '짧음') === [], 'short questions skip the lookup');
+require_once __DIR__ . '/../includes/helpers.php';
+$records = [
+    '[public.raw_event_info] node=사건 rowid=1 제목: ' . str_repeat('긴제목', 300) . '; 내용: 기록',
+    '[public.raw_event_info] node=사건 rowid=2 제목: 시위; 내용: 파리강화회의 참여 이후 시위 관련 인물은 김철수이다.',
+];
+$context = build_budgeted_pg_context($records, 'ko', 25, 30, 450, 700, '시위');
+check(str_contains($context, 'raw_event_info-2'), 'oversized record does not suppress later records');
+check(str_contains($context, '김철수'), 'diplomatic keywords do not erase source facts');
+check(mb_strlen($context) <= 700, 'context respects character budget');
+$long = '[public.raw_event_info] node=사건 rowid=3 ' . str_repeat('본문 ', 300);
+$context = build_budgeted_pg_context([$long], 'ko', 25, 30, 450, 400);
+check(str_contains($context, 'raw_event_info-3'), 'body is fitted to actual envelope overhead');
+check(str_ends_with($context, '</SOURCE_EVIDENCE>') && mb_strlen($context) <= 400, 'trimmed source remains complete');
 echo "Narrative incident route checks passed\n";
 }
