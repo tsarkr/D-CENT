@@ -365,6 +365,97 @@ function graphrag_run_multihop(object $client, string $entity_name, ?float $dead
     return $results;
 }
 
+/** At most this many incidents named in a question are expanded. */
+const GRAPHRAG_INCIDENT_MAX = 3;
+
+/**
+ * Incidents the question names. An incident is named when its register name occurs in the question
+ * (spaces ignored), whether quoted or not; names contained in a longer matched name are dropped.
+ * For each incident the rows give the persons recorded for it, or the incident alone when none is
+ * recorded, and the incidents the register marks as related. Each row carries record keys: the
+ * records that attest the participation, else the source entries that document the incident.
+ *
+ * Without this route a question about a named incident reached the graph only through the place
+ * and person names in it, which expand to incidents other than the one asked about.
+ */
+function graphrag_incident_rows(object $client, string $query, ?float $deadline = null): array {
+    $flat = preg_replace('/\s+/u', '', $query);
+    if (mb_strlen($flat) < 6) return [];
+    $timeout = function () use ($deadline) {
+        if ($deadline === null) return GRAPHRAG_QUERY_TIMEOUT_SEC;
+        return min(GRAPHRAG_QUERY_TIMEOUT_SEC, $deadline - microtime(true));
+    };
+    try {
+        if ($timeout() < 1.0) return [];
+        $found = graphrag_run_with_timeout($client, "
+            MATCH (e:Event)
+            WITH e, coalesce(e.사건명, e.name) AS name
+            WHERE name IS NOT NULL AND size(replace(name, ' ', '')) >= 6
+              AND \$flat CONTAINS replace(name, ' ', '')
+            RETURN e.id AS id, name, e.날짜 AS date
+            ORDER BY size(name) DESC
+            LIMIT 10", ['flat' => $flat], $timeout());
+    } catch (\Throwable $e) {
+        error_log('GraphRAG incident lookup failed: ' . $e->getMessage());
+        return [];
+    }
+    $incidents = [];
+    foreach ($found as $rec) {
+        $name = trim((string)$rec->get('name'));
+        $key = preg_replace('/\s+/u', '', $name);
+        foreach ($incidents as $kept) {
+            if (mb_strpos($kept['key'], $key) !== false) continue 2;   // part of a longer name already kept
+        }
+        $incidents[] = ['id' => (string)$rec->get('id'), 'name' => $name, 'date' => trim((string)($rec->get('date') ?? '')), 'key' => $key];
+        if (count($incidents) >= GRAPHRAG_INCIDENT_MAX) break;
+    }
+
+    $rows = [];
+    foreach ($incidents as $inc) {
+        if ($timeout() < 1.0) break;
+        try {
+            $res = graphrag_run_with_timeout($client, "
+                MATCH (e:Event {id: \$id})
+                OPTIONAL MATCH (d:Document)-[:P70_documents]->(e)
+                WITH e, [x IN collect(DISTINCT d.원천테이블 + '-' + d.원천rowid) WHERE x IS NOT NULL][0..3] AS docs
+                OPTIONAL MATCH (e)-[r:P14_carried_out_by]-(p:Person)
+                WITH e, docs, collect(DISTINCT {person: coalesce(p.명칭, p.name), sources: coalesce(r.sources, [])[0..2]})[0..12] AS people
+                OPTIONAL MATCH (e)-[:관련사건]-(o:Event)
+                RETURN docs, people,
+                       collect(DISTINCT {name: coalesce(o.사건명, o.name), date: o.날짜})[0..3] AS related",
+                ['id' => $inc['id']], $timeout());
+        } catch (\Throwable $e) {
+            error_log("GraphRAG incident expansion failed for [{$inc['name']}]: " . $e->getMessage());
+            continue;
+        }
+        foreach ($res as $rec) {
+            $docs = docent_record_keys($rec->get('docs'));
+            $people = 0;
+            foreach ((array)(is_object($rec->get('people')) ? $rec->get('people')->toArray() : $rec->get('people')) as $pp) {
+                $pp = is_object($pp) && method_exists($pp, 'toArray') ? $pp->toArray() : (array)$pp;
+                $person = trim((string)($pp['person'] ?? ''));
+                if ($person === '') continue;
+                $people++;
+                $keys = docent_record_keys($pp['sources'] ?? []);
+                $rows[] = ['연관인물' => $person, '사건이름' => $inc['name'], '발생일자' => $inc['date'], '공통사건' => '',
+                           '기준인물' => $inc['name'], '근거' => $keys ?: $docs, '유형' => 'incident'];
+            }
+            if ($people === 0) {
+                $rows[] = ['연관인물' => '', '사건이름' => $inc['name'], '발생일자' => $inc['date'], '공통사건' => '',
+                           '기준인물' => $inc['name'], '근거' => $docs, '유형' => 'incident'];
+            }
+            foreach ((array)(is_object($rec->get('related')) ? $rec->get('related')->toArray() : $rec->get('related')) as $oo) {
+                $oo = is_object($oo) && method_exists($oo, 'toArray') ? $oo->toArray() : (array)$oo;
+                $other = trim((string)($oo['name'] ?? ''));
+                if ($other === '') continue;
+                $rows[] = ['연관인물' => '', '사건이름' => $other, '발생일자' => trim((string)($oo['date'] ?? '')), '공통사건' => $inc['name'],
+                           '기준인물' => $inc['name'], '근거' => $docs, '유형' => 'related'];
+            }
+        }
+    }
+    return array_slice($rows, 0, 20);
+}
+
 /**
  * [Step 3] GraphRAG 결과 직렬화 (SOURCE_EVIDENCE XML 포맷)
  *
@@ -394,9 +485,32 @@ function graphrag_serialize_results(array $multihop_rows, string $entity_name, s
         $date    = $row['발생일자'] ?: '';
         $common  = $row['공통사건'] ?: '';
         $anchor  = $row['기준인물'] ?: $entity_name;
+        $kind    = (string)($row['유형'] ?? '');
+        $when    = $date ? " ({$date})" : '';
 
         // 자연어 서술 생성 (언어별)
-        switch ($lang) {
+        if ($kind === 'incident' || $kind === 'related') {
+            $named = $row['연관인물'] !== '';
+            $texts = [
+                'ko' => $kind === 'related'
+                    ? "{$labels['prefix']}: 사건 대장은 [{$common}]과(와) [{$event}]{$when}을(를) 관련 사건으로 연결합니다."
+                    : ($named ? "{$labels['prefix']}: [{$event}]{$when}의 관련 인물로 '{$person}'이(가) 기록되어 있습니다."
+                              : "{$labels['prefix']}: [{$event}]{$when}은(는) 사건 대장에 기록되어 있으나 그래프에 연결된 관련 인물이 없습니다."),
+                'en' => $kind === 'related'
+                    ? "{$labels['prefix']}: the register links [{$common}] and [{$event}]{$when} as related incidents."
+                    : ($named ? "{$labels['prefix']}: '{$person}' is recorded as a person related to [{$event}]{$when}."
+                              : "{$labels['prefix']}: [{$event}]{$when} is in the register, but no related person is linked in the graph."),
+                'ja' => $kind === 'related'
+                    ? "{$labels['prefix']}: 事件台帳は[{$common}]と[{$event}]{$when}を関連事件として結ぶ。"
+                    : ($named ? "{$labels['prefix']}: [{$event}]{$when}の関連人物として'{$person}'が記録されている。"
+                              : "{$labels['prefix']}: [{$event}]{$when}は事件台帳にあるが、グラフに関連人物は結ばれていない。"),
+                'zh' => $kind === 'related'
+                    ? "{$labels['prefix']}: 事件台账将[{$common}]与[{$event}]{$when}列为相关事件。"
+                    : ($named ? "{$labels['prefix']}: '{$person}'被记录为[{$event}]{$when}的相关人物。"
+                              : "{$labels['prefix']}: [{$event}]{$when}见于事件台账，但图谱中没有关联人物。"),
+            ];
+            $body = $texts[$lang] ?? $texts['ko'];
+        } else switch ($lang) {
             case 'en':
                 $body = "{$labels['prefix']}: '{$anchor}' is connected to '{$person}'"
                       . ($common ? " via the shared event [{$common}]" : '')
@@ -429,7 +543,8 @@ function graphrag_serialize_results(array $multihop_rows, string $entity_name, s
             $body .= " ({$cue}: " . implode(', ', $keys) . ")";
         }
 
-        $id_attr     = 'graphrag_' . ($i + 1);
+        // Cite a block by the record that attests it, else by its incident name, never by an internal label.
+        $id_attr     = htmlspecialchars($keys[0] ?? ($row['사건이름'] ?: 'graphrag_' . ($i + 1)), ENT_QUOTES, 'UTF-8');
         $entity_attr = htmlspecialchars($anchor, ENT_QUOTES, 'UTF-8');
         $event_attr  = htmlspecialchars($event,  ENT_QUOTES, 'UTF-8');
 
@@ -467,20 +582,25 @@ function graphrag_serialize_results(array $multihop_rows, string $entity_name, s
  * @return array ['rows' => array, 'entities' => string[]]
  */
 function graphrag_collect_rows(string $query): array {
-    $ner = graphrag_detect_entities($query);
-    if (!$ner['route_graph'] || empty($ner['entities'])) {
-        return ['rows' => [], 'entities' => []];
-    }
     try {
         $client = get_neo4j();
     } catch (\Throwable $dbErr) {
         error_log('GraphRAG: Neo4j connection failed — ' . $dbErr->getMessage());
-        return ['rows' => [], 'entities' => $ner['entities']];
+        return ['rows' => [], 'entities' => []];
+    }
+    $t0 = microtime(true);
+
+    // 질문이 이름으로 가리키는 사건을 먼저 찾습니다 (사건명 경로).
+    $incident_rows = graphrag_incident_rows($client, $query, $t0 + 15.0);
+    $incident_names = array_values(array_unique(array_map(fn($r) => $r['기준인물'], $incident_rows)));
+
+    $ner = graphrag_detect_entities($query);
+    if (!$ner['route_graph'] || empty($ner['entities'])) {
+        return ['rows' => $incident_rows, 'entities' => $incident_names];
     }
 
     // 개체별 탐색 (최대 3개 개체, 결과 25행 또는 15초에서 중단)
-    $all_rows = [];
-    $t0 = microtime(true);
+    $all_rows = $incident_rows;
     foreach (array_slice($ner['entities'], 0, 3) as $entity) {
         $all_rows = array_merge($all_rows, graphrag_run_multihop($client, $entity, $t0 + 15.0));
         if (count($all_rows) >= 25 || microtime(true) - $t0 > 15.0) break;
@@ -489,13 +609,15 @@ function graphrag_collect_rows(string $query): array {
     $dedup = [];
     $unique_rows = [];
     foreach ($all_rows as $r) {
-        $key = sha1($r['연관인물'] . '|' . $r['사건이름']);
+        $key = sha1($r['연관인물'] . '|' . $r['사건이름'] . '|' . ($r['공통사건'] ?? ''));
         if (!isset($dedup[$key])) {
             $dedup[$key] = true;
             $unique_rows[] = $r;
         }
     }
-    // 발생일자 오름차순 (날짜 없는 행은 뒤로)
+    // The incident rows come first in the list, so the cut to 25 keeps them; the kept rows are then
+    // put in date order (발생일자 오름차순, 날짜 없는 행은 뒤로).
+    $unique_rows = array_slice($unique_rows, 0, 25);
     usort($unique_rows, function($a, $b) {
         $da = trim((string)($a['발생일자'] ?? ''));
         $db = trim((string)($b['발생일자'] ?? ''));
@@ -504,7 +626,8 @@ function graphrag_collect_rows(string $query): array {
         if ($db === '') return -1;
         return strcmp($da, $db);
     });
-    return ['rows' => array_slice($unique_rows, 0, 25), 'entities' => $ner['entities']];
+    return ['rows' => $unique_rows,
+            'entities' => array_values(array_unique(array_merge($incident_names, $ner['entities'])))];
 }
 
 /**
@@ -1392,6 +1515,7 @@ function handle_action_explain() {
                 foreach (['연관인물', '사건이름', '발생일자', '공통사건', '기준인물'] as $k) {
                     $clean[$k] = docent_sanitize_text((string)($row[$k] ?? ''), 200, false);
                 }
+                $clean['유형'] = in_array($row['유형'] ?? '', ['incident', 'related'], true) ? $row['유형'] : '';
                 $clean['근거'] = docent_record_keys($row['근거'] ?? []);
                 $clean_rows[] = $clean;
             }

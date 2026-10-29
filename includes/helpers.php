@@ -303,7 +303,9 @@ function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_cha
 
         $concept = trim((string)($e['concept'] ?? ''));
         $entity_attr = htmlspecialchars($concept ?: $doc, ENT_QUOTES, 'UTF-8');
-        $id_attr = 'g_' . ($idx + 1);
+        // Cite a graph fact by the incident it concerns, which a reader can look up, not by a block label.
+        $id_attr = preg_match('/사건:\s*([^\n|]+)/u', (string)($e['text'] ?? ''), $sm) && trim($sm[1]) !== ''
+            ? htmlspecialchars(trim($sm[1]), ENT_QUOTES, 'UTF-8') : 'g_' . ($idx + 1);
 
         $text = normalize_whitespace_text($e['text'] ?? '');
         $text = preg_replace('/\b(n[a-f0-9]{10,}|[a-z]_\d{4,})\b/u', '', $text);

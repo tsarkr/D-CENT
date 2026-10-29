@@ -61,6 +61,9 @@ export보다 **먼저** 해야 합니다. PostgreSQL 표와 Neo4j 그래프를 �
 - [ ] `--limit 10`으로 시범 실행: 생성 실패가 없는지, 실패하면 answers.json의 `[Error: …]`에 서버 오류 내용이 남는지 확인
 - [ ] `PHP_CLI_SERVER_WORKERS=4`를 빼면 `php -S`가 요청을 하나씩만 처리해, 웹 화면처럼 동시에 보내는 서사 요청이 다른 요청 뒤에서 기다리다 20초 제한에 걸립니다
 - [ ] 평가 중에는 코드를 고치지 않습니다 (`php -S`는 요청마다 파일을 다시 읽으므로 실행 중 수정이 그대로 섞입니다)
+- [ ] 10월 28일 2차 실행(`2026-10-28_132047_939870`)도 시범 실행입니다. 그 뒤 사건명 경로, 서사 진술의 기록 ID 인용,
+      재순위화 CPU 실행이 들어갔습니다 (논문 평가 절의 '시범 실행' 문단).
+- [ ] curated 기준 사실: `evaluation/dataset/validation/curated_review.xlsx`에서 채택·수정·삭제를 정한 뒤 benchmark.json에 반영
 - [ ] `python -m evaluation run` 2회 (각각 결과 폴더가 생김)
 - [ ] `python -m evaluation report RUN1 RUN2` → `report.md`, `table_main.tex`, `table_by_category.tex`
 - [ ] `python -m evaluation judge` (문맥 정밀도, Ollama 필요)

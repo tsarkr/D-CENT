@@ -375,7 +375,9 @@ def _rerank(query: str, candidates: list[dict[str, Any]], reranker: str) -> list
                 "재순위화에는 'sentence-transformers'가 필요합니다. requirements.txt를 설치하거나 "
                 "--reranker none 으로 실행하세요."
             ) from exc
-        _STATE["cross_encoder"] = CrossEncoder(RERANK_MODEL)
+        # CPU by default: on Apple silicon the MPS pool is shared with other processes (Ollama) and a
+        # long run ran out of it; RERANK_DEVICE=mps or cuda selects an accelerator explicitly.
+        _STATE["cross_encoder"] = CrossEncoder(RERANK_MODEL, device=setting("RERANK_DEVICE", "cpu"))
     scores = _STATE["cross_encoder"].predict([(query, c["text"]) for c in candidates])
     order = np.argsort(-np.asarray(scores))
     return [candidates[i] for i in order]
