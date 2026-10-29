@@ -419,7 +419,10 @@ function graphrag_incident_rows(object $client, string $query, ?float $deadline 
                 OPTIONAL MATCH (d:Document)-[:P70_documents]->(e)
                 WITH e, [x IN collect(DISTINCT d.원천테이블 + '-' + d.원천rowid) WHERE x IS NOT NULL][0..3] AS docs
                 OPTIONAL MATCH (e)-[r:P14_carried_out_by]-(p:Person)
-                WITH e, docs, collect(DISTINCT {person: coalesce(p.명칭, p.name), sources: coalesce(r.sources, [])[0..2]})[0..12] AS people
+                WITH e, docs, p, r, any(s IN coalesce(r.sources, []) WHERE s STARTS WITH 'raw_event_info') AS in_register
+                ORDER BY in_register DESC
+                WITH e, docs, collect({person: coalesce(p.명칭, p.name), reading: coalesce(p.한글독음, p.한글명칭),
+                                       sources: coalesce(r.sources, [])[0..2]})[0..30] AS people
                 OPTIONAL MATCH (e)-[:관련사건]-(o:Event)
                 RETURN docs, people,
                        collect(DISTINCT {name: coalesce(o.사건명, o.name), date: o.날짜})[0..3] AS related",
@@ -431,11 +434,19 @@ function graphrag_incident_rows(object $client, string $query, ?float $deadline 
         foreach ($res as $rec) {
             $docs = docent_record_keys($rec->get('docs'));
             $people = 0;
+            $seen_people = [];
+            // Persons the register lists for the incident come first (ORDER BY in_register). A Hanja name is
+            // shown with its Hangul reading, and the Hanja and Hangul nodes of one person are counted once.
             foreach ((array)(is_object($rec->get('people')) ? $rec->get('people')->toArray() : $rec->get('people')) as $pp) {
                 $pp = is_object($pp) && method_exists($pp, 'toArray') ? $pp->toArray() : (array)$pp;
                 $person = trim((string)($pp['person'] ?? ''));
                 if ($person === '') continue;
-                $people++;
+                $reading = trim((string)($pp['reading'] ?? ''));
+                $key = $reading !== '' ? $reading : $person;
+                if (isset($seen_people[$key])) continue;
+                $seen_people[$key] = true;
+                if ($reading !== '' && $reading !== $person && preg_match('/\p{Han}/u', $person)) $person = "{$person}({$reading})";
+                if (++$people > 12) break;
                 $keys = docent_record_keys($pp['sources'] ?? []);
                 $rows[] = ['연관인물' => $person, '사건이름' => $inc['name'], '발생일자' => $inc['date'], '공통사건' => '',
                            '기준인물' => $inc['name'], '근거' => $keys ?: $docs, '유형' => 'incident'];
@@ -615,17 +626,23 @@ function graphrag_collect_rows(string $query): array {
             $unique_rows[] = $r;
         }
     }
-    // The incident rows come first in the list, so the cut to 25 keeps them; the kept rows are then
-    // put in date order (발생일자 오름차순, 날짜 없는 행은 뒤로).
+    // Statements about the incidents the question names come first, then the others; each group is in
+    // date order (발생일자 오름차순, 날짜 없는 행은 뒤로). The narrative share of the context budget is
+    // cut from the end, so the incident statements are the last to be dropped.
     $unique_rows = array_slice($unique_rows, 0, 25);
-    usort($unique_rows, function($a, $b) {
+    $by_date = function($a, $b) {
         $da = trim((string)($a['발생일자'] ?? ''));
         $db = trim((string)($b['발생일자'] ?? ''));
         if ($da === $db) return 0;
         if ($da === '') return 1;
         if ($db === '') return -1;
         return strcmp($da, $db);
-    });
+    };
+    $named = array_values(array_filter($unique_rows, fn($r) => in_array($r['유형'] ?? '', ['incident', 'related'], true)));
+    $other = array_values(array_filter($unique_rows, fn($r) => !in_array($r['유형'] ?? '', ['incident', 'related'], true)));
+    usort($named, $by_date);
+    usort($other, $by_date);
+    $unique_rows = array_merge($named, $other);
     return ['rows' => $unique_rows,
             'entities' => array_values(array_unique(array_merge($incident_names, $ner['entities'])))];
 }

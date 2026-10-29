@@ -22,13 +22,15 @@ $client = new FakeClient([
      new Rec(['id' => 'E1', 'name' => '3월 1일 평남 평양부 독립선언서 배포', 'date' => '1919-03-01']),
      new Rec(['id' => 'E9', 'name' => '평양부 독립선언서 배포', 'date' => '1919-03-01'])],
     [new Rec(['docs' => ['raw_source_info-10'],
-              'people' => [['person' => '김선두', 'sources' => ['raw_event_info-5']], ['person' => null, 'sources' => []]],
+              'people' => [['person' => '金善斗', 'reading' => '김선두', 'sources' => ['raw_event_info-5']],
+                           ['person' => '김선두', 'reading' => '김선두', 'sources' => ['raw_event_info-5']],
+                           ['person' => null, 'reading' => null, 'sources' => []]],
               'related' => [['name' => '3월 2일 전후 평남 평양부 격문 배포', 'date' => '1919-03-02']]])],
     [new Rec(['docs' => ['raw_source_info-11'], 'people' => [], 'related' => []])],
 ]);
 $rows = graphrag_incident_rows($client, "'3월 1일 평남 평양부 독립선언서 배포'와 '3월 1일 평남 평양부 독립선언식 시위'의 관련 인물은?");
-check(count($rows) === 3, 'one participant, one related incident, one incident without persons');
-check($rows[0]['연관인물'] === '김선두' && $rows[0]['근거'] === ['raw_event_info-5'], 'participant row keeps its attesting record');
+check(count($rows) === 3, 'one participant (Hanja and Hangul nodes counted once), one related incident, one incident without persons');
+check($rows[0]['연관인물'] === '金善斗(김선두)' && $rows[0]['근거'] === ['raw_event_info-5'], 'Hanja name with its reading, attesting record kept');
 check($rows[1]['유형'] === 'related' && $rows[1]['공통사건'] === '3월 1일 평남 평양부 독립선언식 시위', 'related incident row');
 check($rows[2]['연관인물'] === '' && $rows[2]['근거'] === ['raw_source_info-11'], 'incident without persons cites its documents');
 check(!in_array('평양부 독립선언서 배포', array_column($rows, '사건이름'), true), 'name contained in a longer match is dropped');
