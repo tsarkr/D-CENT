@@ -52,7 +52,7 @@ def _is_negative(text: str) -> bool:
     return bool(re.search(
         r"지\s*않|지\s*못|아니[다었며라고]|아닌|아닙니|아님|없[다습는었음으이고]|확인되지|확인할\s*수|찾을\s*수|"
         r"찾아볼\s*수|단정할\s*수|어렵|불가능|불분명|부재|무관(?!학교)|허위|허구|사실무근|모순|상반|배치(?:되|됩)|범위를\s*벗어|"
-        r"사실과\s*다르|근거[가는]?\s*없|\b(?:not|never|cannot|unconfirmed|false)\b", text, re.I))
+        r"사실과\s*다[르릅]|근거[가는]?\s*없|\b(?:not|never|cannot|unconfirmed|false)\b", text, re.I))
 
 
 # Version of the automatic answer scores; `report --rescore` rewrites scores.csv with the current one.

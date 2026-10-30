@@ -50,6 +50,7 @@ class MetricsSafety(unittest.TestCase):
         self.assertEqual(score('이동휘가 아우내 장터 시위를 기획하고 지휘했다는 기록은 확인되지 않는다.'), 0)
         self.assertEqual(score('### 이동휘의 아우내 장터 시위 지휘 여부'), 0)
         self.assertEqual(score('이동휘는 연해주에서 무장투쟁을 지휘했다.'), 0)
+        self.assertEqual(score('이동휘가 아우내 장터 시위 현장에서 지휘했다는 내용은 사실과 다릅니다.'), 0)
         self.assertGreater(score('이동휘가 아우내 장터 시위를 직접 기획하고 지휘했다.'), 0)
 
     def test_copied_evidence_tags_become_citations(self):
