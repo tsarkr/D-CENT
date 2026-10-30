@@ -3,6 +3,9 @@
   python -m evaluation dataset             validate dataset/questions.json -> dataset/benchmark.json
   python -m evaluation dataset --generate  regenerate the template questions first (keeps curated and
                                            third-party questions; merges dataset/third_party/*.json)
+  python -m evaluation dataset --holdout   generate a held-out set -> dataset/holdout/benchmark.json:
+                                           template questions over incidents that no question of
+                                           dataset/benchmark.json uses (the development set)
 
 Validation (applied to template questions; other sources are only checked for duplicates).
 A question FAILS when
@@ -33,7 +36,10 @@ from typing import Any, Callable
 from pipeline.config import get_pg_connection
 from pipeline.text import translate_hanja_name
 
-from evaluation.common import BENCHMARK, QUESTIONS, THIRD_PARTY_DIR, VALIDATION_DIR, add_sheet, new_workbook
+from evaluation.common import BENCHMARK, DATASET_DIR, QUESTIONS, THIRD_PARTY_DIR, VALIDATION_DIR, add_sheet, new_workbook
+
+HOLDOUT_DIR = DATASET_DIR / "holdout"   # held-out questions: incidents unused by the development benchmark
+HOLDOUT_SEED = 2026
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
@@ -400,9 +406,26 @@ def load_third_party(path: Path) -> list[dict[str, Any]]:
     return items
 
 
-def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[Path] | None = None) -> list[dict[str, Any]]:
+def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[Path] | None = None,
+                               exclude_titles: set[str] | None = None, seed: int | None = None,
+                               keep_curated: bool = True, id_prefix: str = "Q",
+                               person_bridge: bool = False) -> list[dict[str, Any]]:
+    """Template questions from the event register.
+
+    For a held-out set, ``exclude_titles`` removes every incident a development question names,
+    ``seed`` shuffles the order in which incidents are considered for multi-hop and false-premise
+    questions (diffusion pairs stay in date order within a province), and hand-written questions
+    are not carried over.
+
+    ``person_bridge`` adds a second multi-hop template when the register's related-incident links
+    run out: two incidents in the same province that share a recorded person.
+    """
     events = load_events_from_pg()
     ev_by_id = {e["id"]: e for e in events}
+    excluded = exclude_titles or set()
+    order = list(events)
+    if seed is not None:
+        random.Random(seed).shuffle(order)
     # Every generated question is checked with the validation rules before it is kept,
     # so that `dataset --generate` yields questions that pass validation.
     event_index = load_event_index()
@@ -422,7 +445,7 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
 
     # 1. Keep hand-written questions (authors' and third-party); template items are regenerated.
     existing = []
-    if QUESTIONS.exists():
+    if keep_curated and QUESTIONS.exists():
         try:
             existing = json.loads(QUESTIONS.read_text(encoding="utf-8"))
         except Exception:
@@ -460,15 +483,15 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
     # Category 1: Multi-hop Chaining (연계 사건 간 인과 및 주동자 추론)
     # -------------------------------------------------------------------------
     mh_count = 0
-    for ev in events:
+    for ev in order:
         if mh_count >= target_mh:
             break
-        if not ev["related_event_ids"] or not ev["persons"]:
+        if not ev["related_event_ids"] or not ev["persons"] or ev["title"] in excluded:
             continue
 
         for r_id in ev["related_event_ids"]:
             target_ev = ev_by_id.get(r_id)
-            if not target_ev or not target_ev["persons"] or target_ev["id"] == ev["id"]:
+            if not target_ev or not target_ev["persons"] or target_ev["id"] == ev["id"] or target_ev["title"] in excluded:
                 continue
             # Trap subjects must not be recorded participants of the event the trap places them in.
             outsider_a = next((p for p in ev["persons"] if p not in target_ev["persons"]), None)
@@ -479,7 +502,7 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             # Multi-hop between ev and target_ev
             p1_str = ", ".join(ev["persons"][:3])
             p2_str = ", ".join(target_ev["persons"][:3])
-            q_id = f"Q_MH_{len(generated) + 1:02d}"
+            q_id = f"{id_prefix}_MH_{len(generated) + 1:02d}"
             query_text = (
                 f"'{ev['title']}'(발생지: {ev['place']}){particle(ev['title'], '과', '와')} 이와 관련된 사건으로 기록된 '{target_ev['title']}'(발생지: {target_ev['place']})에 "
                 f"각각 관련 인물로 기록된 사람은 누구이며, 두 사건은 기록에서 어떻게 연결되어 있는가?"
@@ -512,6 +535,73 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             mh_count += 1
             break
 
+    # Multi-hop, second template: two incidents in one province linked by a shared recorded person.
+    # The question asks only what the records say (the name recorded in both), not that it is one person.
+    if person_bridge and mh_count < target_mh:
+        by_person: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for ev in events:
+            if ev["persons"] and ev["place"] and ev["title"] not in excluded:
+                for person in dict.fromkeys(ev["persons"]):
+                    by_person[(ev["place"].split()[0], person)].append(ev)
+        for ev in order:
+            if mh_count >= target_mh:
+                break
+            if not ev["persons"] or not ev["place"] or ev["title"] in excluded:
+                continue
+            prov = ev["place"].split()[0]
+            partner = None
+            for person in dict.fromkeys(ev["persons"]):
+                for other in by_person.get((prov, person), []):
+                    if other["id"] == ev["id"] or other["title"] == ev["title"]:
+                        continue
+                    if tuple(sorted((ev["title"], other["title"]))) in seen_pairs:
+                        continue
+                    partner = other
+                    break
+                if partner:
+                    break
+            if not partner:
+                continue
+            shared = [p for p in dict.fromkeys(ev["persons"]) if p in partner["persons"]]
+            only_a = [p for p in ev["persons"] if p not in shared]
+            only_b = [p for p in partner["persons"] if p not in shared]
+            # Trap subjects: recorded in neither incident (a person of another incident in the province).
+            pool = [person for (pv, person) in by_person if pv == prov and person not in ev["persons"] and person not in partner["persons"]]
+            if len(pool) < 2:
+                continue
+            rng_trap = random.Random(f"{ev['id']}-{partner['id']}")
+            outsider_a, outsider_b = rng_trap.sample(pool, 2)
+            q_id = f"{id_prefix}_MH_{len(generated) + 1:02d}"
+            query_text = (
+                f"'{ev['title']}'(발생지: {ev['place']}){particle(ev['title'], '과', '와')} '{partner['title']}'(발생지: {partner['place']})에 "
+                f"모두 관련 인물로 기록된 사람은 누구이며, 각 사건에 그 밖에 관련 인물로 기록된 사람이 있다면 누구인가?"
+            )
+            if query_text in seen_queries:
+                continue
+            item = {
+                "id": q_id,
+                "category": "Multi-hop Chaining",
+                "source": "template",
+                "template": "person_bridge",
+                "query": query_text,
+                "hops": 2,
+                "target_entities": list(set([ev["title"][:15], partner["title"][:15], ev["place"].split()[-1], partner["place"].split()[-1]] + shared[:2])),
+                "gold_facts": [
+                    f"{', '.join(shared[:3])}{'' if len(shared) <= 3 else ' 등'}의 이름이 두 사건 모두에 관련 인물로 기록되어 있음",
+                    *([f"{ev['title']}의 관련 인물로 {', '.join(only_a[:3])} 등이 기록되어 있음"] if only_a else []),
+                    *([f"{partner['title']}의 관련 인물로 {', '.join(only_b[:3])} 등이 기록되어 있음"] if only_b else []),
+                ],
+                "negative_traps": [
+                    f"{with_josa(outsider_a)} {partner['place']}의 {partner['title']} 현장을 직접 지휘했다",
+                    f"{with_josa(outsider_b)} {ev['title']}의 총책임자로 체포되었다",
+                ],
+            }
+            if not accept(item, tuple(sorted((ev["title"], partner["title"])))):
+                continue
+            generated.append(item)
+            seen_queries.add(query_text)
+            mh_count += 1
+
     # -------------------------------------------------------------------------
     # Category 2: Spatial-Temporal Diffusion (시공간 확산 질의)
     # -------------------------------------------------------------------------
@@ -519,7 +609,7 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
     # Group events by broad region / province
     regions = {}
     for ev in events:
-        if not ev["persons"] or not ev["start_date"]:
+        if not ev["persons"] or not ev["start_date"] or ev["title"] in excluded:
             continue
         prov = ev["place"].split()[0] if ev["place"] else "기타"
         if prov not in regions:
@@ -546,7 +636,7 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
         m1, m2 = int(e1["start_date"][5:7]), int(e2["start_date"][5:7])
         period = f"1919년 {m1}월" if m1 == m2 else "1919년"
 
-        q_id = f"Q_ST_{len(generated) + 1:02d}"
+        q_id = f"{id_prefix}_ST_{len(generated) + 1:02d}"
         query_text = (
             f"{period} {prov} 지역의 '{e1['title']}'({e1['start_date']}){particle(e1['title'], '과', '와')} '{e2['title']}'({e2['start_date']}){particle(e2['title'], '은', '는')} "
             f"어떤 순서로 어디에서 일어났으며, 각 시위에 관련 인물로 기록된 사람은 누구인가?"
@@ -595,10 +685,10 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
         ("여운형", "상하이 신한청년당", "파리강화회의 대표 파견")
     ]
 
-    for ev in events:
+    for ev in order:
         if zc_count >= target_zc:
             break
-        if not ev["persons"] or not ev["place"]:
+        if not ev["persons"] or not ev["place"] or ev["title"] in excluded:
             continue
         real_leaders = ", ".join(ev["persons"][:3])
         # Pair the event with a well-known figure who is not recorded for it (try each in turn).
@@ -606,7 +696,7 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             fig_name, fig_loc, _ = famous_figures[(zc_count + offset) % len(famous_figures)]
             if fig_name in ev["persons"] or fig_loc in ev["place"]:
                 continue
-            q_id = f"Q_ZC_{len(generated) + 1:02d}"
+            q_id = f"{id_prefix}_ZC_{len(generated) + 1:02d}"
             query_text = (
                 f"{with_josa(fig_name)} {ev['start_date'] if ev['start_date'] else '1919년 3월'} {ev['place']}에서 일어난 "
                 f"'{ev['title']}' 현장에서 군중을 직접 인솔하며 만세 시위를 지휘했는가?"
@@ -650,9 +740,37 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
     print(f"   범주별: {dict(by_category)}")
     if len(generated) < target_count:
         print(f"⚠️ 목표 {target_count}건에 미달했습니다 (템플릿을 채울 사건 조합 부족).")
-    if not by_source.get("third_party"):
+    if keep_curated and not by_source.get("third_party"):
         print("⚠️ 제3자 출제 문항이 없습니다. --third-party 로 외부 출제 파일을 병합하세요.")
     return generated
+
+
+def development_titles() -> set[str]:
+    """Incident names the development benchmark (dataset/benchmark.json) quotes in its questions."""
+    items = json.loads(BENCHMARK.read_text(encoding="utf-8"))
+    return {t.strip() for item in items for t in re.findall(r"'([^'\n]{2,120})'", item["query"])}
+
+
+def build_holdout(target_count: int = 115, seed: int = HOLDOUT_SEED) -> int:
+    """Generate and validate the held-out set into dataset/holdout/ (the development set is untouched)."""
+    if not BENCHMARK.exists():
+        raise SystemExit(f"{BENCHMARK}가 없습니다. 개발 세트를 먼저 만드세요.")
+    excluded = development_titles()
+    print(f"🔒 보류 세트: 개발 세트가 쓴 사건 {len(excluded)}개를 제외하고 생성 (seed={seed})")
+    questions = generate_benchmark_queries(target_count=target_count, exclude_titles=excluded, seed=seed,
+                                           keep_curated=False, id_prefix="H", person_bridge=True)
+    used = {t for item in questions for t in re.findall(r"'([^'\n]{2,120})'", item["query"])}
+    overlap = used & excluded
+    if overlap:
+        raise SystemExit(f"보류 세트가 개발 세트의 사건을 씁니다: {sorted(overlap)[:5]}")
+    HOLDOUT_DIR.mkdir(parents=True, exist_ok=True)
+    holdout_questions = HOLDOUT_DIR / "questions.json"
+    holdout_questions.write_text(json.dumps(questions, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"💾 {holdout_questions} ({len(questions)}문항)")
+    validate_dataset(holdout_questions, VALIDATION_DIR / "holdout", seed=42, save_passed=HOLDOUT_DIR / "benchmark.json")
+    write_composition_table(json.loads((HOLDOUT_DIR / "benchmark.json").read_text(encoding="utf-8")),
+                            VALIDATION_DIR / "holdout" / "benchmark_table.tex")
+    return 0
 
 
 def build(generate: bool = False) -> int:

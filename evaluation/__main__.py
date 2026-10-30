@@ -1,7 +1,10 @@
 """D-CENT evaluation.
 
   python -m evaluation dataset [--generate]     validate questions -> dataset/benchmark.json
-  python -m evaluation run [--quick | --limit N] [--systems all|main|ablations|a,b] [--resume]
+  python -m evaluation dataset --holdout [--seed N]
+                                                held-out set (incidents unused by the development set)
+                                                -> dataset/holdout/benchmark.json
+  python -m evaluation run [--quick | --limit N] [--systems all|main|ablations|a,b] [--dataset PATH] [--resume]
                                                 run the systems, score, and write the report
   python -m evaluation report [RUN ...] [--rescore]
                                                 report of the latest run, or of several runs combined;
@@ -42,12 +45,16 @@ def main() -> int:
 
     p = sub.add_parser("dataset", help="validate (and optionally regenerate) the benchmark")
     p.add_argument("--generate", action="store_true", help="regenerate the template questions from the event register first")
+    p.add_argument("--holdout", action="store_true", help="generate the held-out set instead (dataset/holdout/)")
+    p.add_argument("--seed", type=int, default=None, help="seed for the held-out set (default 2026)")
+    p.add_argument("--count", type=int, default=115, help="questions to generate for the held-out set before validation (default 115, about 100 pass)")
 
     p = sub.add_parser("run", help="run the systems on the benchmark")
     p.add_argument("--quick", action="store_true", help="one question from each of three categories")
     p.add_argument("--limit", type=int, default=0, help="only the first N questions")
     p.add_argument("--systems", default="all", help="all (default), main, ablations, or comma-separated keys")
     p.add_argument("--resume", action="store_true", help="continue the latest unfinished run")
+    p.add_argument("--dataset", type=Path, default=None, help="question file (default: dataset/benchmark.json)")
 
     p = sub.add_parser("report", help="write the report of one or more runs")
     p.add_argument("runs", nargs="*")
@@ -67,6 +74,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "dataset":
+        if args.holdout:
+            from evaluation.benchmark import HOLDOUT_SEED, build_holdout
+            return build_holdout(args.count, HOLDOUT_SEED if args.seed is None else args.seed)
         from evaluation.benchmark import build
         return build(args.generate)
     if args.command == "run":
@@ -74,7 +84,7 @@ def main() -> int:
             parser.error("--quick과 --limit은 함께 쓸 수 없습니다.")
         from evaluation.report import report
         from evaluation.run import run
-        report([run(args.quick, args.limit, args.systems, resume=args.resume)])
+        report([run(args.quick, args.limit, args.systems, dataset=args.dataset, resume=args.resume)])
         return 0
     if args.command == "report":
         from evaluation.report import report
