@@ -636,15 +636,18 @@
     // (<SOURCE_EVIDENCE id="raw_source_info-12" .../>, <SOURCE_EVIDENCE id="g_3">incident</SOURCE_EVIDENCE>).
     // Keep what they cite: the record key, else the incident name; drop block labels (g_3, graphrag_1).
     function normalizeEvidenceTags(text) {
-        return String(text)
+        const s = String(text);
+        if (!/SOURCE_EVIDENCE|(?:^|[^A-Za-z0-9_])(?:g|graphrag)_\d+/i.test(s)) return s;
+        return s
             .replace(/<SOURCE_EVIDENCE\b([^<>]*?)\/?>(?:([^<>]{1,200})<\/SOURCE_EVIDENCE>)?/gi, (whole, attrs, inner) => {
                 const id = ((attrs || '').match(/\bid\s*=\s*"?([^"\s>\/]+)/) || [])[1] || '';
                 if (/^raw_/i.test(id)) return id;
                 return (inner || '').trim() || id;
             })
-            .replace(/<\/?SOURCE_EVIDENCE[^>]*>/gi, '')
-            .replace(/(^|[^A-Za-z0-9_])(?:g_\d+(?:\s*~\s*(?:g_)?\d+)?|graphrag_\d+(?:\s*~\s*\d+)?)(?![A-Za-z0-9_])/g, '$1')
-            .replace(/\(\s*(?:[,~]\s*)*\)/g, '')
+            .replace(/<\/?SOURCE_EVIDENCE[^>]*>/gi, '\uFFF0')
+            .replace(/(^|[^A-Za-z0-9_])(?:g_\d+(?:\s*~\s*(?:g_)?\d+)?|graphrag_\d+(?:\s*~\s*\d+)?)(?![A-Za-z0-9_])/g, '$1\uFFF0')
+            .replace(/\(\s*(?:[,~\uFFF0]\s*)+\)/g, '')
+            .replace(/\uFFF0/g, '')
             .replace(/\(\s*,\s*/g, '(').replace(/\s*,\s*\)/g, ')').replace(/,\s*,/g, ',')
             .replace(/[ \t]+([.,。])/g, '$1');
     }
