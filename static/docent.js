@@ -827,12 +827,22 @@
             logSystem(tr(`의도: ${intentResult.intent}, KW: ${kws.join(', ')}, 감지언어: ${detectedLang}`, `Intent: ${intentResult.intent}, KW: ${kws.join(', ')}, language: ${detectedLang}`));
 
             let gd;
-            let analysis, analyzed;
+            const fallbackAnalysis = {
+                intent_type: serverIntent,
+                search_keywords: kws,
+                analyzed_intent_ko: term,
+                response_language: detectedLang,
+                intent: serverIntent,
+                keywords: kws,
+                focus: '종합',
+                explanation: term
+            };
+            const analyzePromise = api('analyze',{term, search_strategy: serverIntent}).catch(err => {
+                logSystem(`⚠️ ${tr('analyze 실패', 'analyze failed')}: ${err.message}`);
+                return null;
+            });
+            let analyzed, analysis;
             if (detectedLang === 'ko') {
-                const analyzePromise = api('analyze',{term, search_strategy: serverIntent}).catch(err => {
-                    logSystem(`⚠️ ${tr('analyze 실패 (그래프 탐색은 계속)', 'analyze failed (graph search continues)')}: ${err.message}`);
-                    return null;
-                });
                 gd = await api('graph',{
                     term,
                     keywords: JSON.stringify(kws),
@@ -840,31 +850,10 @@
                     search_strategy: serverIntent
                 });
                 analyzed = await analyzePromise;
-                analysis = analyzed || {
-                    intent_type: serverIntent,
-                    search_keywords: kws,
-                    analyzed_intent_ko: term,
-                    response_language: detectedLang,
-                    intent: serverIntent,
-                    keywords: kws,
-                    focus: '종합',
-                    explanation: term
-                };
+                analysis = analyzed || fallbackAnalysis;
             } else {
-                analyzed = await api('analyze',{term, search_strategy: serverIntent}).catch(err => {
-                    logSystem(`⚠️ ${tr('analyze 실패', 'analyze failed')}: ${err.message}`);
-                    return null;
-                });
-                analysis = analyzed || {
-                    intent_type: serverIntent,
-                    search_keywords: kws,
-                    analyzed_intent_ko: term,
-                    response_language: detectedLang,
-                    intent: serverIntent,
-                    keywords: kws,
-                    focus: '종합',
-                    explanation: term
-                };
+                analyzed = await analyzePromise;
+                analysis = analyzed || fallbackAnalysis;
                 const analyzedKeywords = Array.isArray(analysis.search_keywords) && analysis.search_keywords.length > 0
                     ? analysis.search_keywords
                     : (Array.isArray(analysis.keywords) && analysis.keywords.length > 0 ? analysis.keywords : kws);

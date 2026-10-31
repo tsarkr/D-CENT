@@ -12,7 +12,6 @@ to the records. 한국어: [README_ko.md](./README_ko.md).
 | [docent.php](./docent.php), [includes/](./includes/), [static/](./static/) | Web docent (query analysis, Cypher generation, narrative paths, two-stage generation) | PHP server |
 | [evaluation/](./evaluation/) | Evaluation: benchmark, system comparison, expert judgment, report | `python -m evaluation` |
 | [mcp_server.py](./mcp_server.py) | Read-only database tools for MCP clients | `python mcp_server.py` |
-| [docent_cli.php](./docent_cli.php) | The docent's processing of one question in the terminal (debugging) | `php docent_cli.php "question" en` |
 | [Latex/](./Latex/) | Manuscript | |
 
 ```text
@@ -304,8 +303,8 @@ to `dataset/benchmark.json`; the validation workbook with a 30% review sample an
 `dataset/validation/`. Reference facts of template questions state only what the event register records (persons,
 dates, places, links between related incidents, and the order given by the dates).
 `dataset --generate` first regenerates the template questions from the event register (curated and
-third-party questions are kept) and merges external questions from `dataset/third_party/*.json`, in the
-format of [third_party_template.json](./evaluation/dataset/third_party_template.json) with `author` filled in.
+third-party questions are kept) and merges external questions from `dataset/third_party/*.json` (with
+`author`, `question`, `category`, and `reference_facts` filled in).
 
 ### Expert judgments
 

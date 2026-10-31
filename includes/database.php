@@ -254,7 +254,3 @@ function fetch_pg_rows_for_refs($pdo, $refs, $tables_meta) {
     }
     return $out;
 }
-
-function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
-    return fetch_pg_rows_for_names($pdo, [$name], $tables_meta);
-}

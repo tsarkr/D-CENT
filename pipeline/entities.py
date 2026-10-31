@@ -13,7 +13,7 @@ import signal
 import sys
 from xml.etree import ElementTree as ET
 
-from pipeline.config import ENTITIES_CSV, ENTITIES_XLSX, OUTPUT_DIR, get_pg_connection
+from pipeline.config import ENTITIES_CSV, ENTITIES_XLSX, OUTPUT_DIR, get_pg_connection, table_has_column
 from pipeline.text import extract_ruby_parts, translate_hanja_name
 
 BIBLIOGRAPHY_PERSON_FIELDS = {
@@ -70,15 +70,7 @@ class LocalDocentEngine:
         self.interrupted = True
 
     def _table_has_column(self, table_name, column_name):
-        self.cur.execute(
-            """
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
-            LIMIT 1
-            """,
-            (table_name, column_name),
-        )
-        return self.cur.fetchone() is not None
+        return table_has_column(self.cur, table_name, column_name)
 
     def _ensure_tei_status_column(self, table_name):
         if not self._table_has_column(table_name, 'tei_status'):

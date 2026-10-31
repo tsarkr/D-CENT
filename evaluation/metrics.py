@@ -451,11 +451,6 @@ OVERALL = "Overall"
 SOURCE_ORDER = ["curated", "template", "third_party"]
 
 
-def load_records(csv_path: Path) -> list[dict[str, Any]]:
-    with csv_path.open(encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f))
-
-
 def _is_failed(record: dict[str, Any]) -> bool:
     return str(record.get("generation_failed", "")).strip().lower() in {"1", "true"}
 

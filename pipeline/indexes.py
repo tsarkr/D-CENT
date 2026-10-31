@@ -19,15 +19,9 @@ from __future__ import annotations
 import re
 
 
-from pipeline.config import get_pg_connection
+from pipeline.config import get_pg_connection, table_has_column
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _column_exists(cur, table: str, column: str) -> bool:
-    cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
-                "AND table_name = %s AND column_name = %s", (table, column))
-    return cur.fetchone() is not None
 
 
 def main() -> int:
@@ -41,7 +35,7 @@ def main() -> int:
     targets = [(t, "tei") for (t,) in cur.fetchall() if _IDENT.match(t)]
     for table, column in (("raw_event_info", "관련인물"), ("raw_source_info", "관련인물"),
                           ("tei_cidoc_mappings", "mapping_label")):
-        if _column_exists(cur, table, column):
+        if table_has_column(cur, table, column):
             targets.append((table, column))
 
     for table, column in targets:
@@ -63,7 +57,7 @@ def main() -> int:
         print(f"  index {index} on {table}.{row[0]}::text", flush=True)
         cur.execute(f'CREATE INDEX CONCURRENTLY IF NOT EXISTS "{index}" ON "{table}" (("{row[0]}"::text))')
         # rowid: document nodes point to records by (table, rowid)
-        if _column_exists(cur, table, "rowid"):
+        if table_has_column(cur, table, "rowid"):
             print(f"  index {table}_rowid on {table}.rowid", flush=True)
             cur.execute(f'CREATE INDEX CONCURRENTLY IF NOT EXISTS "{table}_rowid" ON "{table}" (rowid)')
     cur.close()

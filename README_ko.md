@@ -11,7 +11,6 @@
 | [docent.php](./docent.php), [includes/](./includes/), [static/](./static/) | 웹 도슨트 (질의 분석, Cypher 생성, 서사 경로, 2단계 생성) | PHP 서버 |
 | [evaluation/](./evaluation/) | 평가: 벤치마크, 시스템 비교, 전문가 평가, 리포트 | `python -m evaluation` |
 | [mcp_server.py](./mcp_server.py) | MCP 클라이언트용 읽기 전용 DB 도구 | `python mcp_server.py` |
-| [docent_cli.php](./docent_cli.php) | 도슨트 처리 과정을 터미널에서 확인 (디버깅) | `php docent_cli.php "질문" ko` |
 | [Latex/](./Latex/) | 논문 원고 | |
 
 ```text
@@ -296,8 +295,7 @@ context precision, 전문가 평가, 그래프 규모, 직접 확인할 항목(�
 씁니다. 검증 워크북(사람 검토용 30% 표본 포함)과 논문용 구성표 `benchmark_table.tex`는 `dataset/validation/`에 생깁니다.
 템플릿 문항의 기준 사실은 사건 대장에 기록된 것(관련 인물, 날짜, 장소, 관련 사건 연결, 날짜로 정해지는 순서)만 씁니다.
 `dataset --generate`는 사건 대장에서 템플릿 문항을 다시 만들고(저자·외부 출제 문항은 유지),
-`dataset/third_party/*.json`의 외부 출제 문항을 병합합니다. 형식은
-[third_party_template.json](./evaluation/dataset/third_party_template.json)을 따르며 `author`를 기입해야 합니다.
+`dataset/third_party/*.json`의 외부 출제 문항(`author`, `question`, `category`, `reference_facts` 기입)을 병합합니다.
 
 ### 전문가 평가
 

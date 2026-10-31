@@ -14,11 +14,10 @@ from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
 import pandas as pd
-import psycopg2
 from psycopg2.extras import execute_values
 from sqlalchemy import text
 
-from pipeline.config import ROOT, SOURCE_ID_COLUMNS, get_pg_engine, setting
+from pipeline.config import ROOT, SOURCE_ID_COLUMNS, get_pg_connection, get_pg_engine
 
 # ── Source files -> raw_* tables ──────────────────────────────────────────────
 
@@ -224,17 +223,8 @@ def load_sources() -> None:
 
 
 # ── Row-level TEI ─────────────────────────────────────────────────────────────
-DATA_DIR = str(ROOT / 'data')
-
-PGHOST = setting('PG_HOST', 'localhost')
-PGPORT = int(setting('PG_PORT', '5432'))
-PGUSER = setting('PG_USER', 'postgres')
-PGPASSWORD = setting('PG_PASSWORD', '')
-PGDATABASE = setting('PG_DATABASE', 'postgres')
 TEI_TABLES = os.getenv('TEI_TABLES', '').strip()
 TEI_TABLE_PREFIX = os.getenv('TEI_TABLE_PREFIX', 'raw_').strip()
-
-ENCODINGS = ['utf-8-sig', 'cp949', 'utf-16', 'euc-kr']
 
 TAGGABLE_COLS = {
     '사건명', '문서요약', '판결문', '판결문설명', '제목', '비고', '참고노트',
@@ -250,26 +240,6 @@ TABLE_TAGGABLE_COLS = {
 TABLE_ENTITY_TAGS = {
     'raw_detail_place': {'placeName'},
 }
-
-
-def qname(name):
-    # normalize filename -> table name
-    name = re.sub(r"\.[^.]+$", '', name)
-    name = re.sub(r"[^0-9a-zA-Z]+", '_', name)
-    return name.lower()
-
-
-def _read_csv_rows(path):
-    for enc in ENCODINGS:
-        try:
-            with open(path, newline='', encoding=enc, errors='replace') as fh:
-                reader = csv.DictReader(fh)
-                headers = reader.fieldnames or []
-                rows = list(reader)
-            return headers, rows
-        except Exception:
-            continue
-    return [], []
 
 
 def list_tables(conn):
@@ -549,7 +519,7 @@ def make_tei_for_row(table, rowid, row, headers, entities):
 
 
 def ensure_connection():
-    conn = psycopg2.connect(host=PGHOST, port=PGPORT, user=PGUSER, password=PGPASSWORD, dbname=PGDATABASE)
+    conn = get_pg_connection()
     conn.autocommit = True
     return conn
 

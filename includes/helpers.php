@@ -102,18 +102,7 @@ function _get_rel_label($rtype) {
         "P9_consists_of" => "기록 내 언급", "P134_was_continued_by" => "다음 언급",
         "P70_documents" => "기록함"
     ];
-    $en = [
-        "P14_carried_out_by" => "Performed/Participated", "P7_took_place_at" => "Location",
-        "ACTIVATED_AT" => "Activity place", "P152_has_parent" => "Family relation",
-        "foaf:knows" => "Comrade/Acquaintance", "foaf:member" => "Affiliated organization",
-        "P11_had_participant" => "Participant", "P108_has_produced" => "Created/Produced",
-        "P102_has_title" => "Title", "소속" => "Affiliation",
-        "P74_has_current_or_former_residence" => "Installed at", "P89_falls_within" => "Falls within",
-        "동일인물" => "Same Person", "sameAs" => "Same As", "owl:sameAs" => "Same As",
-        "P9_consists_of" => "Mention in record", "P134_was_continued_by" => "Next mention",
-        "P70_documents" => "Documents"
-    ];
-    return docent_is_english() ? ($en[$rtype] ?? $rtype) : ($ko[$rtype] ?? $rtype);
+    return $ko[$rtype] ?? $rtype;
 }
 
 // ── Evidence 중복 제거 추가 ──

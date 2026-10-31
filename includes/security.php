@@ -63,24 +63,6 @@ function docent_escape_lucene($term) {
     return $term;
 }
 
-function docent_decode_json_array($key, $max_items = 50, $max_len = 500) {
-    $raw = $_POST[$key] ?? '[]';
-    if (!is_string($raw)) return [];
-    $decoded = json_decode($raw, true);
-    if (!is_array($decoded)) return [];
-
-    $items = [];
-    foreach ($decoded as $item) {
-        if (is_array($item)) {
-            $item = json_encode($item, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
-        }
-        $val = docent_sanitize_text((string)$item, $max_len, false);
-        if ($val !== '') $items[] = $val;
-        if (count($items) >= $max_items) break;
-    }
-    return $items;
-}
-
 function docent_sanitize_json_list($value, $max_items = 50, $max_len = 500) {
     $decoded = is_array($value) ? $value : json_decode((string)$value, true);
     if (!is_array($decoded)) return [];
@@ -95,6 +77,10 @@ function docent_sanitize_json_list($value, $max_items = 50, $max_len = 500) {
         if (count($items) >= $max_items) break;
     }
     return $items;
+}
+
+function docent_decode_json_array($key, $max_items = 50, $max_len = 500) {
+    return docent_sanitize_json_list($_POST[$key] ?? '[]', $max_items, $max_len);
 }
 
 function docent_valid_identifier($value, $default = '') {

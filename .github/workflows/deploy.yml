@@ -5,8 +5,6 @@ on:
     branches: ["main"]
     paths:
       - "docent.php"
-      - "docent_eng.php"
-      - "docent_cli.php"
       - "docent.html"
       - "includes/**"
       - "static/**"
@@ -40,8 +38,6 @@ jobs:
       - name: Lint PHP files
         run: |
           php -l docent.php
-          php -l docent_eng.php
-          php -l docent_cli.php
           for f in includes/*.php; do
             php -l "$f"
           done
@@ -63,7 +59,7 @@ jobs:
       - name: Prepare deployment bundle
         run: |
           mkdir -p dist
-          cp docent.php docent_eng.php docent_cli.php composer.json composer.lock dist/
+          cp docent.php composer.json composer.lock dist/
           cp docent.html dist/index.html
           sed -i "s/?v=dev/?v=${GITHUB_SHA::7}/g" dist/index.html  # 배포마다 정적 파일 캐시 무효화
           cp -R includes static vendor dist/

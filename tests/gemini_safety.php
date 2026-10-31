@@ -7,7 +7,6 @@ use stdClass;
 $_SESSION = ['docent_csrf' => 'offline-test'];
 $settings = ['GEMINI_API_KEY' => 'offline-test', 'GEMINI_MODEL' => 'configured-model', 'DOCENT_EVAL_MODE' => '1'];
 function get_cfg($key, $default = '') { return $GLOBALS['settings'][$key] ?? $default; }
-function docent_t($ko, $en) { return $en; }
 function check($condition, $message) { if (!$condition) throw new RuntimeException($message); }
 $constants = ['CURLOPT_RETURNTRANSFER', 'CURLOPT_POST', 'CURLOPT_POSTFIELDS', 'CURLOPT_HTTPHEADER',
     'CURLOPT_CONNECTTIMEOUT', 'CURLOPT_TIMEOUT', 'CURLOPT_SSL_VERIFYPEER', 'CURLOPT_SSL_VERIFYHOST',

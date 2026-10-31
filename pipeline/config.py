@@ -118,6 +118,16 @@ def get_pg_connection(secrets: dict[str, Any] | None = None):
     )
 
 
+def table_has_column(cur, table: str, column: str) -> bool:
+    """Return True if ``public.<table>.<column>`` exists."""
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s LIMIT 1",
+        (table, column),
+    )
+    return cur.fetchone() is not None
+
+
 # ── Neo4j helpers ───────────────────────────────────────────────────────────
 
 def get_neo4j_config(secrets: dict[str, Any] | None = None) -> dict[str, str]:

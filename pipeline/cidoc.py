@@ -4,7 +4,7 @@ from rdflib import Graph, Literal, RDF, URIRef, Namespace
 from rdflib.namespace import RDFS, OWL
 
 
-from pipeline.config import CIDOC_TTL, OUTPUT_DIR, get_pg_connection
+from pipeline.config import CIDOC_TTL, OUTPUT_DIR, get_pg_connection, table_has_column
 from pipeline.text import extract_ruby_parts
 
 class CidocTimelineGenerator:
@@ -43,18 +43,7 @@ class CidocTimelineGenerator:
         return text
 
     def _table_has_column(self, table, column_name):
-        self.cur.execute(
-            """
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = %s
-              AND column_name = %s
-            LIMIT 1
-            """,
-            (table, column_name),
-        )
-        return self.cur.fetchone() is not None
+        return table_has_column(self.cur, table, column_name)
 
     def _build_sequential_timeline(self, target_graph, table, rowid, tei, event_uri):
         pers_blocks = re.findall(r'<persName\s+ref="([^"]+)"[^>]*>(.*?)</persName>', tei, flags=re.DOTALL)

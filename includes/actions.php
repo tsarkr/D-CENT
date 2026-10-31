@@ -14,7 +14,7 @@
  */
 function handle_action_analyze() {
     $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
-    $initial_focus = infer_focus($term, docent_is_english());
+    $initial_focus = infer_focus($term);
 
     // 다국어 통합 Query Analyzer 프롬프트
     $system_prompt = "# Role\n"
@@ -64,13 +64,13 @@ function handle_action_analyze() {
         $new_keywords = !empty($fallback_kws) ? $fallback_kws : [$term];
         $new_focus = $initial_focus;
         $new_intent_ko = $term;
-        $new_resp_lang = docent_is_english() ? 'en' : 'ko';
+        $new_resp_lang = 'ko';
     } else {
         $new_intent = $parsed['intent_type'] ?? ($search_strategy ?: 'ENTITY_SEARCH');
         $new_keywords = $parsed['search_keywords'] ?? [$term];
-        $new_focus = normalize_focus($parsed['focus'] ?? $initial_focus, false);
+        $new_focus = normalize_focus($parsed['focus'] ?? $initial_focus);
         $new_intent_ko = $parsed['analyzed_intent_ko'] ?? '검색어 기반 분석 수행';
-        $new_resp_lang = $parsed['response_language'] ?? (docent_is_english() ? 'en' : 'ko');
+        $new_resp_lang = $parsed['response_language'] ?? 'ko';
     }
 
     $output = [
@@ -353,16 +353,19 @@ function graphrag_run_multihop(object $client, string $entity_name, ?float $dead
     }
 
     // 최종 반환 시 발생일자(날짜) 오름차순 정렬 (ORDER BY 발생일자 ASC)
-    usort($results, function($a, $b) {
-        $da = trim((string)($a['발생일자'] ?? ''));
-        $db = trim((string)($b['발생일자'] ?? ''));
-        if ($da === $db) return 0;
-        if ($da === '') return 1;
-        if ($db === '') return -1;
-        return strcmp($da, $db);
-    });
+    usort($results, 'graphrag_compare_by_date');
 
     return $results;
+}
+
+/** Sort rows ascending by 발생일자, pushing empty dates to the end. */
+function graphrag_compare_by_date(array $a, array $b): int {
+    $da = trim((string)($a['발생일자'] ?? ''));
+    $db = trim((string)($b['발생일자'] ?? ''));
+    if ($da === $db) return 0;
+    if ($da === '') return 1;
+    if ($db === '') return -1;
+    return strcmp($da, $db);
 }
 
 /** At most this many incidents named in a question are expanded. */
@@ -630,18 +633,10 @@ function graphrag_collect_rows(string $query): array {
     // date order (발생일자 오름차순, 날짜 없는 행은 뒤로). The narrative share of the context budget is
     // cut from the end, so the incident statements are the last to be dropped.
     $unique_rows = array_slice($unique_rows, 0, 25);
-    $by_date = function($a, $b) {
-        $da = trim((string)($a['발생일자'] ?? ''));
-        $db = trim((string)($b['발생일자'] ?? ''));
-        if ($da === $db) return 0;
-        if ($da === '') return 1;
-        if ($db === '') return -1;
-        return strcmp($da, $db);
-    };
     $named = array_values(array_filter($unique_rows, fn($r) => in_array($r['유형'] ?? '', ['incident', 'related'], true)));
     $other = array_values(array_filter($unique_rows, fn($r) => !in_array($r['유형'] ?? '', ['incident', 'related'], true)));
-    usort($named, $by_date);
-    usort($other, $by_date);
+    usort($named, 'graphrag_compare_by_date');
+    usort($other, 'graphrag_compare_by_date');
     $unique_rows = array_merge($named, $other);
     return ['rows' => $unique_rows,
             'entities' => array_values(array_unique(array_merge($incident_names, $ner['entities'])))];
@@ -790,6 +785,26 @@ function generate_text_to_cypher(string $query): string {
     }
 }
 
+function _add_scalar_node(array &$nodes, string $raw_id, string $icon, array $labels, string $type, string $color, array $props): string {
+    $nid = 'n' . substr(sha1($raw_id), 0, 12);
+    if (!isset($nodes[$nid])) {
+        $nodes[$nid] = [
+            "id" => $nid,
+            "label" => "{$icon}\n" . mb_substr($raw_id, 0, 20),
+            "raw_id" => $raw_id,
+            "labels" => $labels,
+            "type" => $type,
+            "props" => $props,
+            "aliases" => [],
+            "color" => ["background" => $color, "border" => $color, "highlight" => ["background" => $color, "border" => "#333"]],
+            "shape" => "box",
+            "font" => ["color" => "#fff", "size" => 14, "multi" => true],
+            "borderWidth" => 2, "shadow" => true,
+        ];
+    }
+    return $nid;
+}
+
 /**
  * Text-to-Cypher 동적 쿼리 실행 및 결과 추출
  */
@@ -874,64 +889,22 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
         $p_nid = null; $e_nid = null; $l_nid = null;
 
         if ($person_name !== '') {
-            $p_nid = 'n' . substr(sha1($person_name), 0, 12);
-            if (!isset($nodes[$p_nid])) {
-                $nodes[$p_nid] = [
-                    "id" => $p_nid,
-                    "label" => "👤\n" . mb_substr($person_name, 0, 20),
-                    "raw_id" => $person_name,
-                    "labels" => ['Person', '인물'],
-                    "type" => '인물',
-                    "props" => ['명칭' => $person_name, 'name' => $person_name, 'description' => $desc_str],
-                    "aliases" => [],
-                    "color" => ["background" => "#2563EB", "border" => "#2563EB", "highlight" => ["background" => "#2563EB", "border" => "#333"]],
-                    "shape" => "box",
-                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
-                    "borderWidth" => 2, "shadow" => true
-                ];
-            }
+            $p_nid = _add_scalar_node($nodes, $person_name, "👤", ['Person', '인물'], '인물', "#2563EB",
+                ['명칭' => $person_name, 'name' => $person_name, 'description' => $desc_str]);
             $found_candidates[$person_name] = 6.0;
             $prefetch_names[] = $person_name;
         }
 
         if ($event_name !== '') {
-            $e_nid = 'n' . substr(sha1($event_name), 0, 12);
-            if (!isset($nodes[$e_nid])) {
-                $nodes[$e_nid] = [
-                    "id" => $e_nid,
-                    "label" => "🔥\n" . mb_substr($event_name, 0, 20),
-                    "raw_id" => $event_name,
-                    "labels" => ['Event', '사건'],
-                    "type" => '사건',
-                    "props" => ['사건명' => $event_name, 'title' => $event_name, '날짜' => $date_str],
-                    "aliases" => [],
-                    "color" => ["background" => "#DC2626", "border" => "#DC2626", "highlight" => ["background" => "#DC2626", "border" => "#333"]],
-                    "shape" => "box",
-                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
-                    "borderWidth" => 2, "shadow" => true
-                ];
-            }
+            $e_nid = _add_scalar_node($nodes, $event_name, "🔥", ['Event', '사건'], '사건', "#DC2626",
+                ['사건명' => $event_name, 'title' => $event_name, '날짜' => $date_str]);
             $found_candidates[$event_name] = 6.0;
             $prefetch_names[] = $event_name;
         }
 
         if ($place_name !== '') {
-            $l_nid = 'n' . substr(sha1($place_name), 0, 12);
-            if (!isset($nodes[$l_nid])) {
-                $nodes[$l_nid] = [
-                    "id" => $l_nid,
-                    "label" => "📍\n" . mb_substr($place_name, 0, 20),
-                    "raw_id" => $place_name,
-                    "labels" => ['Place', '장소'],
-                    "type" => '장소',
-                    "props" => ['명칭' => $place_name, 'name' => $place_name],
-                    "aliases" => [],
-                    "color" => ["background" => "#16A34A", "border" => "#16A34A", "highlight" => ["background" => "#16A34A", "border" => "#333"]],
-                    "shape" => "box",
-                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
-                    "borderWidth" => 2, "shadow" => true
-                ];
-            }
+            $l_nid = _add_scalar_node($nodes, $place_name, "📍", ['Place', '장소'], '장소', "#16A34A",
+                ['명칭' => $place_name, 'name' => $place_name]);
             $found_candidates[$place_name] = 5.0;
             $prefetch_names[] = $place_name;
         }
@@ -957,41 +930,27 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
 
         // 엣지 생성
         if ($p_nid && $e_nid) {
-            $edges[] = ["from" => $p_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
+            $edges[] = ["from" => $p_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => "수행/참여"];
         }
         if ($e_nid && $l_nid) {
-            $edges[] = ["from" => $e_nid, "to" => $l_nid, "type" => "P7_took_place_at", "label" => docent_t("발생 장소", "Location")];
+            $edges[] = ["from" => $e_nid, "to" => $l_nid, "type" => "P7_took_place_at", "label" => "발생 장소"];
         }
         if ($p_nid && $l_nid && !$e_nid) {
-            $edges[] = ["from" => $p_nid, "to" => $l_nid, "type" => "ACTIVATED_AT", "label" => docent_t("활동지", "Activity place")];
+            $edges[] = ["from" => $p_nid, "to" => $l_nid, "type" => "ACTIVATED_AT", "label" => "활동지"];
         }
 
         // 가족 노드 및 관계 생성
         foreach (array_unique($family_names) as $f_name) {
             if ($f_name === '' || $f_name === $person_name) continue;
-            $f_nid = 'n' . substr(sha1($f_name), 0, 12);
-            if (!isset($nodes[$f_nid])) {
-                $nodes[$f_nid] = [
-                    "id" => $f_nid,
-                    "label" => "👤\n" . mb_substr($f_name, 0, 20),
-                    "raw_id" => $f_name,
-                    "labels" => ['Person', '인물'],
-                    "type" => '인물',
-                    "props" => ['명칭' => $f_name, 'name' => $f_name, 'description' => "{$person_name}의 가족/혈연"],
-                    "aliases" => [],
-                    "color" => ["background" => "#2563EB", "border" => "#2563EB", "highlight" => ["background" => "#2563EB", "border" => "#333"]],
-                    "shape" => "box",
-                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
-                    "borderWidth" => 2, "shadow" => true
-                ];
-            }
+            $f_nid = _add_scalar_node($nodes, $f_name, "👤", ['Person', '인물'], '인물', "#2563EB",
+                ['명칭' => $f_name, 'name' => $f_name, 'description' => "{$person_name}의 가족/혈연"]);
             $found_candidates[$f_name] = 6.0;
             $prefetch_names[] = $f_name;
             if ($p_nid) {
-                $edges[] = ["from" => $p_nid, "to" => $f_nid, "type" => "P152_has_parent", "label" => docent_t("가족/혈연", "Family/Parent")];
+                $edges[] = ["from" => $p_nid, "to" => $f_nid, "type" => "P152_has_parent", "label" => "가족/혈연"];
             }
             if ($e_nid) {
-                $edges[] = ["from" => $f_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
+                $edges[] = ["from" => $f_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => "수행/참여"];
             }
             add_fact_evidence($evidences, 'family', [
                 $person_name,
@@ -1300,7 +1259,7 @@ function handle_action_graph() {
                 // Activity 노드는 '기록 안의 인물 언급'이므로, 그 P14는 참여가 아니라 언급으로 표시합니다.
                 $endpoint_labels = array_merge($nodes[$n_nid]['labels'] ?? [], $nodes[$m_nid]['labels'] ?? []);
                 if ($rel_type === 'P14_carried_out_by' && (in_array('Activity', $endpoint_labels, true) || in_array('활동', $endpoint_labels, true))) {
-                    $rel_label = docent_t('언급된 인물', 'Mentioned person');
+                    $rel_label = '언급된 인물';
                 }
                 $edges[] = ["from" => $n_nid, "to" => $m_nid, "type" => $rel_type, "label" => $rel_label];
 
@@ -1332,8 +1291,8 @@ function handle_action_graph() {
             if ($e && $p) {
                 $e_nid = add_node_to_map($nodes, $e, $rec->get('e_labels'));
                 $p_nid = add_node_to_map($nodes, $p, $rec->get('p_labels'));
-                if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
-                if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
+                if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => "수행/참여"];
+                if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "type" => "P14_carried_out_by", "label" => "수행/참여"];
 
                 $n_raw_id = $nodes[$n_nid]['raw_id'] ?? $n_nid;
                 $p_raw_id = $nodes[$p_nid]['raw_id'] ?? $p_nid;
@@ -1482,7 +1441,7 @@ function handle_action_explain() {
     $focus = docent_sanitize_text($_POST['focus'] ?? '', 100, false);
     $req_lang = strtolower(trim((string)($_POST['lang'] ?? '')));
     $supported_langs = ['en', 'ko', 'ja', 'zh'];
-    $explain_lang = in_array($req_lang, $supported_langs, true) ? $req_lang : (docent_is_english() ? 'en' : 'ko');
+    $explain_lang = in_array($req_lang, $supported_langs, true) ? $req_lang : 'ko';
     $evidences = json_decode($_POST['evidences'] ?? '[]', true);
     $pg_texts = json_decode($_POST['pg_texts'] ?? '[]', true);
     if (!is_array($evidences)) $evidences = [];

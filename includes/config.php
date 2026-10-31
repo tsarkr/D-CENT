@@ -54,74 +54,56 @@ function get_cfg($key, $default = '') {
     return $default;
 }
 
-// ── 언어 유틸리티 ──
-function docent_lang() {
-    return defined('DOCENT_LANG') ? DOCENT_LANG : 'ko';
-}
-
-function docent_is_english() {
-    return docent_lang() === 'en';
-}
-
-function docent_t($ko, $en) {
-    return docent_is_english() ? $en : $ko;
-}
-
 // ── 포커스 추론 ──
-function infer_focus($term, $is_english = false) {
+function infer_focus($term) {
     $text = trim((string)$term);
     if ($text === '') {
-        return $is_english ? 'Person' : '인물';
+        return '인물';
     }
 
     $normalized = strtolower($text);
     $markers = [
-        'person' => ['인물','사람','인명','주인공','영웅','독립운동가','지도자','장군','장수','leader','person','hero','revolutionary','activist','politician','general'],
-        'event'  => ['사건','시위','운동','봉기','폭동','재판','전쟁','전투','혁명','incident','event','protest','movement','uprising','trial','war','battle'],
-        'place'  => ['장소','지역','도시','마을','곳','서울','부산','대구','인천','광주','대전','울산','경기','강원','충청','전라','경상','제주','만주','한양','평양','place','city','town','region','location','province','capital'],
-        'org'    => ['기관','단체','정부','청','학교','협회','조직','군대','경찰','헌병','academy','company','organization','government','police','army','military','association'],
-    ];
-    $labels = [
-        'person' => [$is_english ? 'Person' : '인물'],
-        'event'  => [$is_english ? 'Event' : '사건'],
-        'place'  => [$is_english ? 'Place' : '장소'],
-        'org'    => [$is_english ? 'Organization' : '기관'],
+        '인물' => ['인물','사람','인명','주인공','영웅','독립운동가','지도자','장군','장수','leader','person','hero','revolutionary','activist','politician','general'],
+        '사건' => ['사건','시위','운동','봉기','폭동','재판','전쟁','전투','혁명','incident','event','protest','movement','uprising','trial','war','battle'],
+        '장소' => ['장소','지역','도시','마을','곳','서울','부산','대구','인천','광주','대전','울산','경기','강원','충청','전라','경상','제주','만주','한양','평양','place','city','town','region','location','province','capital'],
+        '기관' => ['기관','단체','정부','청','학교','협회','조직','군대','경찰','헌병','academy','company','organization','government','police','army','military','association'],
     ];
 
-    foreach ($markers as $type => $words) {
+    foreach ($markers as $label => $words) {
         foreach ($words as $w) {
             if (strpos($normalized, $w) !== false) {
-                return $labels[$type][0];
+                return $label;
             }
         }
     }
 
     if (preg_match('/^[\p{Hangul}]{2,4}$/u', $text) || preg_match('/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$/', $text)) {
-        return $is_english ? 'Person' : '인물';
+        return '인물';
     }
     if (preg_match('/\b(운동|시위|사건|전쟁|봉기|재판)\b/u', $text)) {
-        return $is_english ? 'Event' : '사건';
+        return '사건';
     }
     if (preg_match('/\b(서울|부산|대구|인천|광주|대전|울산|경기|강원|충청|전라|경상|제주|만주|한양|평양)\b/u', $text)) {
-        return $is_english ? 'Place' : '장소';
+        return '장소';
     }
 
-    return $is_english ? 'Person' : '인물';
+    return '인물';
 }
 
-function normalize_focus($focus, $is_english = false) {
+function normalize_focus($focus) {
     $value = trim((string)($focus ?? ''));
     if ($value === '') {
-        return infer_focus('', $is_english);
+        return '인물';
     }
 
     $map = [
-        'person' => 'Person', 'people' => 'Person', '인물' => '인물',
-        'event' => 'Event', '사건' => '사건',
-        'place' => 'Place', '장소' => '장소',
-        'organization' => 'Organization', 'org' => 'Organization', '기관' => '기관',
+        'person' => '인물', 'people' => '인물', '인물' => '인물',
+        'event' => '사건', '사건' => '사건',
+        'place' => '장소', '장소' => '장소',
+        'organization' => '기관', 'org' => '기관', '기관' => '기관',
+        '문헌' => '문헌', '종합' => '종합',
     ];
 
     $normalized = strtolower($value);
-    return $map[$normalized] ?? ($is_english ? 'Person' : '인물');
+    return $map[$normalized] ?? '인물';
 }

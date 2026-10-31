@@ -1,51 +1,37 @@
-# Ignore editor settings
+# Editor & OS
 .vscode/
-
-# Settings and secrets (.streamlit/secrets.toml)
-.streamlit/
-
-# TEI and raw data
-tei/
-data/
-
-# Python env
-.venv*/
-env/
-
-# Python cache
-__pycache__/
-
-# Secrets and config
-.env
-*.secret
-
-# Raw/large files
-*.csv
-*.tei.xml
-
-# OS files
+.idea/
 .DS_Store
 
-# Generated outputs (the pipeline writes them to data/output/, which is ignored with data/)
+# Secrets & local settings
+.env
+*.secret
+.streamlit/
+.pg_meta_cache*.json
 
-# PHP dependencies
+# Python & PHP environments
+.venv*/
+env/
+__pycache__/
+*.py[cod]
 vendor/
 
-# Vector store
+# Raw data & local artifacts
+tei/
+data/
+*.csv
+*.tei.xml
 vector_store/
-
 Latex/
-# Evaluation: results, annotation workbooks, blinding key, validation workbook
+
+# Evaluation outputs & workbooks
 evaluation/results/
+evaluation/dataset/validation/
 evaluation/annotation/**/*.xlsx
 evaluation/annotation/rating_key/
-evaluation/dataset/validation/
-~$*.xlsx
-# Not research data: simulated annotations (dry runs), the author's trial, set-aside workbooks
 evaluation/annotation/sim*/
 evaluation/annotation/trial/
 evaluation/annotation/old*/
 evaluation/annotation/expert/*.json
+~$*.xlsx
 
-# Local caches (including renamed copies)
-.pg_meta_cache*.json
