@@ -14,6 +14,9 @@ function get_gemini_candidate_models() {
         'gemini-2.5-flash',
         'gemini-2.0-flash',
     ];
+    if (get_cfg('DEEPSEEK_API_KEY', '') !== '') {
+        $candidates[] = trim((string)get_cfg('DEEPSEEK_MODEL', 'deepseek-chat'));
+    }
     if (get_cfg('DOCENT_EVAL_MODE', '0') === '1') $candidates = [$configured];
     $clean = [];
     foreach ($candidates as $cand) {
@@ -27,11 +30,12 @@ function get_gemini_candidate_models() {
 }
 
 /**
- * 동기식 Gemini API 호출 (model fallback 포함)
+ * 동기식 Gemini / DeepSeek API 호출 (model fallback 포함)
  */
 function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null, $timeout = 60) {
     $api_key = get_cfg('GEMINI_API_KEY') ?: get_cfg('API_KEY');
-    if (!$api_key) throw new RuntimeException("Gemini API key is not configured.");
+    $ds_key = get_cfg('DEEPSEEK_API_KEY');
+    if (!$api_key && !$ds_key) throw new RuntimeException("Gemini/DeepSeek API key is not configured.");
 
     $candidate_models = get_gemini_candidate_models();
     $payload = _build_gemini_payload($msgs, $is_json, $max_tokens, $temperature, $top_p);
@@ -41,6 +45,10 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
     $total_timeout = max(5, (int)$timeout);
 
     foreach ($candidate_models as $model) {
+        $is_deepseek = str_starts_with($model, 'deepseek');
+        if ($is_deepseek && !$ds_key) continue;
+        if (!$is_deepseek && !$api_key) continue;
+
         $elapsed = microtime(true) - $start_time;
         $remaining = $total_timeout - $elapsed;
         if ($remaining <= 2.0) {
@@ -48,13 +56,23 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             break;
         }
 
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
+        if ($is_deepseek) {
+            $url = "https://api.deepseek.com/chat/completions";
+            $ds_payload = _build_deepseek_payload($msgs, $model, $is_json, $max_tokens, $temperature, $top_p, false);
+            $body = json_encode($ds_payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            $headers = ["Content-Type: application/json", "Authorization: Bearer {$ds_key}"];
+        } else {
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
+            $body = $post_json;
+            $headers = ["Content-Type: application/json", "x-goog-api-key: {$api_key}"];
+        }
+
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $post_json,
-            CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => $headers,
             CURLOPT_CONNECTTIMEOUT => max(3, min(6, (int)$remaining)),
             CURLOPT_TIMEOUT => (int)ceil($remaining),
             CURLOPT_SSL_VERIFYPEER => true,
@@ -66,7 +84,7 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
         $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
 
         if ($res === false || $curl_errno !== 0 || $http_code !== 200) {
-            error_log(sprintf('Gemini model %s failed: HTTP %d, cURL %d — trying next candidate', $model, $http_code, $curl_errno));
+            error_log(sprintf('LLM model %s failed: HTTP %d, cURL %d — trying next candidate', $model, $http_code, $curl_errno));
             if ($http_code === 429 || $http_code === 503) {
                 if (($total_timeout - (microtime(true) - $start_time)) > 3.0) {
                     usleep(600000); // 0.6초 백오프 후 다음 모델 시도
@@ -75,10 +93,16 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             continue;
         }
 
-        $content = _extract_gemini_text($res);
-        if (trim($content) !== '') {
+        if ($is_deepseek) {
+            $data = json_decode($res, true);
+            $content = (string)($data['choices'][0]['message']['content'] ?? '');
+            $version = $data['model'] ?? $model;
+        } else {
+            $content = _extract_gemini_text($res);
             $data = json_decode($res, true);
             $version = $data['modelVersion'] ?? $model;
+        }
+        if (trim($content) !== '') {
             $GLOBALS['docent_model_versions'][$version] = ($GLOBALS['docent_model_versions'][$version] ?? 0) + 1;
             return $content;
         }
@@ -88,12 +112,13 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
 }
 
 /**
- * SSE 스트리밍 Gemini API 호출
+ * SSE 스트리밍 Gemini / DeepSeek API 호출
  */
 function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperature = null, $top_p = null) {
     $api_key = get_cfg('GEMINI_API_KEY') ?: get_cfg('API_KEY');
-    if (!$api_key) {
-        throw new RuntimeException("Gemini API key is not configured.");
+    $ds_key = get_cfg('DEEPSEEK_API_KEY');
+    if (!$api_key && !$ds_key) {
+        throw new RuntimeException("Gemini/DeepSeek API key is not configured.");
     }
 
     $candidate_models = get_gemini_candidate_models();
@@ -101,7 +126,20 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
     $post_json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 
     foreach ($candidate_models as $model) {
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:streamGenerateContent?alt=sse";
+        $is_deepseek = str_starts_with($model, 'deepseek');
+        if ($is_deepseek && !$ds_key) continue;
+        if (!$is_deepseek && !$api_key) continue;
+
+        if ($is_deepseek) {
+            $url = "https://api.deepseek.com/chat/completions";
+            $ds_payload = _build_deepseek_payload($msgs, $model, false, $max_tokens, $temperature, $top_p, true);
+            $body = json_encode($ds_payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            $headers = ["Content-Type: application/json", "Authorization: Bearer {$ds_key}"];
+        } else {
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:streamGenerateContent?alt=sse";
+            $body = $post_json;
+            $headers = ["Content-Type: application/json", "x-goog-api-key: {$api_key}"];
+        }
         $buffer = '';
         $chunks_delivered = 0;
         $finished = false;
@@ -109,13 +147,13 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $post_json,
-            CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => $headers,
             CURLOPT_CONNECTTIMEOUT => 8,
             CURLOPT_TIMEOUT => 90,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, &$chunks_delivered, &$finished, $on_chunk) {
+            CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, &$chunks_delivered, &$finished, $on_chunk, $is_deepseek) {
                 $buffer .= $data;
                 while (preg_match('/^(.*?)(?:\r?\n\r?\n)/s', $buffer, $matches)) {
                     $block = $matches[1];
@@ -124,13 +162,27 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
                     foreach ($lines as $line) {
                         $line = trim($line);
                         if (str_starts_with($line, 'data: ')) {
-                            $parsed = json_decode(substr($line, 6), true);
-                            if (in_array($parsed['candidates'][0]['finishReason'] ?? '', ['STOP', 'MAX_TOKENS'], true)) $finished = true;
-                            if (isset($parsed['candidates'][0]['content']['parts'])) {
-                                foreach ($parsed['candidates'][0]['content']['parts'] as $part) {
-                                    if (isset($part['text']) && $part['text'] !== '') {
-                                        $chunks_delivered++;
-                                        $on_chunk($part['text']);
+                            $raw = trim(substr($line, 6));
+                            if ($raw === '[DONE]') {
+                                $finished = true;
+                                continue;
+                            }
+                            $parsed = json_decode($raw, true);
+                            if ($is_deepseek) {
+                                if (!empty($parsed['choices'][0]['finish_reason'])) $finished = true;
+                                $delta = $parsed['choices'][0]['delta']['content'] ?? '';
+                                if ($delta !== '') {
+                                    $chunks_delivered++;
+                                    $on_chunk($delta);
+                                }
+                            } else {
+                                if (in_array($parsed['candidates'][0]['finishReason'] ?? '', ['STOP', 'MAX_TOKENS'], true)) $finished = true;
+                                if (isset($parsed['candidates'][0]['content']['parts'])) {
+                                    foreach ($parsed['candidates'][0]['content']['parts'] as $part) {
+                                        if (isset($part['text']) && $part['text'] !== '') {
+                                            $chunks_delivered++;
+                                            $on_chunk($part['text']);
+                                        }
                                     }
                                 }
                             }
@@ -198,4 +250,28 @@ function _extract_gemini_text($json_response) {
         }
     }
     return $content;
+}
+
+function _build_deepseek_payload($msgs, $model, $is_json, $max_tokens, $temperature, $top_p, $stream = false) {
+    $messages = [];
+    foreach ($msgs as $m) {
+        $role = in_array($m['role'] ?? 'user', ['system', 'assistant', 'user'], true) ? $m['role'] : 'user';
+        $messages[] = ['role' => $role, 'content' => (string)($m['content'] ?? '')];
+    }
+
+    $default_temp = (float)get_cfg('GEMINI_TEMPERATURE', '0.1');
+    $default_topp = (float)get_cfg('GEMINI_TOP_P', '0.85');
+
+    $payload = [
+        'model' => $model,
+        'messages' => $messages,
+        'temperature' => is_numeric($temperature) ? (float)$temperature : $default_temp,
+        'top_p' => is_numeric($top_p) ? (float)$top_p : $default_topp,
+        'max_tokens' => $max_tokens ? (int)max(1, min(8192, $max_tokens)) : 4096,
+        'stream' => (bool)$stream,
+    ];
+    if ($is_json) {
+        $payload['response_format'] = ['type' => 'json_object'];
+    }
+    return $payload;
 }

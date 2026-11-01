@@ -67,13 +67,51 @@ def _quota_violation(resp: Any) -> str:
     return ""
 
 
+def _call_deepseek(messages: list[dict[str, str]], model: str, api_key: str, max_tokens: int) -> str:
+    """Call DeepSeek OpenAI-compatible Chat Completions API."""
+    url = "https://api.deepseek.com/chat/completions"
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "max_tokens": max_tokens,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    for attempt in range(4):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=90)
+            if resp.status_code == 200:
+                data = resp.json()
+                MODEL_VERSIONS[data.get("model") or model] += 1
+                return data["choices"][0]["message"]["content"].strip()
+            elif resp.status_code in (429, 500, 502, 503):
+                wait_time = max(15, (attempt + 1) * 10)
+                print(f" (재시도 대기 {wait_time}초: {resp.status_code})...", end="", flush=True)
+                time.sleep(wait_time)
+                continue
+            else:
+                raise RuntimeError(f"DeepSeek API 호출 실패 (상태 코드 {resp.status_code})")
+        except requests.RequestException:
+            if attempt == 3:
+                raise RuntimeError("DeepSeek API 요청 실패 (연결 오류)") from None
+            time.sleep(5)
+    raise RuntimeError("DeepSeek API 재시도 한도 초과 (429/503)")
+
+
 def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> str:
-    """Call Google Gemini API using configured key."""
+    """Call Google Gemini API (or DeepSeek API when GEMINI_MODEL starts with 'deepseek')."""
     temperature, top_p = TEMPERATURE, TOP_P
     max_tokens = max_tokens or ANSWER_MAX_TOKENS
     secrets = load_secrets()
-    api_key = setting("GEMINI_API_KEY", "", secrets)
     model = setting("GEMINI_MODEL", "gemini-flash-lite-latest", secrets)
+    if model.startswith("deepseek"):
+        ds_key = setting("DEEPSEEK_API_KEY", "", secrets)
+        if not ds_key:
+            raise RuntimeError("DEEPSEEK_API_KEY가 설정되지 않았습니다.")
+        return _call_deepseek(messages, model, ds_key, max_tokens)
+
+    api_key = setting("GEMINI_API_KEY", "", secrets)
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
 

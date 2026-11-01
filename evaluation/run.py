@@ -293,13 +293,26 @@ def _judge_one(record: dict[str, Any], model: str, host: str) -> dict[str, Any]:
         return {**result, "relevant": [], "context_precision": 0.0}
     prompt = JUDGE_PROMPT.format(question=record["user_input"], reference=record["reference"], context_count=len(contexts),
                                  contexts="\n".join(f"[{i}] {value}" for i, value in enumerate(contexts)))
+    ds_key = setting("DEEPSEEK_API_KEY", "") if model.startswith("deepseek") else ""
     for _ in range(3):
-        response = requests.post(f"{host.rstrip('/')}/api/chat", timeout=300, json={
-            "model": model, "messages": [{"role": "user", "content": prompt}], "format": "json",
-            "stream": False, "options": {"temperature": 0, "num_predict": max(128, len(contexts) * 4 + 32)}, "think": False})
-        response.raise_for_status()
+        if model.startswith("deepseek"):
+            if not ds_key:
+                raise RuntimeError("DEEPSEEK_API_KEY가 설정되지 않았습니다.")
+            response = requests.post("https://api.deepseek.com/chat/completions", timeout=120,
+                                     headers={"Authorization": f"Bearer {ds_key}", "Content-Type": "application/json"},
+                                     json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                                           "response_format": {"type": "json_object"}, "temperature": 0,
+                                           "max_tokens": max(128, len(contexts) * 4 + 32)})
+            response.raise_for_status()
+            raw_content = response.json()["choices"][0]["message"]["content"]
+        else:
+            response = requests.post(f"{host.rstrip('/')}/api/chat", timeout=300, json={
+                "model": model, "messages": [{"role": "user", "content": prompt}], "format": "json",
+                "stream": False, "options": {"temperature": 0, "num_predict": max(128, len(contexts) * 4 + 32)}, "think": False})
+            response.raise_for_status()
+            raw_content = response.json()["message"]["content"]
         try:
-            match = re.search(r"\{.*\}", response.json()["message"]["content"], re.DOTALL)
+            match = re.search(r"\{.*\}", raw_content, re.DOTALL)
             parsed = json.loads(match.group(0)) if match else {}
             relevant = parsed.get("relevant", []) if isinstance(parsed, dict) else []
         except (ValueError, KeyError, TypeError):
