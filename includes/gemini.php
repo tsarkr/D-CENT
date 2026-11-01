@@ -96,6 +96,9 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
         if ($is_deepseek) {
             $data = json_decode($res, true);
             $content = (string)($data['choices'][0]['message']['content'] ?? '');
+            if ($is_json && preg_match('/```(?:json)?\s*([\s\S]*?)```/i', $content, $m)) {
+                $content = trim($m[1]);
+            }
             $version = $data['model'] ?? $model;
         } else {
             $content = _extract_gemini_text($res);
@@ -270,8 +273,5 @@ function _build_deepseek_payload($msgs, $model, $is_json, $max_tokens, $temperat
         'max_tokens' => $max_tokens ? (int)max(1, min(8192, $max_tokens)) : 4096,
         'stream' => (bool)$stream,
     ];
-    if ($is_json) {
-        $payload['response_format'] = ['type' => 'json_object'];
-    }
     return $payload;
 }
