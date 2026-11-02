@@ -9,8 +9,9 @@
   one-stage         Ablation B: controlled D-CENT evidence answered in one call
   hybrid-two-stage  Ablation C: the hybrid baseline's evidence with the two-stage generation
 
-Shared conditions (fixed, as stated in the paper): generator Gemini (GEMINI_MODEL, default the
-gemini-flash-lite-latest alias), temperature 0, top-p 0.8, at most 1,500 output tokens per answer,
+Shared conditions (fixed, as stated in the paper): one generator for every system, chosen with
+LLM_PROVIDER (gemini: GEMINI_MODEL, default the gemini-flash-lite-latest alias; deepseek:
+DEEPSEEK_MODEL, default deepseek-chat), temperature 0, top-p 0.8, at most 1,500 output tokens per answer,
 an evidence budget of 11,000 characters per question (the deployed system's), and entities
 extracted from the question text once by the same model (no system sees the gold entities).
 Every system that reads record text searches the same records: register entries, source entries,
@@ -31,7 +32,7 @@ from typing import Any
 import numpy as np
 import requests
 
-from pipeline.config import ROOT, get_neo4j_driver, get_pg_connection, load_secrets, setting
+from pipeline.config import ROOT, get_neo4j_driver, get_pg_connection, llm_model, llm_provider, load_secrets, setting
 
 TEMPERATURE = 0.0
 TOP_P = 0.8
@@ -100,12 +101,12 @@ def _call_deepseek(messages: list[dict[str, str]], model: str, api_key: str, max
 
 
 def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> str:
-    """Call Google Gemini API (or DeepSeek API when GEMINI_MODEL starts with 'deepseek')."""
+    """Call the configured generator: Gemini, or DeepSeek when LLM_PROVIDER = deepseek."""
     temperature, top_p = TEMPERATURE, TOP_P
     max_tokens = max_tokens or ANSWER_MAX_TOKENS
     secrets = load_secrets()
-    model = setting("GEMINI_MODEL", "gemini-flash-lite-latest", secrets)
-    if model.startswith("deepseek"):
+    model = llm_model(secrets)
+    if llm_provider(secrets) == "deepseek":
         ds_key = setting("DEEPSEEK_API_KEY", "", secrets)
         if not ds_key:
             raise RuntimeError("DEEPSEEK_API_KEY가 설정되지 않았습니다.")

@@ -54,7 +54,7 @@ if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) 
             if (is_array($manifest) && !empty($manifest['complete'])) $data_build_id = (string)($manifest['build_id'] ?? '');
         }
         $token_response['evaluation'] = [
-            'model' => get_cfg('GEMINI_MODEL', 'gemini-flash-lite-latest'),
+            'model' => docent_llm_model(),
             'context_chars' => (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'),
             'analysis_temperature' => (float)get_cfg('GEMINI_TEMPERATURE', '0.1'),
             'analysis_top_p' => (float)get_cfg('GEMINI_TOP_P', '0.85'),

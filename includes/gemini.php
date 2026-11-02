@@ -5,17 +5,47 @@
 
 require_once __DIR__ . '/security.php';
 
+/**
+ * 생성 모델 제공자: LLM_PROVIDER = gemini(기본) | deepseek.
+ * 예전 설정(GEMINI_MODEL = "deepseek-…")도 DeepSeek로 읽는다.
+ */
+function docent_llm_provider() {
+    $provider = strtolower(trim((string)get_cfg('LLM_PROVIDER', '')));
+    if ($provider === '') {
+        $provider = str_starts_with(trim((string)get_cfg('GEMINI_MODEL', '')), 'deepseek') ? 'deepseek' : 'gemini';
+    }
+    if (!in_array($provider, ['gemini', 'deepseek'], true)) {
+        throw new RuntimeException("LLM_PROVIDER must be 'gemini' or 'deepseek'.");
+    }
+    return $provider;
+}
+
+/** 지금 설정된 생성 모델 이름 (평가 메타데이터와 같은 값). */
+function docent_llm_model() {
+    if (docent_llm_provider() === 'deepseek') {
+        $model = trim((string)get_cfg('DEEPSEEK_MODEL', ''));
+        if ($model === '') {
+            $legacy = trim((string)get_cfg('GEMINI_MODEL', ''));
+            $model = str_starts_with($legacy, 'deepseek') ? $legacy : 'deepseek-chat';
+        }
+        return $model;
+    }
+    return trim((string)get_cfg('GEMINI_MODEL', 'gemini-flash-lite-latest'));
+}
+
 function get_gemini_candidate_models() {
-    $configured = trim((string)get_cfg('GEMINI_MODEL', 'gemini-flash-lite-latest'));
-    $candidates = [
-        $configured,
-        'gemini-flash-lite-latest',
-        'gemini-2.5-flash-lite',
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-    ];
-    if (get_cfg('DEEPSEEK_API_KEY', '') !== '') {
-        $candidates[] = trim((string)get_cfg('DEEPSEEK_MODEL', 'deepseek-chat'));
+    // 제공자를 섞지 않는다: Gemini는 Gemini 모델끼리만, DeepSeek는 설정한 모델 하나만 쓴다.
+    $configured = docent_llm_model();
+    if (docent_llm_provider() === 'deepseek') {
+        $candidates = [$configured];
+    } else {
+        $candidates = [
+            $configured,
+            'gemini-flash-lite-latest',
+            'gemini-2.5-flash-lite',
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+        ];
     }
     if (get_cfg('DOCENT_EVAL_MODE', '0') === '1') $candidates = [$configured];
     $clean = [];

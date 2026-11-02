@@ -26,6 +26,24 @@ class MetricsSafety(unittest.TestCase):
         self.assertEqual(metrics.evaluate_faithfulness('유관순은 아우내 시위에 참여하지 않았다.', fact)[0], 0)
         self.assertEqual(metrics.evaluate_faithfulness(fact[0], fact)[0], 100)
 
+    def test_llm_provider_switch(self):
+        import os
+        from unittest import mock
+        from pipeline.config import llm_model, llm_provider
+        keys = ("LLM_PROVIDER", "GEMINI_MODEL", "DEEPSEEK_MODEL")
+        with mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k not in keys}, clear=True):
+            self._check_llm_provider_switch(llm_model, llm_provider)
+
+    def _check_llm_provider_switch(self, llm_model, llm_provider):
+        self.assertEqual((llm_provider({}), llm_model({})), ("gemini", "gemini-flash-lite-latest"))
+        both = {"LLM_PROVIDER": "deepseek", "GEMINI_MODEL": "gemini-x", "DEEPSEEK_MODEL": "deepseek-y"}
+        self.assertEqual((llm_provider(both), llm_model(both)), ("deepseek", "deepseek-y"))
+        self.assertEqual(llm_model({"LLM_PROVIDER": "gemini", "GEMINI_MODEL": "gemini-x"}), "gemini-x")
+        self.assertEqual((llm_provider({"GEMINI_MODEL": "deepseek-chat"}), llm_model({"GEMINI_MODEL": "deepseek-chat"})),
+                         ("deepseek", "deepseek-chat"))
+        with self.assertRaises(ValueError):
+            llm_provider({"LLM_PROVIDER": "other"})
+
     def test_name_written_in_hanja_covers_fact(self):
         fact = ['3월 8일 함남 함흥 기곡면 시위의 관련 인물로 황인석, 이수봉 등이 기록되어 있음']
         question = "'3월 8일 함남 함흥 기곡면 시위'에 관련 인물로 기록된 사람은 누구인가?"

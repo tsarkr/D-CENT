@@ -64,4 +64,17 @@ catch (RuntimeException $e) { check(!($e instanceof LogicException), 'Missing ke
 $context = "narrative\n\n<SOURCE_EVIDENCE id=\"raw_event_info-1\">first</SOURCE_EVIDENCE>\n\n<SOURCE_EVIDENCE id=\"raw_event_info-2\">second</SOURCE_EVIDENCE>";
 $items = docent_context_items($context);
 check(count($items) === 3 && $items[0] === 'narrative', 'Evidence order must be preserved');
+// Provider switch: the providers are never mixed, and the old GEMINI_MODEL = "deepseek-…" still selects DeepSeek.
+$settings = ['GEMINI_API_KEY' => 'k', 'DEEPSEEK_API_KEY' => 'k', 'GEMINI_MODEL' => 'gemini-test', 'DOCENT_EVAL_MODE' => '0'];
+check(docent_llm_provider() === 'gemini', 'Gemini is the default provider');
+check(!in_array('deepseek-chat', get_gemini_candidate_models(), true), 'Gemini mode must not fall back to DeepSeek');
+$settings['LLM_PROVIDER'] = 'deepseek';
+$settings['DEEPSEEK_MODEL'] = 'deepseek-test';
+check(get_gemini_candidate_models() === ['deepseek-test'], 'DeepSeek mode uses only DEEPSEEK_MODEL');
+check(docent_llm_model() === 'deepseek-test', 'Reported model is the DeepSeek model');
+$settings = ['GEMINI_MODEL' => 'deepseek-chat'];
+check(docent_llm_provider() === 'deepseek' && docent_llm_model() === 'deepseek-chat', 'Legacy DeepSeek setting');
+$settings = ['LLM_PROVIDER' => 'other'];
+try { docent_llm_provider(); throw new LogicException('Unknown provider accepted'); }
+catch (RuntimeException $e) { check(!($e instanceof LogicException), 'Unknown provider must throw'); }
 echo "Gemini and context safety checks passed\n";

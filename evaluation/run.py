@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from pipeline.config import ROOT, setting
+from pipeline.config import ROOT, llm_model, setting
 
 from evaluation import systems
 from evaluation.common import BENCHMARK, RESULTS_DIR, read_json, write_json
@@ -75,7 +75,7 @@ def _fingerprint(dataset: Path, keys: list[str]) -> dict[str, Any]:
         "code_sha256": code.hexdigest(),
         "dataset_sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
         "data_build": build,
-        "generator": setting("GEMINI_MODEL", "gemini-flash-lite-latest"),
+        "generator": llm_model(),
         "python": platform.python_version(),
         "packages": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions() if d.metadata["Name"]},
         "server": server,
@@ -153,8 +153,9 @@ def _check_server(keys: list[str]) -> dict[str, Any] | None:
         metadata = response.json().get("evaluation")
         if not metadata or metadata.get("context_chars") != systems.CONTEXT_CHARS:
             raise ValueError("서버 평가 모드 또는 문맥 예산이 올바르지 않습니다.")
-        if metadata.get("model") != setting("GEMINI_MODEL", "gemini-flash-lite-latest"):
-            raise ValueError("서버와 평가 생성 모델이 다릅니다.")
+        if metadata.get("model") != llm_model():
+            raise ValueError(f"서버와 평가 생성 모델이 다릅니다 (서버 {metadata.get('model')}, 평가 {llm_model()}). "
+                             "서버도 같은 LLM_PROVIDER로 띄우세요.")
         return metadata
     except Exception as exc:
         raise SystemExit(f"DOCENT_URL({url})에 연결할 수 없습니다: {exc}\n"
@@ -188,7 +189,7 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
             "conditions": {"temperature": systems.TEMPERATURE, "top_p": systems.TOP_P,
                            "context_chars": systems.CONTEXT_CHARS, "answer_max_tokens": systems.ANSWER_MAX_TOKENS,
                            "retries": RETRIES},
-            "generator": setting("GEMINI_MODEL", "gemini-flash-lite-latest"),
+            "generator": llm_model(),
             "docent_url": setting("DOCENT_URL", "") if any(k in ("dcent", "no-paths") for k in keys) else "",
             "fingerprint": fingerprint,
             "code_version": _git_commit(), "python": platform.python_version(), "complete": False,

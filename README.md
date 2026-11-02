@@ -172,7 +172,11 @@ NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "change-me"
 GEMINI_API_KEY = "..."
+# Generator: gemini (default) or deepseek. For evaluation, the server and the run must use the same value
+LLM_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-flash-lite-latest"
+DEEPSEEK_API_KEY = "..."   # only with LLM_PROVIDER = "deepseek"
+DEEPSEEK_MODEL = "deepseek-chat"
 
 # Evaluation (only when needed)
 DOCENT_URL = "http://localhost:8000/docent.php"   # server called by the dcent system

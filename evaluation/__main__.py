@@ -15,7 +15,8 @@
                                                 historians rate the answers of a run blind
 
 RUN is a folder name under evaluation/results/ (default: the latest run).
-Settings come from environment variables or .streamlit/secrets.toml: GEMINI_API_KEY, GEMINI_MODEL,
+Settings come from environment variables or .streamlit/secrets.toml: LLM_PROVIDER (gemini | deepseek),
+GEMINI_API_KEY, GEMINI_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
 DOCENT_URL (docent.php running with DOCENT_EVAL_MODE=1, for the dcent and no-paths systems),
 EVAL_DELAY (seconds between calls, default 15), JUDGE_MODEL and OLLAMA_HOST (judge).
 """

@@ -76,6 +76,30 @@ def setting(key: str, default: str = "", secrets: dict[str, Any] | None = None) 
     return str(default) if default else ""
 
 
+def llm_provider(secrets: dict[str, Any] | None = None) -> str:
+    """Generator provider: LLM_PROVIDER = gemini (default) | deepseek.
+
+    An older setting GEMINI_MODEL = "deepseek-…" is still read as DeepSeek.
+    """
+    provider = setting("LLM_PROVIDER", "", secrets).strip().lower()
+    if not provider:
+        provider = "deepseek" if setting("GEMINI_MODEL", "", secrets).startswith("deepseek") else "gemini"
+    if provider not in ("gemini", "deepseek"):
+        raise ValueError("LLM_PROVIDER must be 'gemini' or 'deepseek'.")
+    return provider
+
+
+def llm_model(secrets: dict[str, Any] | None = None) -> str:
+    """Name of the configured generator model (the same value the PHP server reports)."""
+    if llm_provider(secrets) == "deepseek":
+        model = setting("DEEPSEEK_MODEL", "", secrets).strip()
+        if not model:
+            legacy = setting("GEMINI_MODEL", "", secrets).strip()
+            model = legacy if legacy.startswith("deepseek") else "deepseek-chat"
+        return model
+    return setting("GEMINI_MODEL", "gemini-flash-lite-latest", secrets).strip()
+
+
 # ── PostgreSQL helpers ──────────────────────────────────────────────────────
 
 def get_pg_config(secrets: dict[str, Any] | None = None) -> dict[str, str]:
