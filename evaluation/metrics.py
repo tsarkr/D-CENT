@@ -28,6 +28,7 @@ from typing import Any
 
 from evaluation.benchmark import ADMIN_UNIT_RE, DATE_TOKEN_RE, is_generic_token, strip_josa
 from evaluation.common import bootstrap_ci, holm_adjust, paired_permutation_test
+from pipeline.text import translate_hanja_name
 
 # ── Answer scores ────────────────────────────────────────────────────────────
 DECLINE_MARKERS = ("자료에서 확인되지 않", "확인할 수 없", "확인되지 않아", "찾을 수 없었습니다", "서술하기 어렵", "cannot be confirmed")
@@ -56,7 +57,15 @@ def _is_negative(text: str) -> bool:
 
 
 # Version of the automatic answer scores; `report --rescore` rewrites scores.csv with the current one.
-METRICS_VERSION = 2
+METRICS_VERSION = 3  # v3: names written in Hanja are read in Hangul before matching
+
+HANJA_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+
+
+def hangul_reading(text: str) -> str:
+    """'黃仁錫과 李洙鳳' -> '황인석과 이수봉': the reference facts give names in Hangul, as the register's
+    readings do, so an answer that writes a recorded name in Hanja is matched on its reading."""
+    return HANJA_RUN_RE.sub(lambda m: translate_hanja_name(m.group(0)), text or "")
 
 # Words of the reference facts and traps that state the kind of claim rather than its content
 # ("관련 인물로 … 기록되어 있음"). They occur in almost every answer and are never matched.
@@ -108,6 +117,7 @@ def evaluate_faithfulness(answer: str, gold_facts: list[str], question: str = ""
     in the question (the order of two named incidents, that a figure is not recorded) cannot be
     scored lexically and are left to the raters; with no scorable fact the score is None.
     """
+    answer = hangul_reading(answer)
     covered = scorable = 0
     for fact in gold_facts:
         keywords = fact_keywords(fact, question)
@@ -241,7 +251,7 @@ def evaluate_hallucination(
     subject or claim are not judged; with none judged the score is None.
     """
     hints = [str(e).strip() for e in entities or [] if str(e).strip() and not is_generic_token(str(e).strip())]
-    sentences = _assertions(answer)
+    sentences = _assertions(hangul_reading(answer))
     judged = triggered = 0
     flagged: list[str] = []
 

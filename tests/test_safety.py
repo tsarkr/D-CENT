@@ -26,6 +26,11 @@ class MetricsSafety(unittest.TestCase):
         self.assertEqual(metrics.evaluate_faithfulness('유관순은 아우내 시위에 참여하지 않았다.', fact)[0], 0)
         self.assertEqual(metrics.evaluate_faithfulness(fact[0], fact)[0], 100)
 
+    def test_name_written_in_hanja_covers_fact(self):
+        fact = ['3월 8일 함남 함흥 기곡면 시위의 관련 인물로 황인석, 이수봉 등이 기록되어 있음']
+        question = "'3월 8일 함남 함흥 기곡면 시위'에 관련 인물로 기록된 사람은 누구인가?"
+        self.assertEqual(metrics.evaluate_faithfulness('관련 인물로 黃仁錫, 李洙鳳이 기록되어 있다.', fact, question)[0], 100)
+
     def test_unrelated_negation_does_not_hide_trap(self):
         trap = ['유관순이 독립선언서를 작성했다']
         score = lambda answer: metrics.evaluate_hallucination(answer, trap, 'test', ['유관순'])[0]
