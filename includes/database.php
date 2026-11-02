@@ -7,8 +7,9 @@ use Laudis\Neo4j\ClientBuilder;
 use Laudis\Neo4j\Authentication\Authenticate;
 
 // ── Neo4j 클라이언트 ──
-function get_neo4j() {
+function get_neo4j(bool $reset = false) {
     static $client = null;
+    if ($reset) $client = null;
     if ($client !== null) return $client;
     $client = ClientBuilder::create()
         ->withDriver('default', get_cfg('NEO4J_URI', 'bolt://127.0.0.1:7687'), Authenticate::basic(get_cfg('NEO4J_USER', 'neo4j'), get_cfg('NEO4J_PASSWORD')))

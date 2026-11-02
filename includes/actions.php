@@ -219,13 +219,18 @@ const GRAPHRAG_QUERY_TIMEOUT_SEC = 8.0;
  * timeout passes and the client throws, so one slow query can no longer block the PHP request
  * until max_execution_time. Results are fully fetched inside the transaction.
  */
-function graphrag_run_with_timeout(object $client, string $cypher, array $params, float $timeout_sec) {
+function graphrag_run_with_timeout(object &$client, string $cypher, array $params, float $timeout_sec): array {
     $config = \Laudis\Neo4j\Databags\TransactionConfiguration::default()->withTimeout($timeout_sec);
-    return $client->readTransaction(
-        static fn($tsx) => $tsx->run($cypher, $params),
-        null,
-        $config
-    );
+    try {
+        return $client->readTransaction(
+            static fn($tsx) => iterator_to_array($tsx->run($cypher, $params)),
+            null,
+            $config
+        );
+    } catch (\Throwable $e) {
+        $client = get_neo4j(true);
+        throw $e;
+    }
 }
 
 /**
@@ -808,12 +813,12 @@ function _add_scalar_node(array &$nodes, string $raw_id, string $icon, array $la
 /**
  * Text-to-Cypher 동적 쿼리 실행 및 결과 추출
  */
-function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$edges, array &$evidences, array &$prefetch_names, array &$found_candidates): int {
+function execute_dynamic_cypher(&$client, string $cypher, array &$nodes, array &$edges, array &$evidences, array &$prefetch_names, array &$found_candidates): int {
     if (empty($cypher)) return 0;
 
     error_log("[Docent][Neo4j] executing dynamic Cypher:\n" . $cypher);
     try {
-        $res = $client->run($cypher);
+        $res = graphrag_run_with_timeout($client, $cypher, [], GRAPHRAG_QUERY_TIMEOUT_SEC);
     } catch (\Throwable $e) {
         error_log('Neo4j dynamic cypher execution error: ' . $e->getMessage() . ' for query: ' . $cypher);
         return 0;
