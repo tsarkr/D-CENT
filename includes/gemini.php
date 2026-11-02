@@ -6,7 +6,7 @@
 require_once __DIR__ . '/security.php';
 
 /**
- * 생성 모델 제공자: LLM_PROVIDER = gemini(기본) | deepseek.
+ * 생성 모델 제공자: LLM_PROVIDER = gemini(기본) | deepseek | ollama.
  * 예전 설정(GEMINI_MODEL = "deepseek-…")도 DeepSeek로 읽는다.
  */
 function docent_llm_provider() {
@@ -14,15 +14,16 @@ function docent_llm_provider() {
     if ($provider === '') {
         $provider = str_starts_with(trim((string)get_cfg('GEMINI_MODEL', '')), 'deepseek') ? 'deepseek' : 'gemini';
     }
-    if (!in_array($provider, ['gemini', 'deepseek'], true)) {
-        throw new RuntimeException("LLM_PROVIDER must be 'gemini' or 'deepseek'.");
+    if (!in_array($provider, ['gemini', 'deepseek', 'ollama'], true)) {
+        throw new RuntimeException("LLM_PROVIDER must be 'gemini', 'deepseek', or 'ollama'.");
     }
     return $provider;
 }
 
 /** 지금 설정된 생성 모델 이름 (평가 메타데이터와 같은 값). */
 function docent_llm_model() {
-    if (docent_llm_provider() === 'deepseek') {
+    $prov = docent_llm_provider();
+    if ($prov === 'deepseek') {
         $model = trim((string)get_cfg('DEEPSEEK_MODEL', ''));
         if ($model === '') {
             $legacy = trim((string)get_cfg('GEMINI_MODEL', ''));
@@ -30,13 +31,18 @@ function docent_llm_model() {
         }
         return $model;
     }
+    if ($prov === 'ollama') {
+        $model = trim((string)get_cfg('OLLAMA_MODEL', 'gemma4:26b'));
+        return $model !== '' ? $model : 'gemma4:26b';
+    }
     return trim((string)get_cfg('GEMINI_MODEL', 'gemini-flash-lite-latest'));
 }
 
 function get_gemini_candidate_models() {
-    // 제공자를 섞지 않는다: Gemini는 Gemini 모델끼리만, DeepSeek는 설정한 모델 하나만 쓴다.
+    // 제공자를 섞지 않는다: Gemini는 Gemini 모델끼리만, DeepSeek/Ollama는 설정한 모델 하나만 쓴다.
     $configured = docent_llm_model();
-    if (docent_llm_provider() === 'deepseek') {
+    $prov = docent_llm_provider();
+    if ($prov === 'deepseek' || $prov === 'ollama') {
         $candidates = [$configured];
     } else {
         $candidates = [
@@ -51,7 +57,7 @@ function get_gemini_candidate_models() {
     $clean = [];
     foreach ($candidates as $cand) {
         $cand = trim((string)$cand);
-        if ($cand !== '' && preg_match('/^[A-Za-z0-9._-]+$/', $cand) && !in_array($cand, $clean, true)) {
+        if ($cand !== '' && preg_match('/^[A-Za-z0-9._:-]+$/', $cand) && !in_array($cand, $clean, true)) {
             $clean[] = $cand;
         }
     }
@@ -60,24 +66,29 @@ function get_gemini_candidate_models() {
 }
 
 /**
- * 동기식 Gemini / DeepSeek API 호출 (model fallback 포함)
+ * 동기식 Gemini / DeepSeek / Ollama API 호출 (model fallback 포함)
  */
 function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null, $timeout = 60) {
+    $prov = docent_llm_provider();
     $api_key = get_cfg('GEMINI_API_KEY') ?: get_cfg('API_KEY');
     $ds_key = get_cfg('DEEPSEEK_API_KEY');
-    if (!$api_key && !$ds_key) throw new RuntimeException("Gemini/DeepSeek API key is not configured.");
+    $ollama_host = rtrim((string)get_cfg('OLLAMA_HOST', 'http://localhost:11434'), '/');
+    if ($prov !== 'ollama' && !$api_key && !$ds_key) {
+        throw new RuntimeException("Gemini/DeepSeek API key is not configured.");
+    }
 
     $candidate_models = get_gemini_candidate_models();
     $payload = _build_gemini_payload($msgs, $is_json, $max_tokens, $temperature, $top_p);
     $post_json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 
     $start_time = microtime(true);
-    $total_timeout = max(5, (int)$timeout);
+    $total_timeout = $prov === 'ollama' ? max(180, (int)$timeout) : max(5, (int)$timeout);
 
     foreach ($candidate_models as $model) {
-        $is_deepseek = str_starts_with($model, 'deepseek');
+        $is_ollama = ($prov === 'ollama');
+        $is_deepseek = !$is_ollama && str_starts_with($model, 'deepseek');
         if ($is_deepseek && !$ds_key) continue;
-        if (!$is_deepseek && !$api_key) continue;
+        if (!$is_deepseek && !$is_ollama && !$api_key) continue;
 
         $elapsed = microtime(true) - $start_time;
         $remaining = $total_timeout - $elapsed;
@@ -86,7 +97,12 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             break;
         }
 
-        if ($is_deepseek) {
+        if ($is_ollama) {
+            $url = "{$ollama_host}/api/chat";
+            $ol_payload = _build_ollama_payload($msgs, $model, $is_json, $max_tokens, $temperature, $top_p);
+            $body = json_encode($ol_payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            $headers = ["Content-Type: application/json"];
+        } elseif ($is_deepseek) {
             $url = "https://api.deepseek.com/chat/completions";
             $ds_payload = _build_deepseek_payload($msgs, $model, $is_json, $max_tokens, $temperature, $top_p, false);
             $body = json_encode($ds_payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -105,8 +121,8 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_CONNECTTIMEOUT => max(3, min(6, (int)$remaining)),
             CURLOPT_TIMEOUT => (int)ceil($remaining),
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_SSL_VERIFYPEER => !$is_ollama,
+            CURLOPT_SSL_VERIFYHOST => $is_ollama ? 0 : 2,
         ]);
 
         $res = curl_exec($ch);
@@ -123,7 +139,14 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             continue;
         }
 
-        if ($is_deepseek) {
+        if ($is_ollama) {
+            $data = json_decode($res, true);
+            $content = (string)($data['message']['content'] ?? '');
+            if ($is_json && preg_match('/```(?:json)?\s*([\s\S]*?)```/i', $content, $m)) {
+                $content = trim($m[1]);
+            }
+            $version = $data['model'] ?? $model;
+        } elseif ($is_deepseek) {
             $data = json_decode($res, true);
             $content = (string)($data['choices'][0]['message']['content'] ?? '');
             if ($is_json && preg_match('/```(?:json)?\s*([\s\S]*?)```/i', $content, $m)) {
@@ -145,12 +168,14 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
 }
 
 /**
- * SSE 스트리밍 Gemini / DeepSeek API 호출
+ * SSE 스트리밍 Gemini / DeepSeek / Ollama API 호출
  */
 function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperature = null, $top_p = null) {
+    $prov = docent_llm_provider();
     $api_key = get_cfg('GEMINI_API_KEY') ?: get_cfg('API_KEY');
     $ds_key = get_cfg('DEEPSEEK_API_KEY');
-    if (!$api_key && !$ds_key) {
+    $ollama_host = rtrim((string)get_cfg('OLLAMA_HOST', 'http://localhost:11434'), '/');
+    if ($prov !== 'ollama' && !$api_key && !$ds_key) {
         throw new RuntimeException("Gemini/DeepSeek API key is not configured.");
     }
 
@@ -159,11 +184,17 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
     $post_json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 
     foreach ($candidate_models as $model) {
-        $is_deepseek = str_starts_with($model, 'deepseek');
+        $is_ollama = ($prov === 'ollama');
+        $is_deepseek = !$is_ollama && str_starts_with($model, 'deepseek');
         if ($is_deepseek && !$ds_key) continue;
-        if (!$is_deepseek && !$api_key) continue;
+        if (!$is_deepseek && !$is_ollama && !$api_key) continue;
 
-        if ($is_deepseek) {
+        if ($is_ollama) {
+            $url = "{$ollama_host}/v1/chat/completions";
+            $ol_payload = _build_deepseek_payload($msgs, $model, false, $max_tokens, $temperature, $top_p, true);
+            $body = json_encode($ol_payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            $headers = ["Content-Type: application/json"];
+        } elseif ($is_deepseek) {
             $url = "https://api.deepseek.com/chat/completions";
             $ds_payload = _build_deepseek_payload($msgs, $model, false, $max_tokens, $temperature, $top_p, true);
             $body = json_encode($ds_payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -176,6 +207,7 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
         $buffer = '';
         $chunks_delivered = 0;
         $finished = false;
+        $is_openai_sse = ($is_deepseek || $is_ollama);
 
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -183,10 +215,10 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
             CURLOPT_POSTFIELDS => $body,
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_CONNECTTIMEOUT => 8,
-            CURLOPT_TIMEOUT => 90,
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, &$chunks_delivered, &$finished, $on_chunk, $is_deepseek) {
+            CURLOPT_TIMEOUT => $is_ollama ? 300 : 90,
+            CURLOPT_SSL_VERIFYPEER => !$is_ollama,
+            CURLOPT_SSL_VERIFYHOST => $is_ollama ? 0 : 2,
+            CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, &$chunks_delivered, &$finished, $on_chunk, $is_openai_sse) {
                 $buffer .= $data;
                 while (preg_match('/^(.*?)(?:\r?\n\r?\n)/s', $buffer, $matches)) {
                     $block = $matches[1];
@@ -201,7 +233,7 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
                                 continue;
                             }
                             $parsed = json_decode($raw, true);
-                            if ($is_deepseek) {
+                            if ($is_openai_sse) {
                                 if (!empty($parsed['choices'][0]['finish_reason'])) $finished = true;
                                 $delta = $parsed['choices'][0]['delta']['content'] ?? '';
                                 if ($delta !== '') {
@@ -303,5 +335,32 @@ function _build_deepseek_payload($msgs, $model, $is_json, $max_tokens, $temperat
         'max_tokens' => $max_tokens ? (int)max(1, min(8192, $max_tokens)) : 4096,
         'stream' => (bool)$stream,
     ];
+    return $payload;
+}
+
+function _build_ollama_payload($msgs, $model, $is_json, $max_tokens, $temperature, $top_p) {
+    $messages = [];
+    foreach ($msgs as $m) {
+        $role = in_array($m['role'] ?? 'user', ['system', 'assistant', 'user'], true) ? $m['role'] : 'user';
+        $messages[] = ['role' => $role, 'content' => (string)($m['content'] ?? '')];
+    }
+
+    $default_temp = (float)get_cfg('GEMINI_TEMPERATURE', '0.1');
+    $default_topp = (float)get_cfg('GEMINI_TOP_P', '0.85');
+
+    $payload = [
+        'model' => $model,
+        'messages' => $messages,
+        'stream' => false,
+        'think' => false,
+        'options' => [
+            'temperature' => is_numeric($temperature) ? (float)$temperature : $default_temp,
+            'top_p' => is_numeric($top_p) ? (float)$top_p : $default_topp,
+            'num_predict' => $max_tokens ? (int)max(1, min(8192, $max_tokens)) : 4096,
+        ],
+    ];
+    if ($is_json) {
+        $payload['format'] = 'json';
+    }
     return $payload;
 }

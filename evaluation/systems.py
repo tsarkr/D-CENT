@@ -100,17 +100,52 @@ def _call_deepseek(messages: list[dict[str, str]], model: str, api_key: str, max
     raise RuntimeError("DeepSeek API 재시도 한도 초과 (429/503)")
 
 
+def _call_ollama(messages: list[dict[str, str]], model: str, host: str, max_tokens: int) -> str:
+    """Call local Ollama /api/chat endpoint with thinking disabled."""
+    url = f"{host.rstrip('/')}/api/chat"
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
+        "stream": False,
+        "think": False,
+        "options": {
+            "temperature": TEMPERATURE,
+            "top_p": TOP_P,
+            "num_predict": max_tokens,
+        },
+    }
+    for attempt in range(4):
+        try:
+            resp = requests.post(url, json=payload, timeout=300)
+            if resp.status_code == 200:
+                data = resp.json()
+                MODEL_VERSIONS[data.get("model") or model] += 1
+                return str(data.get("message", {}).get("content", "")).strip()
+            wait_time = max(5, (attempt + 1) * 5)
+            print(f" (Ollama 재시도 대기 {wait_time}초: {resp.status_code})...", end="", flush=True)
+            time.sleep(wait_time)
+        except requests.RequestException:
+            if attempt == 3:
+                raise RuntimeError("Ollama API 요청 실패 (연결 오류)") from None
+            time.sleep(5)
+    raise RuntimeError("Ollama API 재시도 한도 초과")
+
+
 def call_llm(messages: list[dict[str, str]], max_tokens: int | None = None) -> str:
-    """Call the configured generator: Gemini, or DeepSeek when LLM_PROVIDER = deepseek."""
+    """Call the configured generator: Gemini, DeepSeek, or local Ollama."""
     temperature, top_p = TEMPERATURE, TOP_P
     max_tokens = max_tokens or ANSWER_MAX_TOKENS
     secrets = load_secrets()
     model = llm_model(secrets)
-    if llm_provider(secrets) == "deepseek":
+    prov = llm_provider(secrets)
+    if prov == "deepseek":
         ds_key = setting("DEEPSEEK_API_KEY", "", secrets)
         if not ds_key:
             raise RuntimeError("DEEPSEEK_API_KEY가 설정되지 않았습니다.")
         return _call_deepseek(messages, model, ds_key, max_tokens)
+    if prov == "ollama":
+        host = setting("OLLAMA_HOST", "http://localhost:11434", secrets)
+        return _call_ollama(messages, model, host, max_tokens)
 
     api_key = setting("GEMINI_API_KEY", "", secrets)
     if not api_key:

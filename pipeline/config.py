@@ -77,26 +77,29 @@ def setting(key: str, default: str = "", secrets: dict[str, Any] | None = None) 
 
 
 def llm_provider(secrets: dict[str, Any] | None = None) -> str:
-    """Generator provider: LLM_PROVIDER = gemini (default) | deepseek.
+    """Generator provider: LLM_PROVIDER = gemini (default) | deepseek | ollama.
 
     An older setting GEMINI_MODEL = "deepseek-…" is still read as DeepSeek.
     """
     provider = setting("LLM_PROVIDER", "", secrets).strip().lower()
     if not provider:
         provider = "deepseek" if setting("GEMINI_MODEL", "", secrets).startswith("deepseek") else "gemini"
-    if provider not in ("gemini", "deepseek"):
-        raise ValueError("LLM_PROVIDER must be 'gemini' or 'deepseek'.")
+    if provider not in ("gemini", "deepseek", "ollama"):
+        raise ValueError("LLM_PROVIDER must be 'gemini', 'deepseek', or 'ollama'.")
     return provider
 
 
 def llm_model(secrets: dict[str, Any] | None = None) -> str:
     """Name of the configured generator model (the same value the PHP server reports)."""
-    if llm_provider(secrets) == "deepseek":
+    prov = llm_provider(secrets)
+    if prov == "deepseek":
         model = setting("DEEPSEEK_MODEL", "", secrets).strip()
         if not model:
             legacy = setting("GEMINI_MODEL", "", secrets).strip()
             model = legacy if legacy.startswith("deepseek") else "deepseek-chat"
         return model
+    if prov == "ollama":
+        return setting("OLLAMA_MODEL", "gemma4:26b", secrets).strip()
     return setting("GEMINI_MODEL", "gemini-flash-lite-latest", secrets).strip()
 
 

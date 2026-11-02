@@ -8,6 +8,7 @@
 *.secret
 .streamlit/
 .pg_meta_cache*.json
+.docker-data/
 
 # Python & PHP environments
 .venv*/

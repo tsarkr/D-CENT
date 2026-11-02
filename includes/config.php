@@ -33,9 +33,10 @@ if (file_exists(__DIR__ . '/../.env')) {
 } elseif (file_exists(__DIR__ . '/../.streamlit/secrets.toml')) {
     $secrets_content = file_get_contents(__DIR__ . '/../.streamlit/secrets.toml');
     if ($secrets_content !== false) {
-        if (preg_match_all('/^\s*([A-Za-z0-9_]+)\s*=\s*["\'](.+?)["\']\\s*$/m', $secrets_content, $matches, PREG_SET_ORDER)) {
+        if (preg_match_all('/^\s*([A-Za-z0-9_]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')(?:\s*#.*)?\s*$/m', $secrets_content, $matches, PREG_SET_ORDER)) {
             foreach ($matches as $m) {
-                $k = $m[1]; $v = $m[2];
+                $k = $m[1];
+                $v = isset($m[3]) && $m[3] !== '' ? $m[3] : ($m[2] ?? '');
                 if (getenv($k) === false) {
                     putenv("{$k}={$v}");
                     $_ENV[$k] = $v;
