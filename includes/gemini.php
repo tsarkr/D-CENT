@@ -83,6 +83,7 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
 
     $start_time = microtime(true);
     $total_timeout = $prov === 'ollama' ? max(180, (int)$timeout) : max(5, (int)$timeout);
+    @set_time_limit(max(300, $total_timeout + 60));
 
     foreach ($candidate_models as $model) {
         $is_ollama = ($prov === 'ollama');
