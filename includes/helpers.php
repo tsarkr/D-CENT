@@ -411,3 +411,56 @@ function docent_context_items($context) {
         $context, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
     return array_values(array_filter(array_map('trim', $items ?: []), static fn($s) => $s !== ''));
 }
+
+/**
+ * 현대 자연어 질의와 3·1운동 1차 사료/지식그래프 간의 역사적 어휘 및 동의어 사전
+ */
+function get_historical_synonyms(): array {
+    static $dict = [
+        '탑골공원'        => ['파고다공원', '파고다', '경성 파고다공원'],
+        '탑골'            => ['파고다공원', '파고다'],
+        '파고다공원'      => ['탑골공원', '파고다공원'],
+        '서울'            => ['경성', '경성부'],
+        '남대문역'        => ['남대문정거장', '서울 남대문역', '남대문역 앞'],
+        '아우내'          => ['병천', '갈전면', '천안 갈전면'],
+        '아우내장터'      => ['아우내', '병천', '갈전면'],
+        '아우내 장터'     => ['아우내', '병천', '갈전면'],
+        '태화관'          => ['명월관 지점', '태화관'],
+        '숭덕학교'        => ['평양 숭덕학교', '숭덕학교 교정'],
+        '서문외교회'      => ['평양 서문외 교회', '서문외 교회'],
+        '서문외 교회'     => ['평양 서문외 교회', '서문외교회'],
+        '배재고등보통학교' => ['배재고보', '배재학교', '배재고등보통학교'],
+        '배재고보'        => ['배재고등보통학교', '배재학교'],
+        '연희전문학교'    => ['연희전문', '연전', '연희전문학교'],
+        '연희전문'        => ['연희전문학교', '연전'],
+        '보성사'          => ['보성사', '천도교중앙총부'],
+        '천도구국단'      => ['천도교', '보성사'],
+    ];
+    return $dict;
+}
+
+/**
+ * 입력 문자열 또는 키워드 목록에서 역사적 동의어를 찾아 확장된 목록 반환
+ */
+function expand_historical_synonyms($input): array {
+    $dict = get_historical_synonyms();
+    $expanded = [];
+
+    $text = is_array($input) ? implode(' ', $input) : (string)$input;
+    foreach ($dict as $canon => $syns) {
+        if (mb_strpos($text, $canon) !== false) {
+            $expanded[] = $canon;
+            foreach ($syns as $s) {
+                $expanded[] = $s;
+            }
+        }
+    }
+
+    if (is_array($input)) {
+        foreach ($input as $item) {
+            $expanded[] = (string)$item;
+        }
+    }
+
+    return array_values(array_unique(array_filter($expanded, fn($k) => trim($k) !== '')));
+}

@@ -283,12 +283,21 @@ function _explain_prompts_zh(string $term, string $context, string $fact_table):
  */
 function get_citation_rule(string $lang): string {
     if ($lang === 'en') {
-        return "[Citations] After each key claim, give its source in parentheses: either a record identifier exactly as written in "
-             . "<SOURCE_EVIDENCE id=\"...\"> (e.g., raw_bibliography-123) or an incident name exactly as it appears in the evidence. "
+        return "[Citation Rules & Examples]\n"
+             . "After each key claim, give its source in parentheses: either a record identifier exactly as written in "
+             . "<SOURCE_EVIDENCE id=\"...\"> (e.g., raw_bibliography-123) or an incident name exactly as it appears in the evidence.\n"
+             . "Valid examples: (raw_source_info-25649) or <SOURCE_EVIDENCE id=\"raw_source_info-25649\"/>\n"
              . "Do not cite relation names, block labels (such as g_1), or terms such as 'knowledge graph'. "
              . "If the evidence does not support a premise of the question, reject it or state that the records do not confirm it.";
     }
-    return "[근거 표기] 각 핵심 주장 뒤에 근거를 괄호로 표시하십시오. 괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 적힌 기록 식별자"
-         . "(예: raw_bibliography-123) 또는 문맥에 그대로 적힌 사건명만 쓰십시오. 관계 이름, 블록 이름(g_1 등), "
-         . "'지식그래프' 같은 표기는 근거로 쓰지 마십시오. 근거가 없는 질문의 전제는 부정하거나 '자료에서 확인되지 않음'이라고 답하십시오.";
+    return "[근거 표기 지침 및 예시 (필수 준수)]\n"
+         . "작성하는 모든 핵심 사실 주장 및 인물·사건 서술 뒤에는 반드시 괄호 형태로 사료 출처를 명시하십시오.\n"
+         . "괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 명시된 기록 식별자(예: raw_source_info-25649) 또는 문맥의 사건명을 정확히 기재하십시오.\n"
+         . "■ 올바른 표기 예시:\n"
+         . "  * \"1919년 2월 평양 야소교서원에서 시위 계획을 협의하였다 (raw_source_info-25649).\"\n"
+         . "  * \"손병희 등과 연락하여 3월 1일 독립선언식을 계획하였다 <SOURCE_EVIDENCE id=\"raw_source_info-25649\"/>.\"\n"
+         . "  * \"해당 인물이 직접 현장에서 시위를 지휘했다는 기록은 확인되지 않는다 (3월 1일 평남 평양부 독립선언식 시위).\"\n"
+         . "■ 금지 표기:\n"
+         . "  * 관계명(P14_carried_out_by), 블록명(g_1, graphrag_1), '지식그래프', 'Graph DB' 등 전산 메타 용어는 근거로 절대 기재하지 마십시오.\n"
+         . "  * 근거가 없는 질문의 전제는 부정하거나 '사료에서 확인되지 않음'으로 명확히 서술하십시오.";
 }

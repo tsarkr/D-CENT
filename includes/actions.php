@@ -73,6 +73,8 @@ function handle_action_analyze() {
         $new_resp_lang = $parsed['response_language'] ?? 'ko';
     }
 
+    $new_keywords = array_values(array_unique(array_merge($new_keywords, expand_historical_synonyms($term))));
+
     $output = [
         "intent_type" => $new_intent,
         "search_keywords" => $new_keywords,
@@ -114,13 +116,29 @@ function graphrag_detect_entities(string $query): array {
         '박은식', '이회영', '윤봉길', '이봉창', '나석주', '안중근', '조소앙',
         '여운형', '조만식', '이상재', '김규식', '서재필', '이동녕', '이시영',
         '조인원', '김구응', '유중권', '유중무', '이소제', '홍일선',
+        '이종일', '최린', '최남선', '이승훈', '오세창', '권동진', '길선주', '양전백',
+        '이필주', '김병조', '백용성', '정춘수', '김창준', '신석구', '오화영', '임예환',
+        '홍병기', '박희도', '나인협', '나용환', '홍기조', '이종훈', '박인호', '이갑성',
+        '안세환', '곽권응', '윤원삼', '정일선', '황찬영', '박인관', '이만규', '윤자영',
+        '박윤하', '박쾌인', '김원벽', '강기덕',
     ];
     static $place_keywords  = [
         '아우내', '병천', '제암리', '화성', '사강리', '송산', '수촌리', '천안',
         '서울', '경성', '평양', '의주', '선천', '간도', '연해주', '상해',
+        '보성사', '태화관', '탑골공원', '파고다공원', '숭덕학교', '배재고보', '배재고등보통학교',
+        '연희전문', '연희전문학교', '서문외교회', '서문외 교회', '남대문역', '남대문정거장',
+        '안악', '해주', '삭주', '함흥', '진남포',
     ];
 
     $detected = [];
+
+    // 역사적 동의어 사전 확장 매칭
+    $syn_detected = expand_historical_synonyms($query);
+    foreach ($syn_detected as $syn) {
+        if (!in_array($syn, $detected, true)) {
+            $detected[] = $syn;
+        }
+    }
 
     // 알려진 인물명 직접 매칭
     foreach ($known_persons as $p) {
@@ -403,6 +421,31 @@ function graphrag_incident_rows(object $client, string $query, ?float $deadline 
             RETURN e.id AS id, name, e.날짜 AS date
             ORDER BY size(name) DESC
             LIMIT 10", ['flat' => $flat], $timeout());
+
+        // 질의가 사건명 전체를 완벽히 포함하지 않는 자연어/Curated 문항 대응 (동의어 및 핵심 토큰 매칭)
+        if (empty($found) && $timeout() >= 1.0) {
+            $syns = expand_historical_synonyms($query);
+            $query_tokens = [];
+            foreach (array_merge([$query], $syns) as $src) {
+                if (preg_match_all('/([가-힣]{2,})/u', $src, $m)) {
+                    foreach ($m[1] as $w) {
+                        if (!in_array($w, ['어떻게', '무엇', '기록', '대한', '관여', '인물', '시위', '만세', '사건', '과정', '활동', '역할', '배경'], true) && mb_strlen($w) >= 2) {
+                            $query_tokens[] = $w;
+                        }
+                    }
+                }
+            }
+            $query_tokens = array_values(array_unique(array_slice($query_tokens, 0, 8)));
+            if (!empty($query_tokens)) {
+                $found = graphrag_run_with_timeout($client, "
+                    MATCH (e:Event)
+                    WITH e, coalesce(e.사건명, e.name) AS name
+                    WHERE name IS NOT NULL AND any(kw IN \$tokens WHERE name CONTAINS kw)
+                    RETURN e.id AS id, name, e.날짜 AS date
+                    ORDER BY size(name) DESC
+                    LIMIT 10", ['tokens' => $query_tokens], $timeout());
+            }
+        }
     } catch (\Throwable $e) {
         error_log('GraphRAG incident lookup failed: ' . $e->getMessage());
         return [];
@@ -1073,7 +1116,7 @@ function handle_action_graph() {
         }
     }
 
-    $specific_candidates = array_values(array_unique($specific_candidates));
+    $specific_candidates = array_values(array_unique(array_merge($specific_candidates, expand_historical_synonyms(array_merge($keywords, [$term])))));
     $general_candidates = array_values(array_unique($general_candidates));
 
     if (!empty($specific_candidates)) {

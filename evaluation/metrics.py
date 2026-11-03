@@ -398,10 +398,10 @@ def normalize_citation_tags(answer: str) -> str:
         found = re.search(r"\bid\s*=\s*\"?([^\"\s>/]+)", m.group(1) or "")
         ident = found.group(1) if found else ""
         inner = (m.group(2) or "").strip()
-        if ident.lower().startswith("raw_"):
-            return ident
-        return inner or ident
+        val = ident if ident.lower().startswith("raw_") else (inner or ident)
+        return f" ({val}) "
     text = CITE_TAG_RE.sub(rep, answer or "")
+    text = re.sub(r"<\s*(raw_[a-zA-Z0-9_\-]+)\s*>", r" (\1) ", text)
     return re.sub(r"</?SOURCE_EVIDENCE[^>]*>", "", text, flags=re.IGNORECASE)
 
 
