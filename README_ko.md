@@ -199,6 +199,29 @@ EVAL_DELAY = "15"                                 # 호출 간격(초)
 Ollama를 쓰면 `OLLAMA_NUM_CTX`(문맥 창, 16384)와 `OLLAMA_SEED`(42). 실행 중 읽는 데이터 파일:
 `includes/citation_rules.json`(근거 표기 규칙, 평가와 공유), `includes/historical_synonyms.json`(지명 이표기).
 
+### Ollama 설정
+
+Ollama는 프롬프트가 문맥 창보다 길면 경고 없이 앞부분을 잘라 내고 뒷부분만 씁니다. 기본 문맥 창(버전에 따라
+2,048 또는 4,096토큰)은 D-CENT의 생성 프롬프트(근거 11,000자에 약 8,800토큰)보다 작아서, 프롬프트 앞쪽의
+시스템 지시와 서사 경로가 사라집니다. 다음 설정으로 막습니다.
+
+| 설정 | 넣는 곳 | 값 | 효과 |
+|---|---|---|---|
+| `OLLAMA_NUM_CTX` | `.streamlit/secrets.toml` 또는 `.env` | 16384 (기본값) | 평가와 `docent.php`의 모든 생성 호출에 `num_ctx`로 함께 보냄 |
+| `OLLAMA_CONTEXT_LENGTH` | `ollama serve`의 환경 변수 | 16384 | `num_ctx`를 보내지 않는 호출에도 적용되는 서버 기본값 |
+| `OLLAMA_MAX_LOADED_MODELS` | `ollama serve`의 환경 변수 | 2 | 생성 모델과 임베딩 모델을 함께 메모리에 둠 |
+| `OLLAMA_SEED` | `.streamlit/secrets.toml` 또는 `.env` | 42 (기본값) | 생성 시드 고정 |
+
+```bash
+OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # 메뉴 막대의 Ollama 앱은 먼저 종료
+# 또는 macOS 앱에 적용 (맥을 다시 켜기 전까지 유지):
+launchctl setenv OLLAMA_CONTEXT_LENGTH 16384 && launchctl setenv OLLAMA_MAX_LOADED_MODELS 2   # 그다음 앱 재시작
+ollama ps    # 질문을 하나 돌린 뒤: 생성 모델의 CONTEXT가 16384이면 정상
+```
+
+임베딩 모델 `nomic-embed-text`는 자기 문맥 창 2,048토큰을 그대로 씁니다. 500자 조각에는 충분하며, 바꾸면
+색인이 달라지므로 두십시오. 실서버의 Ollama는 임베딩만 하고 생성은 DeepSeek가 하므로 기본값을 바꿀 필요가 없습니다.
+
 ## 데이터 구축
 
 ```bash

@@ -201,6 +201,31 @@ Optional web-server settings: `DOCENT_CONTEXT_CHARS` (generation context budget,
 (context window, 16384) and `OLLAMA_SEED` (42). Data files read at runtime: `includes/citation_rules.json`
 (citation rule, shared with the evaluation) and `includes/historical_synonyms.json` (place-name variants).
 
+### Ollama settings
+
+Ollama cuts every prompt to its context window without warning, keeping the end and dropping the start. Its
+default window (2,048 or 4,096 tokens, depending on the version) is smaller than the generation prompt of
+D-CENT (about 8,800 tokens for 11,000 characters of evidence), so the system rules and the narrative paths at the
+start of the prompt would be lost. Two settings guard against this:
+
+| Setting | Where | Value | Effect |
+|---|---|---|---|
+| `OLLAMA_NUM_CTX` | `.streamlit/secrets.toml` or `.env` | 16384 (default) | sent as `num_ctx` with every generation call of the evaluation and of `docent.php` |
+| `OLLAMA_CONTEXT_LENGTH` | environment of `ollama serve` | 16384 | the server-wide default, for any call that does not send `num_ctx` |
+| `OLLAMA_MAX_LOADED_MODELS` | environment of `ollama serve` | 2 | keeps the generator and the embedding model loaded together |
+| `OLLAMA_SEED` | `.streamlit/secrets.toml` or `.env` | 42 (default) | fixed seed for generation |
+
+```bash
+OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # quit the Ollama menu-bar app first
+# or, for the macOS app (until the next restart of the Mac):
+launchctl setenv OLLAMA_CONTEXT_LENGTH 16384 && launchctl setenv OLLAMA_MAX_LOADED_MODELS 2   # then restart the app
+ollama ps    # after one question: CONTEXT shows 16384 for the generator
+```
+
+The embedding model `nomic-embed-text` keeps its own window of 2,048 tokens, which covers a 500-character chunk;
+leave it unchanged, since a different window would change the index. On the production server Ollama only embeds
+(generation goes to DeepSeek), so its defaults need no change.
+
 ## Building the data
 
 ```bash
