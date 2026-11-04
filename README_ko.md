@@ -266,8 +266,15 @@ php -S 127.0.0.1:8000      # 저장소 루트에서
 `dcent`와 `no-paths`는 실행 중인 웹 도슨트를 호출하므로 서버를 평가 모드로 띄우고 `DOCENT_URL`을 설정합니다.
 
 ```bash
-PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000     # 다른 터미널에서
+OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # 터미널 1 (임베딩, LLM_PROVIDER=ollama면 생성 모델도)
+python -m pipeline retriever                                          # 터미널 2: 기록 검색 서비스 (127.0.0.1:8765)
+DOCENT_RETRIEVER_URL=http://127.0.0.1:8765 PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000   # 터미널 3
 ```
+
+D-CENT는 기록 원문을 하이브리드 기준선과 같은 검색기(`pipeline/retrieval.py`)로 찾습니다. 이 검색기는
+`python -m pipeline retriever`로 띄우고, PHP 서버와 평가 모두에 `DOCENT_RETRIEVER_URL`을 설정합니다(평가의
+하이브리드 기준선도 같은 서비스를 씁니다). 사이트는 검색 서비스 없이도 이름 일치 검색만으로 동작하지만,
+평가는 검색 서비스가 없으면 시작하지 않습니다.
 
 평가 모드의 `explain`은 생성에 쓴 문맥과 팩트 표를 함께 돌려주고, 공통 생성 조건을 적용하며, 기록
 식별자 인용을 요구합니다. 검색과 문맥 구성은 배포 경로 그대로입니다. `explain`은 분당 5회로 제한되므로
@@ -332,7 +339,7 @@ Neo4j는 대상 DB 읽기만 허용하고 소유권·쓰기·스키마 변경·�
 .venv3.14/bin/python -m pipeline check
 php -l docent.php && php -l includes/actions.php
 .venv3.14/bin/python -B -m unittest discover -s tests -v
-php -n tests/gemini_safety.php
+php -n tests/llm_safety.php
 # 별도 테스트 폴더에 jsdom@26.1.0 설치 후:
 NODE_PATH=/path/to/test/node_modules node tests/rendering_safety.cjs
 ```

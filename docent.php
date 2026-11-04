@@ -6,7 +6,8 @@
  * - includes/config.php   : 환경변수, 세션, 포커스 및 언어 설정
  * - includes/security.php : CSRF, Origin 검증, Rate-Limit, Sanitize
  * - includes/database.php : Neo4j, PostgreSQL 접속 및 메타데이터 캐시
- * - includes/gemini.php   : Gemini API 동기/스트리밍 호출
+ * - includes/llm.php      : 생성 모델 호출 (Gemini / DeepSeek / Ollama)
+ * - includes/retriever.php: 원천 기록 검색 (로컬 검색 서비스, pipeline/retriever_server.py)
  * - includes/prompts.php  : 4개 언어별 RAG 해설 프롬프트 템플릿
  * - includes/helpers.php  : 노드맵, 엣지, evidence, merge, prefetch 등 그래프 처리
  * - includes/actions.php  : AJAX 액션 핸들러 (analyze, graph, pg_prefetch, explain, node_detail)
@@ -15,7 +16,8 @@
 require_once __DIR__ . '/includes/config.php';
 require_once __DIR__ . '/includes/security.php';
 require_once __DIR__ . '/includes/database.php';
-require_once __DIR__ . '/includes/gemini.php';
+require_once __DIR__ . '/includes/llm.php';
+require_once __DIR__ . '/includes/retriever.php';
 require_once __DIR__ . '/includes/helpers.php';
 require_once __DIR__ . '/includes/prompts.php';
 require_once __DIR__ . '/includes/actions.php';
@@ -42,7 +44,7 @@ if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) 
     $_SESSION['docent_csrf'] = $token;
     $token_response = ['csrf_token' => $token];
     if (get_cfg('DOCENT_EVAL_MODE', '0') === '1') {
-        $files = array_merge(glob(__DIR__ . '/includes/*.php'), [__FILE__]);
+        $files = array_merge(glob(__DIR__ . '/includes/*.php'), glob(__DIR__ . '/includes/*.json'), [__FILE__]);
         sort($files);
         $hash = hash_init('sha256');
         foreach ($files as $file) hash_update_file($hash, $file);
@@ -56,6 +58,10 @@ if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) 
         $token_response['evaluation'] = [
             'model' => docent_llm_model(),
             'context_chars' => (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'),
+            'narrative_chars' => (int)get_cfg('DOCENT_NARRATIVE_CHARS', '3500'),
+            'evidence_chars' => (int)get_cfg('DOCENT_EVIDENCE_CHARS', '2500'),
+            // 기록 검색기 색인(청크 수·다이제스트·모델). 평가는 이것이 없으면 시작하지 않는다.
+            'retriever_index' => (function () { try { return docent_retriever_index(); } catch (\Throwable $e) { return null; } })(),
             'analysis_temperature' => (float)get_cfg('GEMINI_TEMPERATURE', '0.1'),
             'analysis_top_p' => (float)get_cfg('GEMINI_TOP_P', '0.85'),
             'code_sha256' => hash_final($hash),

@@ -272,6 +272,31 @@ function select_prefetch_names_by_degree($nodes, $edges) {
 }
 
 // ── Evidence Context 구축 (예산 제한) ──
+/**
+ * 생성 문맥 조립: 서사 경로 → 그래프 사료 → 원천 기록 순서로 놓고, 하나의 예산(기본 11,000자)을 나눈다.
+ *
+ * - 서사 경로는 맨 앞에 놓여 사건의 시간 순서를 먼저 전달한다(상한 $narrative_cap).
+ * - 나머지는 원천 기록에 먼저 배정한다. 그래프 사료(인물·단체 소개 등)에는 $evidence_cap만 남겨 두고,
+ *   기록이 다 쓰지 않은 몫만 그래프 사료가 더 쓴다. 그래프 사료가 예산의 절반 가까이를 차지하면
+ *   질문에 답하는 세부 사실이 적힌 기록 원문이 밀려나기 때문이다.
+ * - 블록 사이 구분자("\n\n")도 예산에 포함한다.
+ * 반환: ['context' => 생성 문맥, 'narrative_chars' => 실제로 들어간 서사 경로 글자 수]
+ */
+function docent_assemble_context(string $narrative, array $evidences, array $pg_texts, string $lang, string $term, string $focus,
+                                 int $total_budget, int $narrative_cap, int $evidence_cap): array {
+    $total_budget = max(2000, $total_budget);
+    $narrative_block = mb_substr($narrative, 0, max(0, min($total_budget, $narrative_cap)));
+    $remaining = $total_budget - mb_strlen($narrative_block) - ($narrative_block !== '' ? 2 : 0);
+    $evidence_reserve = ($remaining > 0 && !empty($evidences)) ? min(max(0, $evidence_cap), $remaining) : 0;
+    $pg_budget = $remaining - $evidence_reserve - ($evidence_reserve > 0 ? 2 : 0);
+    $pg_context = $pg_budget > 0 ? build_budgeted_pg_context($pg_texts, $lang, 25, 180, 450, $pg_budget, $term, $focus) : '';
+    $remaining -= mb_strlen($pg_context) + ($pg_context !== '' ? 2 : 0);
+    $evidence_context = $remaining > 0
+        ? build_budgeted_evidence_context($evidences, $lang, 20, 250, 600, $remaining, $term, $focus) : '';
+    $context = trim(implode("\n\n", array_filter([$narrative_block, $evidence_context, $pg_context], fn($b) => $b !== '')));
+    return ['context' => $context, 'narrative_chars' => mb_strlen($narrative_block)];
+}
+
 function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
     if (is_bool($lang)) $lang = $lang ? 'en' : 'ko';
     $lines = []; $used_chars = 0;
@@ -413,29 +438,15 @@ function docent_context_items($context) {
 }
 
 /**
- * 현대 자연어 질의와 3·1운동 1차 사료/지식그래프 간의 역사적 어휘 및 동의어 사전
+ * 현대 표기와 사료 표기 사이의 지명·단체명 동의어 사전 (includes/historical_synonyms.json).
+ * 표제어는 개발 세트의 엄선 문항에서 나왔다: 그 세트의 점수는 개발 결과로만 보고한다.
  */
 function get_historical_synonyms(): array {
-    static $dict = [
-        '탑골공원'        => ['파고다공원', '파고다', '경성 파고다공원'],
-        '탑골'            => ['파고다공원', '파고다'],
-        '파고다공원'      => ['탑골공원', '파고다공원'],
-        '서울'            => ['경성', '경성부'],
-        '남대문역'        => ['남대문정거장', '서울 남대문역', '남대문역 앞'],
-        '아우내'          => ['병천', '갈전면', '천안 갈전면'],
-        '아우내장터'      => ['아우내', '병천', '갈전면'],
-        '아우내 장터'     => ['아우내', '병천', '갈전면'],
-        '태화관'          => ['명월관 지점', '태화관'],
-        '숭덕학교'        => ['평양 숭덕학교', '숭덕학교 교정'],
-        '서문외교회'      => ['평양 서문외 교회', '서문외 교회'],
-        '서문외 교회'     => ['평양 서문외 교회', '서문외교회'],
-        '배재고등보통학교' => ['배재고보', '배재학교', '배재고등보통학교'],
-        '배재고보'        => ['배재고등보통학교', '배재학교'],
-        '연희전문학교'    => ['연희전문', '연전', '연희전문학교'],
-        '연희전문'        => ['연희전문학교', '연전'],
-        '보성사'          => ['보성사', '천도교중앙총부'],
-        '천도구국단'      => ['천도교', '보성사'],
-    ];
+    static $dict = null;
+    if ($dict === null) {
+        $data = json_decode((string)file_get_contents(__DIR__ . '/historical_synonyms.json'), true);
+        $dict = is_array($data['synonyms'] ?? null) ? $data['synonyms'] : [];
+    }
     return $dict;
 }
 

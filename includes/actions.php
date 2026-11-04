@@ -43,7 +43,7 @@ function handle_action_analyze() {
 
     // analyze는 경량 분류이므로 짧은 타임아웃(10초)으로 실행하여 게이트웨이 504 타임아웃 차단
     try {
-        $res = call_gemini([
+        $res = call_llm([
             ["role" => "system", "content" => $system_prompt],
             ["role" => "user", "content" => (string)$term]
         ], true, 500, 0.0, 0.8, 10);
@@ -173,7 +173,7 @@ function graphrag_detect_entities(string $query): array {
                             . "입력 문장에서 핵심 고유명사만 JSON 배열로 반환하십시오.\n"
                             . "규칙: 조사/어미 제거, 역사적 맥락 고유명사만, 최대 5개, 마크다운 없음.\n"
                             . "출력 예: [\"유관순\", \"아우내\", \"수원\"]";
-            $ner_raw = call_gemini([
+            $ner_raw = call_llm([
                 ['role' => 'system', 'content' => $ner_prompt_sys],
                 ['role' => 'user',   'content' => $query],
             ], true, 256, 0.0, 0.8, 15);
@@ -394,6 +394,18 @@ function graphrag_compare_by_date(array $a, array $b): int {
 /** At most this many incidents named in a question are expanded. */
 const GRAPHRAG_INCIDENT_MAX = 3;
 
+/** 질문(공백 제거)에 사건명 전체가 들어 있는 사건. 긴 이름부터. 이름을 대지 않은 질문은 사건 경로 없이 기록 검색으로 답한다. */
+function graphrag_incidents_by_name(object $client, string $flat, float $timeout): array {
+    return graphrag_run_with_timeout($client, "
+        MATCH (e:Event)
+        WITH e, coalesce(e.사건명, e.name) AS name
+        WHERE name IS NOT NULL AND size(replace(name, ' ', '')) >= 6
+          AND \$flat CONTAINS replace(name, ' ', '')
+        RETURN e.id AS id, name, e.날짜 AS date
+        ORDER BY size(name) DESC
+        LIMIT 10", ['flat' => $flat], $timeout);
+}
+
 /**
  * Incidents the question names. An incident is named when its register name occurs in the question
  * (spaces ignored), whether quoted or not; names contained in a longer matched name are dropped.
@@ -404,30 +416,6 @@ const GRAPHRAG_INCIDENT_MAX = 3;
  * Without this route a question about a named incident reached the graph only through the place
  * and person names in it, which expand to incidents other than the one asked about.
  */
-/**
- * Content words of a question for the fallback incident lookup: Hangul words with their particles
- * removed, question and register vocabulary dropped, and the historical synonyms of the question added.
- */
-function graphrag_incident_tokens(string $query): array {
-    static $stop = ['어떻게', '어떤', '무엇', '누구', '어디', '언제', '기록', '대한', '관여', '인물', '사람', '시위',
-        '만세', '사건', '과정', '활동', '역할', '배경', '관련', '순서', '당시', '이후', '모두', '각각', '그밖',
-        '일어났', '일어난', '있는가', '있는지', '되었', '하였', '했는', '지역', '전개', '참여', '주도', '지휘'];
-    $tokens = [];
-    foreach (array_merge([$query], expand_historical_synonyms($query)) as $src) {
-        if (!preg_match_all('/[가-힣]{2,}/u', (string)$src, $m)) continue;
-        foreach ($m[0] as $w) {
-            $w = preg_replace('/(?:에서는|에서|에게|으로|로서|부터|까지|이며|이고|이다|에는|과의|와의|은|는|이|가|을|를|의|에|와|과|도|로|만)$/u', '', $w);
-            if (mb_strlen($w) < 2) continue;
-            $skip = false;
-            foreach ($stop as $s) {
-                if (mb_strpos($w, $s) === 0) { $skip = true; break; }
-            }
-            if (!$skip) $tokens[] = $w;
-        }
-    }
-    return array_slice(array_values(array_unique($tokens)), 0, 8);
-}
-
 function graphrag_incident_rows(object $client, string $query, ?float $deadline = null): array {
     $flat = preg_replace('/\s+/u', '', $query);
     if (mb_strlen($flat) < 6) return [];
@@ -437,32 +425,7 @@ function graphrag_incident_rows(object $client, string $query, ?float $deadline 
     };
     try {
         if ($timeout() < 1.0) return [];
-        $found = graphrag_run_with_timeout($client, "
-            MATCH (e:Event)
-            WITH e, coalesce(e.사건명, e.name) AS name
-            WHERE name IS NOT NULL AND size(replace(name, ' ', '')) >= 6
-              AND \$flat CONTAINS replace(name, ' ', '')
-            RETURN e.id AS id, name, e.날짜 AS date
-            ORDER BY size(name) DESC
-            LIMIT 10", ['flat' => $flat], $timeout());
-
-        // 질의가 사건명 전체를 완벽히 포함하지 않는 자연어/Curated 문항 대응 (동의어 및 핵심 토큰 매칭)
-        if (empty($found) && $timeout() >= 1.0) {
-            // 한 단어만 겹쳐도 사건으로 잡으면 '경성' 같은 흔한 지명이 무관한 사건을 끌어온다:
-            // 조사를 뗀 내용어 중 둘 이상이 사건명에 들어 있는 사건만, 많이 겹치는 순으로 쓴다.
-            $query_tokens = graphrag_incident_tokens($query);
-            if (count($query_tokens) >= 2) {
-                $found = graphrag_run_with_timeout($client, "
-                    MATCH (e:Event)
-                    WITH e, coalesce(e.사건명, e.name) AS name
-                    WHERE name IS NOT NULL
-                    WITH e, name, size([kw IN \$tokens WHERE name CONTAINS kw]) AS hits
-                    WHERE hits >= 2
-                    RETURN e.id AS id, name, e.날짜 AS date
-                    ORDER BY hits DESC, size(name) ASC
-                    LIMIT 10", ['tokens' => $query_tokens], $timeout());
-            }
-        }
+        $found = graphrag_incidents_by_name($client, $flat, $timeout());
     } catch (\Throwable $e) {
         error_log('GraphRAG incident lookup failed: ' . $e->getMessage());
         return [];
@@ -779,7 +742,7 @@ function generate_text_to_cypher(string $query): string {
                 . "날짜가 없는 노드는 시간 조건을 만족한다고 추정하지 마십시오.";
         }
         $prompt = get_text_to_cypher_prompt($prompt_query);
-        $raw = call_gemini([
+        $raw = call_llm([
             ['role' => 'system', 'content' => $prompt['system']],
             ['role' => 'user', 'content' => $prompt['user']]
         ], false, 4096, 0.0, 0.8, 30);
@@ -1569,6 +1532,10 @@ function handle_action_explain() {
     error_log(sprintf('[Docent][timing] narrative paths %.2fs', microtime(true) - $t_stage));
     $graphrag_used = $graphrag_result['graphrag_used'];
 
+    // 원천 기록: 질문으로 찾은 기록(하이브리드 검색기, includes/retriever.php)을 이름 일치로 가져온 기록보다 앞에 둡니다.
+    // 평가 모드에서는 검색기가 없으면 실패합니다: 다른 조건으로 조용히 평가되지 않도록.
+    $pg_texts = array_merge(docent_retrieve_records($term, $eval_mode), $pg_texts);
+
     // 서사 경로가 인용하는 기록을 원천 기록 근거의 맨 앞에 넣어, 경로의 근거가 생성 문맥 안에 있게 합니다(P1).
     $path_refs = [];
     foreach (($graphrag_result['rows'] ?? []) as $row) {
@@ -1589,21 +1556,13 @@ function handle_action_explain() {
         $pg_texts = array_merge($path_texts, $pg_texts);
     }
 
-    // ── 2. 하나의 문맥 예산(기본 11,000자)을 서사 경로 → 그래프 사료(최대 5,000자) → 원천 기록 순으로 나눔 ──
-    // 서사 경로는 생성 문맥의 맨 앞에 놓여 사건의 시간 순서를 먼저 전달합니다.
-    // 서사 경로와 그래프 근거에 상한을 두어 원천 기록이 늘 예산의 일부(기본 약 2,000자)를 확보하게 하고,
-    // 블록 사이 구분자("\n\n")도 예산에 포함합니다.
-    $total_budget = max(2000, (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'));
-    $narrative_cap = max(0, min($total_budget, (int)get_cfg('DOCENT_NARRATIVE_CHARS', '4000')));
-    $evidence_cap = 5000;
-    $narrative_block = mb_substr((string)$graphrag_result['context'], 0, $narrative_cap);
-    $remaining = $total_budget - mb_strlen($narrative_block) - ($narrative_block !== '' ? 2 : 0);
-    $evidence_context = $remaining > 0
-        ? build_budgeted_evidence_context($evidences, $explain_lang, 20, 250, 600, min($evidence_cap, $remaining), $term, $focus) : '';
-    $remaining -= mb_strlen($evidence_context) + ($evidence_context !== '' ? 2 : 0);
-    $pg_context = $remaining > 0
-        ? build_budgeted_pg_context($pg_texts, $explain_lang, 25, 180, 450, $remaining, $term, $focus) : '';
-    $context_str = trim(implode("\n\n", array_filter([$narrative_block, $evidence_context, $pg_context], fn($b) => $b !== '')));
+    // ── 2. 하나의 문맥 예산(기본 11,000자)을 서사 경로 → 그래프 사료 → 원천 기록 순으로 놓음 (docent_assemble_context) ──
+    $assembled = docent_assemble_context(
+        (string)$graphrag_result['context'], $evidences, $pg_texts, $explain_lang, $term, $focus,
+        (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'),
+        (int)get_cfg('DOCENT_NARRATIVE_CHARS', '3500'),
+        (int)get_cfg('DOCENT_EVIDENCE_CHARS', '2500'));
+    $context_str = $assembled['context'];
 
     if ($is_stream && $graphrag_used) {
         // 클라이언트에 GraphRAG 주입 여부 알림 (SSE 메타 코멘트)
@@ -1642,7 +1601,7 @@ function handle_action_explain() {
     $fact_prompts = get_fact_extraction_prompts($explain_lang, $context_str);
     $t_stage = microtime(true);
     try {
-        $fact_table = call_gemini([
+        $fact_table = call_llm([
             ["role" => "system", "content" => $fact_prompts['system']],
             ["role" => "user", "content" => $fact_prompts['user']]
         ], false, 1500, $gen_temperature ?? 0.0, $gen_top_p ?? 0.8, 50);
@@ -1664,7 +1623,7 @@ function handle_action_explain() {
     }
 
     if ($is_stream) {
-        stream_gemini([
+        stream_llm([
             ["role" => "system", "content" => $sys_prompt],
             ["role" => "user", "content" => $user_prompt]
         ], function($chunk) {
@@ -1681,7 +1640,7 @@ function handle_action_explain() {
 
     // Fallback: 동기식 JSON 응답
     $t_stage = microtime(true);
-    $res = call_gemini([
+    $res = call_llm([
         ["role" => "system", "content" => $sys_prompt],
         ["role" => "user", "content" => $user_prompt]
     ], false, $gen_max_tokens, $gen_temperature ?? 0.1, $gen_top_p ?? 0.85, $eval_mode ? 120 : 60);
@@ -1693,7 +1652,7 @@ function handle_action_explain() {
             "context_items" => docent_context_items($context_str),
             "fact_table" => $fact_table,
             "graphrag_used" => $graphrag_used,
-            "narrative_chars" => mb_strlen($narrative_block),
+            "narrative_chars" => $assembled['narrative_chars'],
             "prompt_chars" => mb_strlen($fact_prompts['system'] . $fact_prompts['user'] . $sys_prompt . $user_prompt),
             "generation_seconds" => round(microtime(true) - $t_stage, 3),
         ];

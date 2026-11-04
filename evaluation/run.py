@@ -48,7 +48,7 @@ def _git_commit() -> str:
 def _fingerprint(dataset: Path, keys: list[str]) -> dict[str, Any]:
     """Record code/data/environment content, including uncommitted source changes."""
     paths = [ROOT / "requirements.txt", ROOT / "composer.lock", ROOT / "mcp_server.py", ROOT / "docent.php"]
-    for directory, pattern in (("pipeline", "*.py"), ("evaluation", "*.py"), ("includes", "*.php"), ("static", "*.js")):
+    for directory, pattern in (("pipeline", "*.py"), ("evaluation", "*.py"), ("includes", "*.php"), ("includes", "*.json"), ("static", "*.js")):
         paths.extend((ROOT / directory).glob(pattern))
     code = hashlib.sha256()
     for path in sorted(paths):
@@ -153,6 +153,9 @@ def _check_server(keys: list[str]) -> dict[str, Any] | None:
         metadata = response.json().get("evaluation")
         if not metadata or metadata.get("context_chars") != systems.CONTEXT_CHARS:
             raise ValueError("서버 평가 모드 또는 문맥 예산이 올바르지 않습니다.")
+        if not metadata.get("retriever_index"):
+            raise ValueError("서버가 기록 검색 서비스에 연결되지 않았습니다. `python -m pipeline retriever`를 띄우고 "
+                             "DOCENT_RETRIEVER_URL(예: http://127.0.0.1:8765)을 설정하세요.")
         if metadata.get("model") != llm_model():
             raise ValueError(f"서버와 평가 생성 모델이 다릅니다 (서버 {metadata.get('model')}, 평가 {llm_model()}). "
                              "서버도 같은 LLM_PROVIDER로 띄우세요.")

@@ -51,7 +51,7 @@ jobs:
 
       - name: Check generation and HTML safety before deployment
         run: |
-          php -n tests/gemini_safety.php
+          php -n tests/llm_safety.php
           node --check static/docent.js
           npm --prefix "$RUNNER_TEMP/docent-tests" install --ignore-scripts --no-audit --no-fund jsdom@26.1.0
           NODE_PATH="$RUNNER_TEMP/docent-tests/node_modules" node tests/rendering_safety.cjs

@@ -20,19 +20,17 @@ and bibliographic records (CORPUS_TABLES), the records the end-to-end system rea
 
 from __future__ import annotations
 
-import hashlib
 import itertools
 import json
-import math
 import re
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from typing import Any
 
-import numpy as np
 import requests
 
 from pipeline.config import ROOT, get_neo4j_driver, get_pg_connection, llm_model, llm_provider, load_secrets, setting
+from pipeline.retrieval import CORPUS_TABLES, corpus_tables, hybrid_retrieve, strip_tei
 
 TEMPERATURE = 0.0
 TOP_P = 0.8
@@ -223,18 +221,7 @@ def pack_context(items: list[str], separator: str) -> list[str]:
 # Every system that receives record text gets it in blocks identified by table and row, and the
 # same citation rule as the deployed system in evaluation mode (includes/prompts.php), so that
 # citations can be verified and compared across systems.
-CITATION_RULE = (
-    "[근거 표기 지침 (필수 준수)]\n"
-    "모든 핵심 사실 주장과 인물·사건 서술 뒤에는 괄호로 근거를 표시하십시오.\n"
-    "괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 적힌 기록 식별자를 그대로 쓰거나, 문맥에 그대로 적힌 사건명을 쓰십시오.\n"
-    "■ 표기 형식 (대괄호 부분은 실제 근거의 값으로 바꾸어 쓰십시오):\n"
-    "  * \"…하였다 ([근거의 기록 식별자]).\"\n"
-    "  * \"…하였다는 기록은 확인되지 않는다 ([문맥의 사건명]).\"\n"
-    "■ 금지 표기:\n"
-    "  * 관계명(P14_carried_out_by 등), 블록명(g_1, graphrag_1 등), '지식그래프', 'Graph DB' 같은 전산 용어는 근거로 쓰지 마십시오.\n"
-    "  * 형식 설명의 대괄호 문구를 그대로 옮겨 쓰지 마십시오.\n"
-    "  * 근거가 없는 질문의 전제는 부정하거나 '사료에서 확인되지 않음'이라고 쓰십시오."
-)
+CITATION_RULE = json.loads((ROOT / "includes" / "citation_rules.json").read_text(encoding="utf-8"))["ko"]
 
 
 def record_block(table: str, rowid: Any, text: str) -> str:
@@ -277,50 +264,17 @@ def question_entities(query: str) -> list[str]:
     return _ENTITY_CACHE[query]
 
 
-# ── Hybrid baseline index (BM25 + dense + rerank) ────────────────────────────
-CACHE_DIR = ROOT / "vector_store" / "baselines"   # dense index of the hybrid baseline, built on first use
-# The record pool of every system that reads record text: the records the end-to-end system reaches
-# through its document nodes. Searching bibliographic records alone left the baselines without the
-# register entries and source entries that name the participants of an incident.
-CORPUS_TABLES = ("raw_event_info", "raw_source_info", "raw_bibliography")
-EMBED_MODEL = "nomic-embed-text"                   # dense retriever (Ollama, OLLAMA_HOST)
-RERANK_MODEL = "BAAI/bge-reranker-v2-m3"           # cross-encoder
-ALLOWED_TABLES = {"raw_bibliography", "raw_source_info", "raw_event_info"}
-CHUNK_CHARS = 500
-CHUNK_OVERLAP = 100
-RRF_K = 60
-
-
-def corpus_tables() -> list[str]:
-    """Tables searched by the systems that read record text (the same pool D-CENT cites)."""
-    names = list(CORPUS_TABLES)
-    unknown = set(names) - ALLOWED_TABLES
-    if unknown:
-        raise ValueError(f"지원하지 않는 코퍼스 테이블: {sorted(unknown)}")
-    return names
-
-
-def _strip_tei(tei: str) -> str:
-    # Keep only the record body; the teiHeader is generated boilerplate.
-    body = re.search(r"<body>(.*?)</body>", tei, flags=re.DOTALL)
-    tei = body.group(1) if body else tei
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", tei)).strip()
-
-
-def load_documents(tables: list[str] | None = None) -> list[dict[str, Any]]:
-    """Load TEI records as plain-text documents: {id, table, rowid, text}."""
-    conn = get_pg_connection()
-    cur = conn.cursor()
-    docs = []
-    for table in tables or corpus_tables():
-        cur.execute(f'SELECT rowid, tei FROM "{table}" WHERE tei IS NOT NULL ORDER BY rowid')
-        for rowid, tei in cur.fetchall():
-            text = _strip_tei(tei)
-            if text:
-                docs.append({"id": f"{table}:{rowid}", "table": table, "rowid": rowid, "text": text})
-    cur.close()
-    conn.close()
-    return docs
+# ── Hybrid record retrieval: shared with the D-CENT server (pipeline/retrieval.py) ──────────
+# The hybrid baseline and the deployed system read records with the same retriever. When the local
+# retrieval service is running (DOCENT_RETRIEVER_URL), the baseline asks it too, so that one index
+# and one cross-encoder serve both and the two cannot drift apart; otherwise it builds the index here.
+def retrieve_chunks(query: str, top_k: int) -> list[dict[str, Any]]:
+    url = setting("DOCENT_RETRIEVER_URL", "").rstrip("/")
+    if not url:
+        return hybrid_retrieve(query, top_k=top_k, reranker="cross-encoder")
+    response = requests.post(f"{url}/search", json={"query": query, "top_k": top_k}, timeout=120)
+    response.raise_for_status()
+    return [{"id": r["chunk"], "text": r["text"]} for r in response.json()["results"]]
 
 
 def records_containing(cur: Any, entity: str, limit: int) -> list[tuple[str, int, str]]:
@@ -333,163 +287,10 @@ def records_containing(cur: Any, entity: str, limit: int) -> list[tuple[str, int
     per_table = []
     for table in corpus_tables():
         cur.execute(f'SELECT rowid, tei FROM "{table}" WHERE tei LIKE %s ORDER BY rowid LIMIT %s', (f"%{entity}%", limit))
-        per_table.append([(table, rowid, _strip_tei(tei)) for rowid, tei in cur.fetchall()])
+        per_table.append([(table, rowid, strip_tei(tei)) for rowid, tei in cur.fetchall()])
     out = [r for group in itertools.zip_longest(*per_table) for r in group if r and r[2]]
     return out[:limit]
 
-
-def chunk_documents(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    chunks = []
-    step = CHUNK_CHARS - CHUNK_OVERLAP
-    for doc in docs:
-        text = doc["text"]
-        for n, start in enumerate(range(0, max(len(text) - CHUNK_OVERLAP, 1), step)):
-            chunks.append({"id": f"{doc['id']}#{n}", "text": text[start:start + CHUNK_CHARS]})
-    return chunks
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BM25
-# ─────────────────────────────────────────────────────────────────────────────
-def tokenize(text: str) -> list[str]:
-    """Words plus character bigrams, so Korean matches without a morph analyzer."""
-    tokens = []
-    for word in re.findall(r"[가-힣一-鿿A-Za-z0-9]+", text.lower()):
-        tokens.append(word)
-        if len(word) > 2:
-            tokens.extend(word[i:i + 2] for i in range(len(word) - 1))
-    return tokens
-
-
-class BM25Index:
-    def __init__(self, texts: list[str], k1: float = 1.5, b: float = 0.75):
-        self.k1, self.b = k1, b
-        self.n_docs = len(texts)
-        self.doc_len = np.zeros(self.n_docs, dtype=np.float32)
-        postings: dict[str, tuple[list[int], list[int]]] = defaultdict(lambda: ([], []))
-        for doc_id, text in enumerate(texts):
-            counts = Counter(tokenize(text))
-            self.doc_len[doc_id] = sum(counts.values())
-            for token, tf in counts.items():
-                ids, tfs = postings[token]
-                ids.append(doc_id)
-                tfs.append(tf)
-        self.avg_len = float(self.doc_len.mean()) if self.n_docs else 0.0
-        self.postings = {
-            token: (np.asarray(ids, dtype=np.int32), np.asarray(tfs, dtype=np.float32))
-            for token, (ids, tfs) in postings.items()
-        }
-
-    def scores(self, query: str) -> np.ndarray:
-        out = np.zeros(self.n_docs, dtype=np.float32)
-        for token in set(tokenize(query)):
-            if token not in self.postings:
-                continue
-            ids, tfs = self.postings[token]
-            idf = math.log(1 + (self.n_docs - len(ids) + 0.5) / (len(ids) + 0.5))
-            norm = self.k1 * (1 - self.b + self.b * self.doc_len[ids] / self.avg_len)
-            out[ids] += idf * tfs * (self.k1 + 1) / (tfs + norm)
-        return out
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Dense retrieval (Ollama embeddings, cached on disk)
-# ─────────────────────────────────────────────────────────────────────────────
-def _ollama_embed(texts: list[str], model: str, base_url: str, batch_size: int = 32) -> np.ndarray:
-    """Embed texts with Ollama's /api/embed endpoint and L2-normalize the rows."""
-    import requests
-
-    endpoint = f"{base_url.rstrip('/')}/api/embed"
-    vectors: list[list[float]] = []
-    for start in range(0, len(texts), batch_size):
-        batch = [str(t or "")[:3000] for t in texts[start:start + batch_size]]
-        for attempt in range(5):
-            try:
-                response = requests.post(endpoint, json={"model": model, "input": batch}, timeout=300)
-                response.raise_for_status()
-                embeddings = response.json().get("embeddings")
-                if not isinstance(embeddings, list) or len(embeddings) != len(batch):
-                    raise RuntimeError(f"unexpected embedding count at offset {start}")
-                vectors.extend(embeddings)
-                break
-            except Exception:
-                if attempt == 4:
-                    raise
-                time.sleep(2 * (attempt + 1))
-    matrix = np.asarray(vectors, dtype=np.float32)
-    return matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
-
-
-def _embed(texts: list[str], kind: str) -> np.ndarray:
-    model = EMBED_MODEL
-    if "nomic" in model:  # nomic models are trained with task prefixes
-        texts = [f"search_{kind}: {t}" for t in texts]
-    return _ollama_embed(texts, model, setting("OLLAMA_HOST", "http://localhost:11434"))
-
-
-def _dense_matrix(chunks: list[dict[str, Any]]) -> np.ndarray:
-    model = EMBED_MODEL
-    digest = hashlib.sha1()
-    for chunk in chunks:
-        digest.update(chunk["id"].encode())
-        digest.update(chunk["text"].encode())
-    cache = CACHE_DIR / f"dense_{re.sub(r'[^A-Za-z0-9]+', '_', model)}_{digest.hexdigest()[:12]}.npy"
-    if cache.exists():
-        return np.load(cache)
-    print(f"  🧮 dense 임베딩 생성 중 ({len(chunks)} chunks, model={model}) — 최초 1회만 수행됩니다...", flush=True)
-    matrix = _embed([c["text"] for c in chunks], "document")
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    np.save(cache, matrix)
-    return matrix
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-_STATE: dict[str, Any] = {}
-
-
-def _rerank(query: str, candidates: list[dict[str, Any]], reranker: str) -> list[dict[str, Any]]:
-    if reranker == "none":
-        return candidates
-    if reranker != "cross-encoder":
-        raise ValueError(f"알 수 없는 reranker: {reranker}")
-    if "cross_encoder" not in _STATE:
-        try:
-            from sentence_transformers import CrossEncoder
-        except ImportError as exc:
-            raise RuntimeError(
-                "재순위화에는 'sentence-transformers'가 필요합니다. requirements.txt를 설치하거나 "
-                "--reranker none 으로 실행하세요."
-            ) from exc
-        # CPU by default: on Apple silicon the MPS pool is shared with other processes (Ollama) and a
-        # long run ran out of it; RERANK_DEVICE=mps or cuda selects an accelerator explicitly.
-        _STATE["cross_encoder"] = CrossEncoder(RERANK_MODEL, device=setting("RERANK_DEVICE", "cpu"))
-    scores = _STATE["cross_encoder"].predict([(query, c["text"]) for c in candidates])
-    order = np.argsort(-np.asarray(scores))
-    return [candidates[i] for i in order]
-
-
-def hybrid_retrieve(query: str, top_k: int = 4, candidates: int = 50, reranker: str = "cross-encoder") -> list[dict[str, Any]]:
-    """BM25 + dense -> RRF -> rerank. Returns chunks as {id, text}."""
-    if "chunks" not in _STATE:
-        print("  📚 하이브리드 베이스라인 인덱스 구축 중...", flush=True)
-        chunks = chunk_documents(load_documents())
-        _STATE["chunks"] = chunks
-        _STATE["bm25"] = BM25Index([c["text"] for c in chunks])
-        _STATE["dense"] = _dense_matrix(chunks)
-    chunks = _STATE["chunks"]
-
-    bm25_rank = np.argsort(-_STATE["bm25"].scores(query))[:candidates]
-    dense_rank = np.argsort(-(_STATE["dense"] @ _embed([query], "query")[0]))[:candidates]
-
-    fused: dict[int, float] = defaultdict(float)
-    for ranking in (bm25_rank, dense_rank):
-        for rank, idx in enumerate(ranking, 1):
-            fused[int(idx)] += 1.0 / (RRF_K + rank)
-    pool = [chunks[i] for i, _ in sorted(fused.items(), key=lambda kv: -kv[1])[:candidates]]
-    return _rerank(query, pool, reranker)[:top_k]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -528,7 +329,7 @@ def run_hybrid_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     """BM25 + dense + rerank baseline. Retrieves from the question text only."""
     t0 = time.time()
     search_text = query_item["query"]
-    chunks = [chunk_block(c) for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker="cross-encoder")]
+    chunks = [chunk_block(c) for c in retrieve_chunks(search_text, top_k=candidate_count(500))]
     return _answer_from_chunks("Hybrid Vector RAG (BM25+Dense+Rerank)", query_item, pack_context(chunks, CHUNK_SEPARATOR), time.time() - t0)
 
 
@@ -774,7 +575,7 @@ def run_hybrid_2stage(query_item: dict[str, Any]) -> dict[str, Any]:
     """Ablation: the hybrid baseline's evidence, answered with Docent's fact table -> answer generation."""
     # Same search text, top_k and budget cut as run_hybrid_vector_rag; each chunk gets a citable id.
     search_text = query_item["query"]
-    chunks = [chunk_block(c) for c in hybrid_retrieve(search_text, top_k=candidate_count(500), reranker="cross-encoder")]
+    chunks = [chunk_block(c) for c in retrieve_chunks(search_text, top_k=candidate_count(500))]
     evidence = "\n\n".join(pack_context(chunks, "\n\n"))
     return run_docent_hybrid_rag(query_item, "Hybrid + 2-Stage (Ablation)", scoped_context=evidence)
 

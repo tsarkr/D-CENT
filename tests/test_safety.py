@@ -26,6 +26,35 @@ class MetricsSafety(unittest.TestCase):
         self.assertEqual(metrics.evaluate_faithfulness('유관순은 아우내 시위에 참여하지 않았다.', fact)[0], 0)
         self.assertEqual(metrics.evaluate_faithfulness(fact[0], fact)[0], 100)
 
+    def test_citation_rule_is_shared_and_names_no_record(self):
+        import json, re
+        rules = json.loads((Path(__file__).resolve().parents[1] / "includes" / "citation_rules.json").read_text(encoding="utf-8"))
+        self.assertEqual(systems.CITATION_RULE, rules["ko"])
+        for rule in rules.values():  # examples must not carry a real record id the model could copy
+            self.assertIsNone(re.search(r"raw_[a-z_]+-\d+", rule))
+
+    def test_retriever_service_validates_and_maps_records(self):
+        from pipeline import retriever_server
+        fake = [{"id": "raw_source_info:12#0", "text": "보성사"}]
+        with patch.object(retriever_server.retrieval, "hybrid_retrieve", return_value=fake) as hr, \
+             patch.object(retriever_server.retrieval, "ensure_index", return_value={"chunks": 1}):
+            out = retriever_server.search({"query": "보성사", "top_k": 999})
+            self.assertEqual(hr.call_args.kwargs["top_k"], retriever_server.MAX_TOP_K)
+        self.assertEqual(out["results"], [{"table": "raw_source_info", "rowid": "12", "chunk": "raw_source_info:12#0", "text": "보성사"}])
+        for bad in ({"query": ""}, {"query": "a", "top_k": "x"}):
+            with self.assertRaises(ValueError):
+                retriever_server.search(bad)
+
+    def test_hybrid_baseline_uses_the_shared_service(self):
+        response = MagicMock()
+        response.json.return_value = {"results": [{"chunk": "raw_event_info:3#1", "text": "기록"}]}
+        with patch.object(systems, "setting", side_effect=lambda k, d="", *a: "http://127.0.0.1:8765" if k == "DOCENT_RETRIEVER_URL" else d), \
+             patch.object(systems.requests, "post", return_value=response) as post:
+            chunks = systems.retrieve_chunks("질문", 5)
+        self.assertEqual(post.call_args.args[0], "http://127.0.0.1:8765/search")
+        self.assertEqual(chunks, [{"id": "raw_event_info:3#1", "text": "기록"}])
+        self.assertIn('id="raw_event_info-3"', systems.chunk_block(chunks[0]))
+
     def test_llm_provider_switch(self):
         import os
         from unittest import mock

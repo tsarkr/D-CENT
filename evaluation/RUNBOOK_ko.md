@@ -49,10 +49,13 @@ export보다 **먼저** 해야 합니다. PostgreSQL 표와 Neo4j 그래프를 �
 
 - [ ] `data/output/build_manifest.json`의 `build_id` 확인. 기존 DB에 매니페스트가 없으면 고정된 스냅샷 이름을 `EVAL_DATA_BUILD_ID`로 지정
 - [ ] PHP 서버는 매니페스트의 `build_id`를 자동으로 씁니다 (매니페스트가 없는 DB만 `DOCENT_DATA_BUILD_ID` 지정). 평가 중 PostgreSQL·Neo4j 변경 중지
-- [ ] `python -B -m unittest discover -s tests -v`, `php -n tests/gemini_safety.php` 통과 확인
+- [ ] `python -B -m unittest discover -s tests -v`, `php -n tests/llm_safety.php` 통과 확인
 - [ ] `--resume`은 코드·데이터셋·패키지·모델·서버 설정·빌드 ID가 같을 때만 사용 (옛 실행은 재개 불가)
 
-- [ ] 다른 터미널에서 `PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000`, `DOCENT_URL` 설정
+- [ ] 터미널 1: `OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve`
+- [ ] 터미널 2: `python -m pipeline retriever` (기록 검색 서비스, "준비 완료"가 나올 때까지 대기)
+- [ ] 터미널 3: `DOCENT_RETRIEVER_URL=http://127.0.0.1:8765 PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000`, `DOCENT_URL` 설정
+- [ ] secrets.toml에도 `DOCENT_RETRIEVER_URL = "http://127.0.0.1:8765"` (평가의 하이브리드 기준선이 같은 서비스를 씀)
 - [ ] `python -m evaluation run --quick` (세 문항 점검)
 - [ ] 10월 27일 1차 실행은 파일럿으로만 씁니다 (실행 중 `actions.php` 변경, 기준선이 서지정보만 검색, 채점 v1).
       `python -m evaluation report --rescore 2026-10-27_093400_076070`로 채점 v2 결과만 확인합니다.

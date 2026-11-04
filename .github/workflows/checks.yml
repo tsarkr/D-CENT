@@ -28,7 +28,7 @@ jobs:
       - name: Check PHP and JavaScript
         run: |
           for file in docent*.php includes/*.php; do php -l "$file"; done
-          php -n tests/gemini_safety.php
+          php -n tests/llm_safety.php
           php tests/narrative_safety.php   # needs mbstring, so not -n
           node --check static/docent.js
       - name: Check HTML sanitization

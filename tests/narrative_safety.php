@@ -7,7 +7,7 @@ namespace {
 function check($condition, $message) { if (!$condition) { fwrite(STDERR, "FAIL: {$message}\n"); exit(1); } }
 // Load only the functions under test from includes/actions.php.
 $src = file_get_contents(__DIR__ . '/../includes/actions.php');
-preg_match_all('/^(?:const GRAPHRAG_[A-Z_]+ = [^\n]+|function (?:docent_record_keys|graphrag_serialize_results|graphrag_incident_rows|graphrag_incident_tokens|graphrag_run_with_timeout)\(.*?^\})/ms', $src, $m);
+preg_match_all('/^(?:const GRAPHRAG_[A-Z_]+ = [^\n]+|function (?:docent_record_keys|graphrag_serialize_results|graphrag_incident_rows|graphrag_incidents_by_name|graphrag_run_with_timeout)\(.*?^\})/ms', $src, $m);
 check(count($m[0]) === 7, 'functions and constants of the incident route found');
 eval(implode("\n", $m[0]));
 
@@ -53,9 +53,20 @@ $long = '[public.raw_event_info] node=사건 rowid=3 ' . str_repeat('본문 ', 3
 $context = build_budgeted_pg_context([$long], 'ko', 25, 30, 450, 400);
 check(str_contains($context, 'raw_event_info-3'), 'body is fitted to actual envelope overhead');
 check(str_ends_with($context, '</SOURCE_EVIDENCE>') && mb_strlen($context) <= 400, 'trimmed source remains complete');
-// Fallback lookup: particles removed, question vocabulary dropped, synonyms added.
-$tokens = graphrag_incident_tokens('탑골공원에서 시위를 주도한 인물은 누구인가?');
-check(in_array('탑골공원', $tokens, true) && in_array('파고다공원', $tokens, true), 'place and its synonym kept');
-check(!array_intersect($tokens, ['탑골공원에서', '시위를', '시위', '주도한', '인물은', '누구인가']), 'particles and question words dropped');
+// Context assembly: paths first, records before graph evidence in the budget, the total respected.
+$recs = [];
+for ($i = 10; $i < 40; $i++) $recs[] = "[public.raw_source_info] node=사건 rowid={$i} 내용: " . str_repeat('기록 원문 ', 60);
+$evs = [];
+for ($i = 0; $i < 20; $i++) $evs[] = ['doc' => '[Person,인물] 인물 소개', 'text' => str_repeat('인물 소개 ', 80), 'concept' => "인물{$i}"];
+$assembled = docent_assemble_context(str_repeat('경로 ', 2000), $evs, $recs, 'ko', '질문', '', 11000, 3500, 2500);
+$ctx = $assembled['context'];
+check(mb_strlen($ctx) <= 11000 && $assembled['narrative_chars'] === 3500, 'budget and narrative cap respected');
+check(str_starts_with($ctx, '경로'), 'narrative paths come first');
+$pos = mb_strpos($ctx, '<SOURCE_EVIDENCE id="raw_source_info');
+$record_chars = $pos === false ? 0 : mb_strlen($ctx) - $pos;
+check($record_chars >= 4500, 'records get most of the remaining budget');
+check(mb_strpos($ctx, 'id="g_1"') !== false && mb_strpos($ctx, 'id="g_1"') < $pos, 'graph evidence sits before the records');
+$few = docent_assemble_context('경로', $evs, array_slice($recs, 0, 1), 'ko', '질문', '', 11000, 3500, 2500)['context'];
+check(substr_count($few, 'id="g_') > 5, 'graph evidence uses the budget the records leave');
 echo "Narrative incident route checks passed\n";
 }

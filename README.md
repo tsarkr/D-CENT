@@ -268,8 +268,15 @@ Choose `main` (the first four), `ablations` (the last four), `all` (default), or
 `dcent` and `no-paths` call a running web docent: start the server in evaluation mode and set `DOCENT_URL`.
 
 ```bash
-PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000     # in another terminal
+OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # terminal 1 (embeddings; generator if LLM_PROVIDER=ollama)
+python -m pipeline retriever                                          # terminal 2: record retriever on 127.0.0.1:8765
+DOCENT_RETRIEVER_URL=http://127.0.0.1:8765 PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000   # terminal 3
 ```
+
+D-CENT reads record text with the same hybrid retriever as the hybrid baseline (`pipeline/retrieval.py`),
+served by `python -m pipeline retriever`; set `DOCENT_RETRIEVER_URL` for the PHP server (and for the
+evaluation, so the baseline asks the same service). The site runs without it, on name matching only;
+an evaluation does not start without it.
 
 In evaluation mode, `explain` returns the context and fact table it generated from, applies the shared
 generation conditions, and asks for record citations; retrieval and context assembly are those of the
@@ -343,7 +350,7 @@ User-supplied Cypher procedures, multi-statement queries, and comments are rejec
 .venv3.14/bin/python -m pipeline check
 php -l docent.php && php -l includes/actions.php
 .venv3.14/bin/python -B -m unittest discover -s tests -v
-php -n tests/gemini_safety.php
+php -n tests/llm_safety.php
 # With jsdom@26.1.0 installed in an isolated test directory:
 NODE_PATH=/path/to/test/node_modules node tests/rendering_safety.cjs
 ```

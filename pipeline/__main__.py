@@ -6,6 +6,7 @@
   python -m pipeline build --yes      do not pause for the entity-list review
   python -m pipeline check            offline self-test (no database needed)
   python -m pipeline inspect          list the read-only diagnostics (names, family, search, counts, sparsity, sources)
+  python -m pipeline retriever        local record-retrieval service for docent.php (DOCENT_RETRIEVER_URL)
 
 Settings (database, Neo4j, API keys, THESAURUS_CSV) come from environment variables
 or .streamlit/secrets.toml; see README.
@@ -83,10 +84,16 @@ def main() -> int:
     p_inspect = sub.add_parser("inspect", help="read-only diagnostics of the databases")
     p_inspect.add_argument("what", nargs="?", help="names | family | search | counts | sparsity | sources")
     p_inspect.add_argument("terms", nargs="*", help="question, name(s) to look up")
+    p_ret = sub.add_parser("retriever", help="local record-retrieval service for docent.php")
+    p_ret.add_argument("--host", default="127.0.0.1")
+    p_ret.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
     if args.command == "build":
         return build(args.stage, args.yes)
+    if args.command == "retriever":
+        from pipeline.retriever_server import serve
+        return serve(args.host, args.port)
     if args.command == "check":
         from pipeline.check import main as check_main
         return check_main()
