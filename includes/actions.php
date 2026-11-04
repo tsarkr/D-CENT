@@ -1532,11 +1532,11 @@ function handle_action_explain() {
     error_log(sprintf('[Docent][timing] narrative paths %.2fs', microtime(true) - $t_stage));
     $graphrag_used = $graphrag_result['graphrag_used'];
 
-    // 원천 기록: 질문으로 찾은 기록(하이브리드 검색기, includes/retriever.php)을 이름 일치로 가져온 기록보다 앞에 둡니다.
-    // 평가 모드에서는 검색기가 없으면 실패합니다: 다른 조건으로 조용히 평가되지 않도록.
-    $pg_texts = array_merge(docent_retrieve_records($term, $eval_mode), $pg_texts);
-
-    // 서사 경로가 인용하는 기록을 원천 기록 근거의 맨 앞에 넣어, 경로의 근거가 생성 문맥 안에 있게 합니다(P1).
+    // 원천 기록의 순서: 서사 경로를 입증하는 기록 몇 건(P1) → 질문으로 찾은 기록(하이브리드 검색기,
+    // includes/retriever.php) → 나머지 경로 입증 기록 → 이름 일치로 가져온 기록.
+    // 경로 입증 기록을 모두 앞에 두면 사건이 많은 질문에서 그것만으로 기록 자리가 차서, 질문에 답하는
+    // 기록이 들어가지 못한다. 평가 모드에서는 검색기가 없으면 실패한다: 다른 조건으로 조용히 평가되지 않도록.
+    $retrieved = docent_retrieve_records($term, $eval_mode);
     $path_refs = [];
     foreach (($graphrag_result['rows'] ?? []) as $row) {
         foreach (docent_record_keys($row['근거'] ?? []) as $key) {
@@ -1545,16 +1545,18 @@ function handle_action_explain() {
             }
         }
     }
+    $path_texts = [];
     if ($path_refs && ($pdo_paths = get_pg())) {
         $have = [];
-        foreach ($pg_texts as $line) {
+        foreach (array_merge($retrieved, $pg_texts) as $line) {
             if (preg_match('/^\[[^\].]*\.([A-Za-z0-9_]+)\]\s+node=\S*\s+rowid=(\S+)/u', (string)$line, $hm)) $have["{$hm[1]}-{$hm[2]}"] = true;
         }
         $missing = array_values(array_diff_key($path_refs, $have));
         $path_texts = array_map('docent_pg_row_text',
             $missing ? fetch_pg_rows_for_refs($pdo_paths, $missing, get_pg_tables_metadata($pdo_paths)) : []);
-        $pg_texts = array_merge($path_texts, $pg_texts);
     }
+    $path_first = max(0, (int)get_cfg('DOCENT_PATH_RECORDS', '5'));
+    $pg_texts = array_merge(array_slice($path_texts, 0, $path_first), $retrieved, array_slice($path_texts, $path_first), $pg_texts);
 
     // ── 2. 하나의 문맥 예산(기본 11,000자)을 서사 경로 → 그래프 사료 → 원천 기록 순으로 놓음 (docent_assemble_context) ──
     $assembled = docent_assemble_context(

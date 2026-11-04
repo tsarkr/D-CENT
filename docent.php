@@ -60,6 +60,7 @@ if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) 
             'context_chars' => (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'),
             'narrative_chars' => (int)get_cfg('DOCENT_NARRATIVE_CHARS', '3500'),
             'evidence_chars' => (int)get_cfg('DOCENT_EVIDENCE_CHARS', '2500'),
+            'path_records' => (int)get_cfg('DOCENT_PATH_RECORDS', '5'),
             // 기록 검색기 색인(청크 수·다이제스트·모델). 평가는 이것이 없으면 시작하지 않는다.
             'retriever_index' => (function () { try { return docent_retriever_index(); } catch (\Throwable $e) { return null; } })(),
             'analysis_temperature' => (float)get_cfg('GEMINI_TEMPERATURE', '0.1'),

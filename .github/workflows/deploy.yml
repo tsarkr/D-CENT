@@ -42,6 +42,16 @@ jobs:
             php -l "$f"
           done
 
+      - name: Validate data files read by the PHP code
+        run: |
+          # includes/*.json (citation rules, historical synonyms) are read at runtime; a broken file
+          # would make every answer fail, so it must not reach the server.
+          for f in includes/*.json; do
+            php -r 'json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR); echo "valid: {$argv[1]}\n";' "$f"
+          done
+          php -r '$r = json_decode(file_get_contents("includes/citation_rules.json"), true); if (empty($r["ko"]) || empty($r["en"])) { fwrite(STDERR, "citation_rules.json needs ko and en\n"); exit(1); }'
+          php -r '$s = json_decode(file_get_contents("includes/historical_synonyms.json"), true); if (!is_array($s["synonyms"] ?? null)) { fwrite(STDERR, "historical_synonyms.json needs a synonyms object\n"); exit(1); }'
+
       - name: Install Composer dependencies
         run: composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
 
@@ -52,6 +62,7 @@ jobs:
       - name: Check generation and HTML safety before deployment
         run: |
           php -n tests/llm_safety.php
+          php tests/narrative_safety.php   # needs mbstring; reads includes/historical_synonyms.json
           node --check static/docent.js
           npm --prefix "$RUNNER_TEMP/docent-tests" install --ignore-scripts --no-audit --no-fund jsdom@26.1.0
           NODE_PATH="$RUNNER_TEMP/docent-tests/node_modules" node tests/rendering_safety.cjs
@@ -63,6 +74,9 @@ jobs:
           cp docent.html dist/index.html
           sed -i "s/?v=dev/?v=${GITHUB_SHA::7}/g" dist/index.html  # 배포마다 정적 파일 캐시 무효화
           cp -R includes static vendor dist/
+          # The JSON data files travel with includes/; fail the deployment if one is missing from the bundle.
+          for f in includes/*.json; do test -f "dist/$f" || { echo "::error::missing $f in bundle"; exit 1; }; done
+          ls dist/includes
 
       - name: Deploy via SSH/rsync
         env:
