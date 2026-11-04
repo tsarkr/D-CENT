@@ -212,11 +212,13 @@ Ollama는 프롬프트가 문맥 창보다 길면 경고 없이 앞부분을 잘
 | `OLLAMA_MAX_LOADED_MODELS` | `ollama serve`의 환경 변수 | 2 | 생성 모델과 임베딩 모델을 함께 메모리에 둠 |
 | `OLLAMA_SEED` | `.streamlit/secrets.toml` 또는 `.env` | 42 (기본값) | 생성 시드 고정 |
 
+코드가 `num_ctx`를 직접 보내고, Ollama는 기본으로 GPU 하나에 모델을 세 개까지 올려 두므로 Ollama 앱을 평소처럼
+켜 두면 충분합니다. 두 서버 변수는 다른 클라이언트를 위한 안전장치입니다.
+
 ```bash
-OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # 메뉴 막대의 Ollama 앱은 먼저 종료
-# 또는 macOS 앱에 적용 (맥을 다시 켜기 전까지 유지):
-launchctl setenv OLLAMA_CONTEXT_LENGTH 16384 && launchctl setenv OLLAMA_MAX_LOADED_MODELS 2   # 그다음 앱 재시작
-ollama ps    # 질문을 하나 돌린 뒤: 생성 모델의 CONTEXT가 16384이면 정상
+ollama ps    # 질문을 하나 돌린 뒤: 생성 모델의 CONTEXT가 16384이고 두 모델이 함께 보이면 정상
+# 선택: 앱 대신 터미널에서
+OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve
 ```
 
 임베딩 모델 `nomic-embed-text`는 자기 문맥 창 2,048토큰을 그대로 씁니다. 500자 조각에는 충분하며, 바꾸면

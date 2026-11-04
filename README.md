@@ -215,11 +215,13 @@ start of the prompt would be lost. Two settings guard against this:
 | `OLLAMA_MAX_LOADED_MODELS` | environment of `ollama serve` | 2 | keeps the generator and the embedding model loaded together |
 | `OLLAMA_SEED` | `.streamlit/secrets.toml` or `.env` | 42 (default) | fixed seed for generation |
 
+Since the code sends `num_ctx` itself and Ollama keeps up to three models per GPU loaded by default, the Ollama
+app started normally is enough; the two server variables are a safeguard for other clients:
+
 ```bash
-OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # quit the Ollama menu-bar app first
-# or, for the macOS app (until the next restart of the Mac):
-launchctl setenv OLLAMA_CONTEXT_LENGTH 16384 && launchctl setenv OLLAMA_MAX_LOADED_MODELS 2   # then restart the app
-ollama ps    # after one question: CONTEXT shows 16384 for the generator
+ollama ps    # after one question: CONTEXT shows 16384 for the generator, and both models are listed
+# optional, instead of the app:
+OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve
 ```
 
 The embedding model `nomic-embed-text` keeps its own window of 2,048 tokens, which covers a 500-character chunk;
