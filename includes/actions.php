@@ -404,6 +404,30 @@ const GRAPHRAG_INCIDENT_MAX = 3;
  * Without this route a question about a named incident reached the graph only through the place
  * and person names in it, which expand to incidents other than the one asked about.
  */
+/**
+ * Content words of a question for the fallback incident lookup: Hangul words with their particles
+ * removed, question and register vocabulary dropped, and the historical synonyms of the question added.
+ */
+function graphrag_incident_tokens(string $query): array {
+    static $stop = ['어떻게', '어떤', '무엇', '누구', '어디', '언제', '기록', '대한', '관여', '인물', '사람', '시위',
+        '만세', '사건', '과정', '활동', '역할', '배경', '관련', '순서', '당시', '이후', '모두', '각각', '그밖',
+        '일어났', '일어난', '있는가', '있는지', '되었', '하였', '했는', '지역', '전개', '참여', '주도', '지휘'];
+    $tokens = [];
+    foreach (array_merge([$query], expand_historical_synonyms($query)) as $src) {
+        if (!preg_match_all('/[가-힣]{2,}/u', (string)$src, $m)) continue;
+        foreach ($m[0] as $w) {
+            $w = preg_replace('/(?:에서는|에서|에게|으로|로서|부터|까지|이며|이고|이다|에는|과의|와의|은|는|이|가|을|를|의|에|와|과|도|로|만)$/u', '', $w);
+            if (mb_strlen($w) < 2) continue;
+            $skip = false;
+            foreach ($stop as $s) {
+                if (mb_strpos($w, $s) === 0) { $skip = true; break; }
+            }
+            if (!$skip) $tokens[] = $w;
+        }
+    }
+    return array_slice(array_values(array_unique($tokens)), 0, 8);
+}
+
 function graphrag_incident_rows(object $client, string $query, ?float $deadline = null): array {
     $flat = preg_replace('/\s+/u', '', $query);
     if (mb_strlen($flat) < 6) return [];
@@ -424,25 +448,18 @@ function graphrag_incident_rows(object $client, string $query, ?float $deadline 
 
         // 질의가 사건명 전체를 완벽히 포함하지 않는 자연어/Curated 문항 대응 (동의어 및 핵심 토큰 매칭)
         if (empty($found) && $timeout() >= 1.0) {
-            $syns = expand_historical_synonyms($query);
-            $query_tokens = [];
-            foreach (array_merge([$query], $syns) as $src) {
-                if (preg_match_all('/([가-힣]{2,})/u', $src, $m)) {
-                    foreach ($m[1] as $w) {
-                        if (!in_array($w, ['어떻게', '무엇', '기록', '대한', '관여', '인물', '시위', '만세', '사건', '과정', '활동', '역할', '배경'], true) && mb_strlen($w) >= 2) {
-                            $query_tokens[] = $w;
-                        }
-                    }
-                }
-            }
-            $query_tokens = array_values(array_unique(array_slice($query_tokens, 0, 8)));
-            if (!empty($query_tokens)) {
+            // 한 단어만 겹쳐도 사건으로 잡으면 '경성' 같은 흔한 지명이 무관한 사건을 끌어온다:
+            // 조사를 뗀 내용어 중 둘 이상이 사건명에 들어 있는 사건만, 많이 겹치는 순으로 쓴다.
+            $query_tokens = graphrag_incident_tokens($query);
+            if (count($query_tokens) >= 2) {
                 $found = graphrag_run_with_timeout($client, "
                     MATCH (e:Event)
                     WITH e, coalesce(e.사건명, e.name) AS name
-                    WHERE name IS NOT NULL AND any(kw IN \$tokens WHERE name CONTAINS kw)
+                    WHERE name IS NOT NULL
+                    WITH e, name, size([kw IN \$tokens WHERE name CONTAINS kw]) AS hits
+                    WHERE hits >= 2
                     RETURN e.id AS id, name, e.날짜 AS date
-                    ORDER BY size(name) DESC
+                    ORDER BY hits DESC, size(name) ASC
                     LIMIT 10", ['tokens' => $query_tokens], $timeout());
             }
         }

@@ -393,15 +393,29 @@ INTERNAL_LABEL_RE = re.compile(r"(?<![A-Za-z0-9_])(?:g_\d+(?:\s*~\s*(?:g_)?\d+)?
 
 
 def normalize_citation_tags(answer: str) -> str:
-    """Replace an evidence tag by what it cites: its record id, else the incident name it wraps, else its label."""
+    """Replace an evidence tag by what it cites: its record id, else the incident name it wraps, else its label.
+
+    A tag already inside parentheses ("(<SOURCE_EVIDENCE id=…/>, …)") becomes the bare value; a tag
+    standing alone after a claim ("…계획하였다 <SOURCE_EVIDENCE id=…/>.") becomes a parenthesised citation.
+    """
+    def inside_parens(m: re.Match) -> bool:
+        before = m.string[:m.start()]
+        return before.count("(") > before.count(")")
+
+    def wrap(m: re.Match, val: str) -> str:
+        if inside_parens(m):
+            return val
+        spaced = m.start() > 0 and m.string[m.start() - 1].isspace()
+        return f"({val})" if spaced else f" ({val})"
+
     def rep(m: re.Match) -> str:
         found = re.search(r"\bid\s*=\s*\"?([^\"\s>/]+)", m.group(1) or "")
         ident = found.group(1) if found else ""
         inner = (m.group(2) or "").strip()
         val = ident if ident.lower().startswith("raw_") else (inner or ident)
-        return f" ({val}) "
+        return wrap(m, val)
     text = CITE_TAG_RE.sub(rep, answer or "")
-    text = re.sub(r"<\s*(raw_[a-zA-Z0-9_\-]+)\s*>", r" (\1) ", text)
+    text = re.sub(r"<\s*(raw_[a-zA-Z0-9_\-]+)\s*>", lambda m: wrap(m, m.group(1)), text)
     return re.sub(r"</?SOURCE_EVIDENCE[^>]*>", "", text, flags=re.IGNORECASE)
 
 

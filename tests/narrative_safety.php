@@ -7,8 +7,8 @@ namespace {
 function check($condition, $message) { if (!$condition) { fwrite(STDERR, "FAIL: {$message}\n"); exit(1); } }
 // Load only the functions under test from includes/actions.php.
 $src = file_get_contents(__DIR__ . '/../includes/actions.php');
-preg_match_all('/^(?:const GRAPHRAG_[A-Z_]+ = [^\n]+|function (?:docent_record_keys|graphrag_serialize_results|graphrag_incident_rows|graphrag_run_with_timeout)\(.*?^\})/ms', $src, $m);
-check(count($m[0]) === 6, 'functions and constants of the incident route found');
+preg_match_all('/^(?:const GRAPHRAG_[A-Z_]+ = [^\n]+|function (?:docent_record_keys|graphrag_serialize_results|graphrag_incident_rows|graphrag_incident_tokens|graphrag_run_with_timeout)\(.*?^\})/ms', $src, $m);
+check(count($m[0]) === 7, 'functions and constants of the incident route found');
 eval(implode("\n", $m[0]));
 
 class Rec { private array $d; function __construct(array $d) { $this->d = $d; } function get($k) { return $this->d[$k] ?? null; } }
@@ -53,5 +53,9 @@ $long = '[public.raw_event_info] node=사건 rowid=3 ' . str_repeat('본문 ', 3
 $context = build_budgeted_pg_context([$long], 'ko', 25, 30, 450, 400);
 check(str_contains($context, 'raw_event_info-3'), 'body is fitted to actual envelope overhead');
 check(str_ends_with($context, '</SOURCE_EVIDENCE>') && mb_strlen($context) <= 400, 'trimmed source remains complete');
+// Fallback lookup: particles removed, question vocabulary dropped, synonyms added.
+$tokens = graphrag_incident_tokens('탑골공원에서 시위를 주도한 인물은 누구인가?');
+check(in_array('탑골공원', $tokens, true) && in_array('파고다공원', $tokens, true), 'place and its synonym kept');
+check(!array_intersect($tokens, ['탑골공원에서', '시위를', '시위', '주도한', '인물은', '누구인가']), 'particles and question words dropped');
 echo "Narrative incident route checks passed\n";
 }

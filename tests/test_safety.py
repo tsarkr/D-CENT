@@ -82,6 +82,9 @@ class MetricsSafety(unittest.TestCase):
         self.assertEqual(metrics.clean_answer(answer, contexts), '시위를 전개하였다(raw_source_info-12, 평양 시위). 또  확인된다.')
         kinds = [(c['kind'], c['valid']) for c in metrics.verify_answer(answer, contexts)]
         self.assertEqual(kinds, [('record_id', True), ('named_source', True)])
+        standalone = '독립선언식을 계획하였다 <SOURCE_EVIDENCE id="raw_source_info-12"/>. 이후 <raw_source_info-13> 체포되었다.'
+        self.assertEqual(metrics.normalize_citation_tags(standalone),
+                         '독립선언식을 계획하였다 (raw_source_info-12). 이후 (raw_source_info-13) 체포되었다.')
 
     def test_ranked_items_preserve_mrr(self):
         self.assertEqual(metrics.evaluate_retrieval_direct({'target_entities': ['유관순']},
