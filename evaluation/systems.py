@@ -112,6 +112,10 @@ def _call_ollama(messages: list[dict[str, str]], model: str, host: str, max_toke
             "temperature": TEMPERATURE,
             "top_p": TOP_P,
             "num_predict": max_tokens,
+            # Ollama's default context window (2,048-4,096 tokens) silently cuts the front of an
+            # 11,000-character evidence prompt; every call gets the same window and seed.
+            "num_ctx": int(setting("OLLAMA_NUM_CTX", "16384")),
+            "seed": int(setting("OLLAMA_SEED", "42")),
         },
     }
     for attempt in range(4):

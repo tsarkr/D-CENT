@@ -358,6 +358,9 @@ function _build_ollama_payload($msgs, $model, $is_json, $max_tokens, $temperatur
             'temperature' => is_numeric($temperature) ? (float)$temperature : $default_temp,
             'top_p' => is_numeric($top_p) ? (float)$top_p : $default_topp,
             'num_predict' => $max_tokens ? (int)max(1, min(8192, $max_tokens)) : 4096,
+            // 기본 문맥 창(2,048~4,096토큰)은 11,000자 근거 프롬프트의 앞부분을 말없이 잘라낸다.
+            'num_ctx' => (int)get_cfg('OLLAMA_NUM_CTX', '16384'),
+            'seed' => (int)get_cfg('OLLAMA_SEED', '42'),
         ],
     ];
     if ($is_json) {

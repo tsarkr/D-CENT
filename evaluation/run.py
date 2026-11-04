@@ -309,7 +309,8 @@ def _judge_one(record: dict[str, Any], model: str, host: str) -> dict[str, Any]:
         else:
             response = requests.post(f"{host.rstrip('/')}/api/chat", timeout=300, json={
                 "model": model, "messages": [{"role": "user", "content": prompt}], "format": "json",
-                "stream": False, "options": {"temperature": 0, "num_predict": max(128, len(contexts) * 4 + 32)}, "think": False})
+                "stream": False, "options": {"temperature": 0, "num_predict": max(128, len(contexts) * 4 + 32),
+                            "num_ctx": int(setting("OLLAMA_NUM_CTX", "16384")), "seed": 42}, "think": False})
             response.raise_for_status()
             raw_content = response.json()["message"]["content"]
         try:
