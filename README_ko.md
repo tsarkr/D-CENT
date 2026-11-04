@@ -15,7 +15,7 @@
 
 ```text
 pipeline/
-  __main__.py   명령: build, check, inspect
+  __main__.py   명령: build, check, inspect, retriever
   config.py     설정(환경변수 → .streamlit/secrets.toml), 경로, DB 연결
   text.py       한자 독음(두음법칙)·TEI ruby 처리
   ingest.py     1  원자료 → raw_* 테이블, 행 단위 TEI
@@ -28,6 +28,8 @@ pipeline/
   names.py      8  이름 독음·로마자 표기, 언급(Activity) 노드 라벨
   inspect.py    읽기 전용 진단
   check.py      오프라인 자체 점검
+  retrieval.py  하이브리드 기록 검색(BM25 + 의미 검색 + 재순위화), D-CENT와 하이브리드 기준선이 공유
+  retriever_server.py  docent.php용 로컬 검색 서비스 (python -m pipeline retriever)
 evaluation/
   __main__.py   명령: dataset, run, report, judge, expert, rate
   common.py     경로, 통계(부트스트랩, 순열 검정, Holm, κ), 엑셀 워크북
@@ -88,8 +90,10 @@ evaluation/
       GQUERY --> CONTEXT["문맥 조립<br/>서사 경로 → 그래프 근거 → 원문"]
       GQUERY --> FETCH["원문 조회<br/>record_refs 및 이름 검색"]
       FETCH --> CONTEXT
-      CONTEXT --> FACT["Gemini 1단계<br/>팩트 표"]
-      FACT --> EXPLAIN["Gemini 2단계<br/>근거 기반 해설"]
+      ACTION --> RETRIEVE["기록 검색기<br/>BM25 + 의미 검색 + 재순위화"]
+      RETRIEVE --> CONTEXT
+      CONTEXT --> FACT["생성 모델 1단계<br/>팩트 표"]
+      FACT --> EXPLAIN["생성 모델 2단계<br/>근거 기반 해설"]
       EXPLAIN --> RESPONSE["그래프·출처·답변"]
       RESPONSE --> BROWSER
     end
@@ -97,8 +101,9 @@ evaluation/
     GQUERY --> NEO
     GQUERY --> NAMESDB
     FETCH --> PG
+    RETRIEVE --> OLLAMA[("Ollama<br/>nomic-embed-text")]
     NARRATIVE --> NEO
-    ANALYZE --> GEMINI[("Gemini API")]
+    ANALYZE --> GEMINI[("LLM API<br/>Gemini / DeepSeek / Ollama")]
     FACT --> GEMINI
     EXPLAIN --> GEMINI
 
@@ -151,7 +156,8 @@ evaluation/
 ## 설치와 설정
 
 - Python 3.11 이상, PostgreSQL, Neo4j 5.x, PHP와 Composer
-- 평가에만: Ollama(하이브리드 기준선 임베딩 `nomic-embed-text`, context precision 판정 `gemma4:26b`)
+- Ollama와 `nomic-embed-text`: 기록 검색기의 임베딩 (웹 도슨트와 평가 모두). `LLM_PROVIDER = "ollama"`이면
+  평가의 생성 모델과 판정 모델 `gemma4:26b`도
 
 ```bash
 python3 -m venv .venv3.14
@@ -171,19 +177,27 @@ NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "change-me"
 GEMINI_API_KEY = "..."
-# 생성 모델: gemini(기본) 또는 deepseek. 평가할 때는 서버와 평가 명령이 같은 값을 써야 함
+# 생성 모델: gemini(기본), deepseek, ollama. 평가할 때는 서버와 평가 명령이 같은 값을 써야 함
 LLM_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-flash-lite-latest"
 DEEPSEEK_API_KEY = "..."   # LLM_PROVIDER = "deepseek"일 때만
 DEEPSEEK_MODEL = "deepseek-chat"
+OLLAMA_MODEL = "gemma4:26b"  # LLM_PROVIDER = "ollama"일 때만
+OLLAMA_HOST = "http://localhost:11434"   # 검색기의 임베딩, ollama면 생성 모델도
+
+# 기록 검색기 (python -m pipeline retriever)
+DOCENT_RETRIEVER_URL = "http://127.0.0.1:8765"
 
 # 평가 (필요할 때만)
 DOCENT_URL = "http://localhost:8000/docent.php"   # dcent 시스템이 호출할 서버
 EVAL_DELAY = "15"                                 # 호출 간격(초)
 ```
 
-웹 서버 쪽 선택 설정: `DOCENT_CONTEXT_CHARS`(생성 문맥 예산, 기본 11000), `DOCENT_EVAL_MODE=1`(평가 모드 허용),
-`GEMINI_TEMPERATURE`, `GEMINI_TOP_P`.
+웹 서버 쪽 선택 설정: `DOCENT_CONTEXT_CHARS`(생성 문맥 예산, 기본 11000), `DOCENT_NARRATIVE_CHARS`(서사 경로, 3500),
+`DOCENT_EVIDENCE_CHARS`(그래프 근거 확보분, 2500), `DOCENT_PATH_RECORDS`(검색 결과보다 앞에 둘 경로 입증 기록, 5),
+`DOCENT_RETRIEVER_TOP_K`(20), `DOCENT_EVAL_MODE=1`(평가 모드 허용), `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`.
+Ollama를 쓰면 `OLLAMA_NUM_CTX`(문맥 창, 16384)와 `OLLAMA_SEED`(42). 실행 중 읽는 데이터 파일:
+`includes/citation_rules.json`(근거 표기 규칙, 평가와 공유), `includes/historical_synonyms.json`(지명 이표기).
 
 ## 데이터 구축
 
@@ -197,7 +211,7 @@ EVAL_DELAY = "15"                                 # 호출 간격(초)
 
 단계는 각각 별도 프로세스로 실행되고, 실패하면 거기서 멈춥니다. 2단계 뒤에는
 `data/output/Extracted_Historical_Entities.xlsx`를 검토하도록 멈추며 Enter로 계속합니다.
-파이프라인은 임베딩을 만들지 않습니다.
+파이프라인은 임베딩을 만들지 않습니다. 의미 검색 색인은 검색기가 처음 켜질 때 만듭니다(`vector_store/baselines/`).
 
 - 1단계는 `raw_*` 테이블을 지우고 다시 만듭니다. 운영 DB에서는 백업을 확인하십시오.
 - 6~8단계는 Neo4j 그래프를 다시 만듭니다.
@@ -218,6 +232,7 @@ EVAL_DELAY = "15"                                 # 호출 간격(초)
 ## 웹 도슨트
 
 ```bash
+python -m pipeline retriever   # 기록 검색기 (Ollama가 켜져 있어야 함, 로컬에서는 선택)
 php -S 127.0.0.1:8000      # 저장소 루트에서
 ```
 
@@ -229,7 +244,7 @@ php -S 127.0.0.1:8000      # 저장소 루트에서
 | `analyze` | 질의 언어·초점·키워드 분석 |
 | `graph` | Text-to-Cypher(읽기 전용 검증) + 전문 색인 교차 확인, 문서 노드의 기록 식별자 |
 | `pg_prefetch` | 기록 식별자로 원문 조회, 남는 자리는 이름 검색 |
-| `explain` | 문맥 예산(서사 경로 → 그래프 근거 → 원문) → 팩트 표 → 해설 |
+| `explain` | 원문(경로 입증 기록 최대 5건, 질문으로 찾은 검색기 결과, 이름 일치 순) → 문맥 예산(서사 경로 → 그래프 근거 → 원문) → 팩트 표 → 해설 |
 | `node_detail` | 그래프 노드의 원문 상세 |
 
 생성된 Cypher와 단계별 소요 시간은 PHP error log에 `[Docent]`로 기록됩니다. 사건 날짜는 Event 노드의
@@ -277,8 +292,8 @@ D-CENT는 기록 원문을 하이브리드 기준선과 같은 검색기(`pipeli
 평가는 검색 서비스가 없으면 시작하지 않습니다.
 
 평가 모드의 `explain`은 생성에 쓴 문맥과 팩트 표를 함께 돌려주고, 공통 생성 조건을 적용하며, 기록
-식별자 인용을 요구합니다. 검색과 문맥 구성은 배포 경로 그대로입니다. `explain`은 분당 5회로 제한되므로
-`EVAL_DELAY`는 15초 이상으로 두십시오.
+식별자 인용을 요구합니다. 검색과 문맥 구성은 배포 경로 그대로입니다. `explain`은 분당 5회로 제한됩니다. API 생성 모델이면
+`EVAL_DELAY`를 15초 이상으로 두고, 로컬 Ollama 생성 모델이면 문항 하나가 충분히 오래 걸려 `EVAL_DELAY=0`으로도 제한에 걸리지 않습니다.
 
 새 빌드는 `data/output/build_manifest.json`에 빌드 식별자를 남깁니다. 매니페스트가 없는
 기존 DB는 고정한 스냅샷의 식별자를 `EVAL_DATA_BUILD_ID`로 지정합니다. 엔드투엔드 평가에서는
@@ -343,6 +358,85 @@ php -n tests/llm_safety.php
 # 별도 테스트 폴더에 jsdom@26.1.0 설치 후:
 NODE_PATH=/path/to/test/node_modules node tests/rendering_safety.cjs
 ```
+
+## 실서버
+
+웹 도슨트는 DeepSeek(또는 Gemini)로 답을 쓰고, 기록 원문은 평가와 같은 하이브리드 검색기로 찾습니다.
+서버에서는 세 서비스가 돕니다.
+
+```text
+브라우저 → php-fpm (docent.php) ──→ DeepSeek API              답변 생성
+                      │
+                      └─→ 127.0.0.1:8765  python -m pipeline retriever   BM25 + 의미 검색 + 재순위화
+                                 └─→ 127.0.0.1:11434  ollama (nomic-embed-text만)
+```
+
+검색 서비스가 없어도 사이트는 이름 일치 검색만으로 답합니다(로그에 `record retriever unavailable`).
+GitHub Actions는 `docent.php`, `includes/`(JSON 데이터 파일 포함), `static/`을 배포합니다. 검색 서비스는
+Python 코드라 서버에서 `git pull`로 갱신합니다.
+
+Rocky Linux 9 설치(GPU 불필요, 재순위화 모델과 색인에 여유 메모리 약 4GB):
+
+```bash
+# 1. Ollama (임베딩 전용)
+sudo dnf install -y zstd
+curl -fsSL https://ollama.com/install.sh | sh
+sudo systemctl enable --now ollama
+ollama pull nomic-embed-text
+
+# 2. 검색 서비스용 Python 환경
+sudo dnf install -y python3.12 python3.12-pip git
+sudo mkdir -p /opt/docent && sudo chown $USER: /opt/docent
+git clone https://github.com/tsarkr/docent.git /opt/docent && cd /opt/docent
+python3.12 -m venv .venv
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install numpy requests psycopg2-binary "sentence-transformers>=3.0"
+
+# 3. 의미 검색 색인: 서버가 계산한 digest와 같은 이름의 파일을 복사 (CPU로 56,763개 조각을 임베딩하면 오래 걸림)
+set -a; source /var/www/html/.env; set +a
+.venv/bin/python -c "from pipeline import retrieval as r; c=r.chunk_documents(r.load_documents()); print(len(c), r._chunks_digest(c))"
+mkdir -p vector_store/baselines
+# 파일이 있는 컴퓨터에서:  scp vector_store/baselines/dense_nomic_embed_text_<digest>.npy user@server:/opt/docent/vector_store/baselines/
+```
+
+`/var/www/html/.env`에 PHP 서버와 검색 서비스의 설정을 함께 둡니다. `=` 앞뒤에 공백 없이 `KEY=VALUE`로 쓰고
+다음을 추가합니다.
+
+```text
+LLM_PROVIDER=deepseek
+DOCENT_RETRIEVER_URL=http://127.0.0.1:8765
+OLLAMA_HOST=http://127.0.0.1:11434
+```
+
+```ini
+# /etc/systemd/system/docent-retriever.service
+[Unit]
+Description=D-CENT record retriever
+After=network-online.target ollama.service
+
+[Service]
+User=<사용자>
+WorkingDirectory=/opt/docent
+EnvironmentFile=/var/www/html/.env
+ExecStart=/opt/docent/.venv/bin/python -m pipeline retriever --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now docent-retriever
+journalctl -u docent-retriever -f            # "검색 서비스 … digest <digest>" 뒤 "준비 완료" (첫 실행은 재순위화 모델을 내려받음)
+sudo setsebool -P httpd_can_network_connect 1  # SELinux: php-fpm이 127.0.0.1:8765에 접속하도록 허용
+sudo systemctl restart php-fpm
+curl -s http://127.0.0.1:8765/health
+```
+
+로그에 `dense 임베딩 생성 중`이 나오면 서비스가 켜질 때 색인 파일이 없었던 것입니다. 파일을 복사하고 서비스를
+다시 켜십시오. 검색 서비스 갱신: `cd /opt/docent && git pull && sudo systemctl restart docent-retriever`.
+8765와 11434 포트는 외부에 열지 마십시오. 두 서비스 모두 내부 주소(127.0.0.1)에서만 접속을 받습니다.
 
 ## 운영상 주의
 

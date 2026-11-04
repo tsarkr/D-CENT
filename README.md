@@ -16,7 +16,7 @@ to the records. 한국어: [README_ko.md](./README_ko.md).
 
 ```text
 pipeline/
-  __main__.py   commands: build, check, inspect
+  __main__.py   commands: build, check, inspect, retriever
   config.py     settings (environment → .streamlit/secrets.toml), paths, database connections
   text.py       Hanja readings (initial-sound law), TEI ruby helpers
   ingest.py     1  source files → raw_* tables, TEI per row
@@ -29,6 +29,8 @@ pipeline/
   names.py      8  name readings, romanized variants, labels of mention (Activity) nodes
   inspect.py    read-only diagnostics
   check.py      offline self-test
+  retrieval.py  hybrid record retrieval (BM25 + dense + cross-encoder), shared by D-CENT and the hybrid baseline
+  retriever_server.py  local retrieval service for docent.php (python -m pipeline retriever)
 evaluation/
   __main__.py   commands: dataset, run, report, judge, expert, rate
   common.py     paths, statistics (bootstrap, permutation test, Holm, kappa), Excel workbooks
@@ -88,9 +90,11 @@ evaluation/
       NARRATIVE --> GQUERY
       GQUERY --> CONTEXT["Assemble context<br/>paths -> graph evidence -> records"]
       GQUERY --> FETCH["Fetch records<br/>record_refs and name search"]
+      ACTION --> RETRIEVE["Record retriever<br/>BM25 + dense + rerank"]
+      RETRIEVE --> CONTEXT
       FETCH --> CONTEXT
-      CONTEXT --> FACT["Gemini stage 1<br/>fact table"]
-      FACT --> EXPLAIN["Gemini stage 2<br/>evidence-based explanation"]
+      CONTEXT --> FACT["LLM stage 1<br/>fact table"]
+      FACT --> EXPLAIN["LLM stage 2<br/>evidence-based explanation"]
       EXPLAIN --> RESPONSE["Graph, citations, and answer"]
       RESPONSE --> BROWSER
     end
@@ -98,8 +102,9 @@ evaluation/
     GQUERY --> NEO
     GQUERY --> NAMESDB
     FETCH --> PG
+    RETRIEVE --> OLLAMA[("Ollama<br/>nomic-embed-text")]
     NARRATIVE --> NEO
-    ANALYZE --> GEMINI[("Gemini API")]
+    ANALYZE --> GEMINI[("LLM API<br/>Gemini / DeepSeek / Ollama")]
     FACT --> GEMINI
     EXPLAIN --> GEMINI
 
@@ -152,7 +157,8 @@ evaluation/
 ## Installation and settings
 
 - Python 3.11+, PostgreSQL, Neo4j 5.x, PHP and Composer
-- For the evaluation only: Ollama (embedding `nomic-embed-text` for the hybrid baseline, judge `gemma4:26b`)
+- Ollama with `nomic-embed-text` for the record retriever (web docent and evaluation); for the evaluation also
+  the generator and judge `gemma4:26b` when `LLM_PROVIDER = "ollama"`
 
 ```bash
 python3 -m venv .venv3.14
@@ -172,11 +178,16 @@ NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "change-me"
 GEMINI_API_KEY = "..."
-# Generator: gemini (default) or deepseek. For evaluation, the server and the run must use the same value
+# Generator: gemini (default), deepseek, or ollama. For evaluation, the server and the run must use the same value
 LLM_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-flash-lite-latest"
 DEEPSEEK_API_KEY = "..."   # only with LLM_PROVIDER = "deepseek"
 DEEPSEEK_MODEL = "deepseek-chat"
+OLLAMA_MODEL = "gemma4:26b"  # only with LLM_PROVIDER = "ollama"
+OLLAMA_HOST = "http://localhost:11434"   # embeddings of the retriever; the generator with ollama
+
+# Record retriever (python -m pipeline retriever)
+DOCENT_RETRIEVER_URL = "http://127.0.0.1:8765"
 
 # Evaluation (only when needed)
 DOCENT_URL = "http://localhost:8000/docent.php"   # server called by the dcent system
@@ -184,7 +195,11 @@ EVAL_DELAY = "15"                                 # seconds between calls
 ```
 
 Optional web-server settings: `DOCENT_CONTEXT_CHARS` (generation context budget, default 11000),
-`DOCENT_EVAL_MODE=1` (allow evaluation mode), `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`.
+`DOCENT_NARRATIVE_CHARS` (narrative paths, 3500), `DOCENT_EVIDENCE_CHARS` (graph evidence reserved, 2500),
+`DOCENT_PATH_RECORDS` (path-attesting records placed before the retrieved ones, 5), `DOCENT_RETRIEVER_TOP_K` (20),
+`DOCENT_EVAL_MODE=1` (allow evaluation mode), `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`; with Ollama, `OLLAMA_NUM_CTX`
+(context window, 16384) and `OLLAMA_SEED` (42). Data files read at runtime: `includes/citation_rules.json`
+(citation rule, shared with the evaluation) and `includes/historical_synonyms.json` (place-name variants).
 
 ## Building the data
 
@@ -198,7 +213,7 @@ Optional web-server settings: `DOCENT_CONTEXT_CHARS` (generation context budget,
 
 Each step runs in its own process, and the build stops at the first failure. After step 2 it pauses so
 that `data/output/Extracted_Historical_Entities.xlsx` can be reviewed; press Enter to continue.
-The pipeline creates no embeddings.
+The pipeline creates no embeddings; the retriever builds its dense index on first start (`vector_store/baselines/`).
 
 - Step 1 drops and recreates the `raw_*` tables; check backups before running it on a production database.
 - Steps 6-8 rebuild the Neo4j graph.
@@ -219,6 +234,7 @@ Diagnostics (read-only):
 ## Web docent
 
 ```bash
+python -m pipeline retriever   # record retriever (Ollama must be running); optional for local use
 php -S 127.0.0.1:8000      # in the repository root
 ```
 
@@ -230,7 +246,7 @@ Open <http://127.0.0.1:8000/docent.php>. One question is answered through these 
 | `analyze` | language, focus, and keywords of the question |
 | `graph` | Text-to-Cypher (read-only guard) with a full-text cross-check; record identifiers of document nodes |
 | `pg_prefetch` | record text by identifier, remaining slots by name |
-| `explain` | context budget (paths → graph evidence → record text) → fact table → answer |
+| `explain` | record text (up to 5 path-attesting records, the retriever's chunks for the question, then name matches); context budget (paths → graph evidence → record text) → fact table → answer |
 | `node_detail` | records behind a graph node |
 
 Generated Cypher and step timings are written to the PHP error log with the prefix `[Docent]`. Incident dates
@@ -280,7 +296,8 @@ an evaluation does not start without it.
 
 In evaluation mode, `explain` returns the context and fact table it generated from, applies the shared
 generation conditions, and asks for record citations; retrieval and context assembly are those of the
-deployed system. `explain` allows five requests per minute, so keep `EVAL_DELAY` at 15 seconds or more.
+deployed system. `explain` allows five requests per minute: with an API generator keep `EVAL_DELAY` at 15 seconds
+or more; with a local Ollama generator a question takes long enough that `EVAL_DELAY=0` stays under the limit.
 
 A new build writes `data/output/build_manifest.json`. For an existing database with
 no manifest, set `EVAL_DATA_BUILD_ID` to an identifier for its frozen snapshot.
@@ -354,6 +371,85 @@ php -n tests/llm_safety.php
 # With jsdom@26.1.0 installed in an isolated test directory:
 NODE_PATH=/path/to/test/node_modules node tests/rendering_safety.cjs
 ```
+
+## Production server
+
+The web docent answers with DeepSeek (or Gemini) and reads record text with the same hybrid retriever as
+the evaluation. Three services run on the server:
+
+```text
+browser → php-fpm (docent.php) ──→ DeepSeek API              answer generation
+                      │
+                      └─→ 127.0.0.1:8765  python -m pipeline retriever   BM25 + dense + cross-encoder
+                                 └─→ 127.0.0.1:11434  ollama (nomic-embed-text only)
+```
+
+Without the retriever the site still answers, from name matching only (logged as
+`record retriever unavailable`). GitHub Actions deploys `docent.php`, `includes/` (with its JSON data
+files), and `static/`; the retriever is Python and is updated on the server with `git pull`.
+
+Setup on Rocky Linux 9 (CPU only; about 4 GB of free memory for the cross-encoder and the index):
+
+```bash
+# 1. Ollama, for embeddings only
+sudo dnf install -y zstd
+curl -fsSL https://ollama.com/install.sh | sh
+sudo systemctl enable --now ollama
+ollama pull nomic-embed-text
+
+# 2. Python environment for the retriever
+sudo dnf install -y python3.12 python3.12-pip git
+sudo mkdir -p /opt/docent && sudo chown $USER: /opt/docent
+git clone https://github.com/tsarkr/docent.git /opt/docent && cd /opt/docent
+python3.12 -m venv .venv
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install numpy requests psycopg2-binary "sentence-transformers>=3.0"
+
+# 3. The dense index: copy the file whose digest the server computes (embedding 56,763 chunks on a CPU is slow)
+set -a; source /var/www/html/.env; set +a
+.venv/bin/python -c "from pipeline import retrieval as r; c=r.chunk_documents(r.load_documents()); print(len(c), r._chunks_digest(c))"
+mkdir -p vector_store/baselines
+# on the machine that has it:  scp vector_store/baselines/dense_nomic_embed_text_<digest>.npy user@server:/opt/docent/vector_store/baselines/
+```
+
+`/var/www/html/.env` holds the settings of both the PHP server and the retriever; write it as `KEY=VALUE`
+without spaces around `=` and add:
+
+```text
+LLM_PROVIDER=deepseek
+DOCENT_RETRIEVER_URL=http://127.0.0.1:8765
+OLLAMA_HOST=http://127.0.0.1:11434
+```
+
+```ini
+# /etc/systemd/system/docent-retriever.service
+[Unit]
+Description=D-CENT record retriever
+After=network-online.target ollama.service
+
+[Service]
+User=<user>
+WorkingDirectory=/opt/docent
+EnvironmentFile=/var/www/html/.env
+ExecStart=/opt/docent/.venv/bin/python -m pipeline retriever --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now docent-retriever
+journalctl -u docent-retriever -f            # "검색 서비스 … digest <digest>", then "준비 완료" (the first start downloads the cross-encoder)
+sudo setsebool -P httpd_can_network_connect 1  # SELinux: let php-fpm reach 127.0.0.1:8765
+sudo systemctl restart php-fpm
+curl -s http://127.0.0.1:8765/health
+```
+
+If the log shows `dense 임베딩 생성 중`, the index file was missing when the service started: copy it and
+restart the service. To update the retriever: `cd /opt/docent && git pull && sudo systemctl restart docent-retriever`.
+Keep ports 8765 and 11434 closed to the outside; both services listen on the loopback address only.
 
 ## Operational notes
 
