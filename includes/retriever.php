@@ -51,7 +51,7 @@ function docent_retriever_index(): ?array {
 }
 
 /**
- * 질문으로 기록 청크를 찾아, 근거 조립(build_budgeted_pg_context)이 읽는 한 줄 형식으로 돌려준다:
+ * 질문으로 기록 청크를 찾아, 근거 조립(docent_assemble_context)이 읽는 한 줄 형식으로 돌려준다:
  * "[public.<table>] node=기록검색 rowid=<rowid> :: <text>". 순위가 높은 것부터.
  */
 function docent_retrieve_records(string $query, bool $required): array {
@@ -60,7 +60,7 @@ function docent_retrieve_records(string $query, bool $required): array {
         return [];
     }
     try {
-        $top_k = max(1, min(50, (int)get_cfg('DOCENT_RETRIEVER_TOP_K', '20')));
+        $top_k = max(1, min(50, (int)get_cfg('DOCENT_RETRIEVER_TOP_K', '23')));
         $data = _docent_retriever_request('/search', ['query' => $query, 'top_k' => $top_k], 60);
     } catch (\Throwable $e) {
         if ($required) throw $e;

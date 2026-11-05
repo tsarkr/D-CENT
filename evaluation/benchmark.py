@@ -6,6 +6,10 @@
   python -m evaluation dataset --holdout   generate a held-out set -> dataset/holdout/benchmark.json:
                                            template questions over incidents that no question of
                                            dataset/benchmark.json uses (the development set)
+  python -m evaluation dataset --aggregation N [--holdout]
+                                           replace the regional-aggregation questions of the development
+                                           (or held-out) set with N new ones and validate the set again;
+                                           the other questions are kept as they are
 
 Validation (applied to template questions; other sources are only checked for duplicates).
 A question FAILS when
@@ -20,7 +24,8 @@ Wrong particles after a name ("김상열가") are corrected and listed, not fail
 workbook in dataset/validation/ lists every question and a seeded 30% review sample.
 
 Generated questions (40% multi-hop chaining, 30% spatio-temporal diffusion, 30% false
-premise) carry ``source`` = template; hand-written ones curated or third_party.
+premise, plus the regional-aggregation questions added by --aggregation) carry ``source`` = template;
+hand-written ones curated or third_party.
 """
 
 from __future__ import annotations
@@ -745,6 +750,93 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
     return generated
 
 
+AGGREGATION = "Regional Aggregation"
+AGGREGATION_MIN, AGGREGATION_MAX = 5, 30   # incidents per county: more than a few records, all listable (graph lists 40)
+AGGREGATION_SCORED = 5                     # incidents per question that can be scored on their own words
+
+
+def region_of(place: str) -> str:
+    """Province and county of a register place ("전라북도 진안군 성수면 도통리" -> "전라북도 진안군")."""
+    words = place.split(";")[0].split()
+    return " ".join(words[:2]) if len(words) >= 2 else ""
+
+
+def aggregation_questions(count: int, seed: int, exclude_regions: set[str], id_prefix: str) -> list[dict[str, Any]]:
+    """Questions on all incidents the register places in one county: how many, and in what order.
+
+    Record retrieval returns the top-ranked records for a question; a county with 5–30 incidents needs
+    every register entry of the county. The reference facts are the number of incidents and, for each
+    incident, its date and the words of its name that no other incident of the county has (usually the
+    village): fact recall scores words, so words shared by several incidents ("시위", the township) would
+    let one sentence cover all of them. Incidents without such a word (the same village on another day) are
+    counted but not scored one by one; a county needs at least AGGREGATION_SCORED scorable incidents.
+    Only counties of a Korean province (first word ends in 도) are used. The full incident names are kept in
+    ``ground_truth`` for the raters.
+    """
+    from evaluation.metrics import fact_keywords
+
+    by_region: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for ev in load_events_from_pg():
+        region = region_of(ev["place"])
+        if region and ev["start_date"]:
+            by_region[region].append(ev)
+    regions = sorted(r for r, evs in by_region.items()
+                     if AGGREGATION_MIN <= len(evs) <= AGGREGATION_MAX and r not in exclude_regions
+                     and r.split()[0].endswith("도"))
+    random.Random(seed).shuffle(regions)
+    items = []
+    for region in regions:
+        if len(items) >= count:
+            break
+        query = f"1919년 {region}에서 사건 대장에 기록된 시위·사건은 모두 몇 건이며, 날짜순으로 언제 어디에서 어떤 사건이 있었는가?"
+        evs = sorted(by_region[region], key=lambda e: (e["start_date"], e["title"]))
+        words = [fact_keywords(e["title"], query) for e in evs]
+        unique = [[w for w in ws if not any(w in other for j, other in enumerate(words) if j != i)] for i, ws in enumerate(words)]
+        if sum(1 for u in unique if u) < AGGREGATION_SCORED:
+            continue
+        items.append({
+            "id": f"{id_prefix}_RA_{len(items) + 1:02d}",
+            "category": AGGREGATION,
+            "source": "template",
+            "query": query,
+            "hops": 0,
+            "target_entities": region.split(),
+            "gold_facts": [f"기록된 사건 수: {len(evs)}건"] + [f"{e['start_date']} {' '.join(u[:2])}" for e, u in zip(evs, unique) if u],
+            "ground_truth": [f"기록된 사건 수: {len(evs)}건"] + [f"{e['start_date']} {e['title']} ({e['place']})" for e in evs],
+            "negative_traps": [],
+        })
+    return items
+
+
+def add_aggregation(count: int, holdout: bool = False, seed: int | None = None) -> int:
+    """Replace the regional-aggregation questions of one set and validate that set again.
+
+    The development and held-out sets use different counties. Other questions are not regenerated, so
+    earlier results on them stay comparable.
+    """
+    source = (HOLDOUT_DIR / "questions.json") if holdout else QUESTIONS
+    if not source.exists():
+        raise SystemExit(f"{source}가 없습니다.")
+    other = BENCHMARK if holdout else HOLDOUT_DIR / "benchmark.json"
+    used = set()
+    if other.exists():
+        used = {" ".join(i["target_entities"]) for i in json.loads(other.read_text(encoding="utf-8")) if i.get("category") == AGGREGATION}
+    items = [i for i in json.loads(source.read_text(encoding="utf-8")) if i.get("category") != AGGREGATION]
+    new = aggregation_questions(count, (HOLDOUT_SEED if holdout else 42) if seed is None else seed, used, "H" if holdout else "Q")
+    if len(new) < count:
+        print(f"⚠️ 조건에 맞는 군이 {len(new)}개뿐입니다.")
+    source.write_text(json.dumps(items + new, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"💾 {source}: 지역 집계 문항 {len(new)}개 ({', '.join(' '.join(i['target_entities']) for i in new)})")
+    if holdout:
+        validate_dataset(source, VALIDATION_DIR / "holdout", seed=42, save_passed=HOLDOUT_DIR / "benchmark.json")
+        write_composition_table(json.loads((HOLDOUT_DIR / "benchmark.json").read_text(encoding="utf-8")),
+                                VALIDATION_DIR / "holdout" / "benchmark_table.tex")
+    else:
+        validate_dataset(source, VALIDATION_DIR, seed=42, save_passed=BENCHMARK)
+        write_composition_table(json.loads(BENCHMARK.read_text(encoding="utf-8")), VALIDATION_DIR / "benchmark_table.tex")
+    return 0
+
+
 def development_titles() -> set[str]:
     """Incident names the development benchmark (dataset/benchmark.json) quotes in its questions."""
     items = json.loads(BENCHMARK.read_text(encoding="utf-8"))
@@ -788,6 +880,7 @@ def build(generate: bool = False) -> int:
 
 
 CATEGORY_NAMES = {
+    "Regional Aggregation": "Regional aggregation",
     "Spatial-Temporal Diffusion": "Spatio-temporal diffusion",
     "Multi-hop Chaining": "Multi-hop chaining",
     "Zero-Correlation Trap": "False premise (zero-correlation trap)",

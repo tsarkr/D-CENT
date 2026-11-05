@@ -56,13 +56,18 @@ export보다 **먼저** 해야 합니다. PostgreSQL 표와 Neo4j 그래프를 �
 - [ ] 터미널 2: `python -m pipeline retriever` (기록 검색 서비스, "준비 완료"가 나올 때까지 대기)
 - [ ] 터미널 3: `DOCENT_RETRIEVER_URL=http://127.0.0.1:8765 PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000`, `DOCENT_URL` 설정
 - [ ] secrets.toml에도 `DOCENT_RETRIEVER_URL = "http://127.0.0.1:8765"` (평가의 하이브리드 기준선이 같은 서비스를 씀)
-- [ ] `python -m evaluation run --quick` (세 문항 점검)
+- [ ] **11월 4일 설계 변경**: 답변을 질문 하나로 만들고(그래프 사실표 + 검색 기록, 생성 호출 1번), 비교 조건을
+      no-graph·no-facts·two-call로 바꿨습니다. 11월 4일 개발 세트 1회차(`2026-11-04_133248_092527`)는 옛 설계의 결과로만
+      씁니다 (논문의 개발 경과). 새 설계로 개발 2회·보류 2회를 다시 돌립니다.
+- [ ] 지역 집계 문항 추가: `python -m evaluation dataset --aggregation 12`, `python -m evaluation dataset --aggregation 12 --holdout`
+      (기존 문항은 그대로, 두 세트는 서로 다른 군을 씀)
+- [ ] `python -m evaluation run --quick` (범주마다 한 문항씩 점검)
 - [ ] 10월 27일 1차 실행은 파일럿으로만 씁니다 (실행 중 `actions.php` 변경, 기준선이 서지정보만 검색, 채점 v1).
       `python -m evaluation report --rescore 2026-10-27_093400_076070`로 채점 v2 결과만 확인합니다.
 - [ ] 기준선이 세 테이블(사건정보·출처정보·서지정보)을 검색하므로 하이브리드 기준선의 밀집 색인을 처음 한 번 다시 만듭니다
       (Ollama `nomic-embed-text`, 첫 실행에서 자동).
 - [ ] `--limit 10`으로 시범 실행: 생성 실패가 없는지, 실패하면 answers.json의 `[Error: …]`에 서버 오류 내용이 남는지 확인
-- [ ] `PHP_CLI_SERVER_WORKERS=4`를 빼면 `php -S`가 요청을 하나씩만 처리해, 웹 화면처럼 동시에 보내는 서사 요청이 다른 요청 뒤에서 기다리다 20초 제한에 걸립니다
+- [ ] `PHP_CLI_SERVER_WORKERS=4`: 서버가 요청을 동시에 처리하게 합니다 (웹 화면은 그래프 사실표 요청을 그래프 요청과 동시에 보냄)
 - [ ] 평가 중에는 코드를 고치지 않습니다 (`php -S`는 요청마다 파일을 다시 읽으므로 실행 중 수정이 그대로 섞입니다)
 - [ ] 10월 28일 2차 실행(`2026-10-28_132047_939870`)도 시범 실행입니다. 그 뒤 사건명 경로, 서사 진술의 기록 ID 인용,
       재순위화 CPU 실행이 들어갔습니다 (논문 평가 절의 '시범 실행' 문단).

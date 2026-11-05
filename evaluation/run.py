@@ -27,14 +27,13 @@ from evaluation.common import BENCHMARK, RESULTS_DIR, read_json, write_json
 from evaluation.metrics import METRICS_VERSION, average_precision, evidence_items, clean_answer, is_generation_failure, score_answer
 
 RETRIES = 2              # extra attempts for a failed generation (rate limits)
-QUICK_CATEGORIES = 3     # --quick: the first question of each of this many categories
 
 SCORE_COLUMNS = [
     "query_id", "category", "source", "system", "model", "generation_failed",
     "faithfulness", "hallucination_rate", "declined", "entity_hit_rate_at_k", "entity_mrr",
     "cite_ids_valid", "cite_ids_total", "cite_internal_labels", "cite_named_found", "cite_named_total",
-    "facts_covered", "facts_total", "context_chars", "prompt_tokens", "output_tokens", "latency_sec",
-    "cypher_record_count", "narrative_used", "answer_snippet", "trap_flagged_text",
+    "facts_covered", "facts_total", "context_chars", "graph_chars", "prompt_tokens", "output_tokens", "llm_calls", "latency_sec",
+    "narrative_used", "answer_snippet", "trap_flagged_text",
 ]
 
 
@@ -59,7 +58,7 @@ def _fingerprint(dataset: Path, keys: list[str]) -> dict[str, Any]:
     build = read_json(manifest) if manifest.exists() else None
     if build and not build.get("complete"):
         raise SystemExit("데이터 빌드가 미완료 상태입니다. 평가를 시작할 수 없습니다.")
-    if build and build.get("stage") == "rdbms" and any(k not in ("passage", "hybrid", "hybrid-two-stage") for k in keys):
+    if build and build.get("stage") == "rdbms" and any(k not in ("passage", "hybrid") for k in keys):
         raise SystemExit("PostgreSQL 구축 후 그래프를 아직 갱신하지 않았습니다.")
     if build is None:
         build_id = setting("EVAL_DATA_BUILD_ID", "")
@@ -69,7 +68,7 @@ def _fingerprint(dataset: Path, keys: list[str]) -> dict[str, Any]:
     server = _check_server(keys)
     if server and server.get("data_build_id") != build["build_id"]:
         raise SystemExit("서버 DOCENT_DATA_BUILD_ID와 평가 데이터 빌드 ID가 다릅니다.")
-    if any(k in ("dcent", "no-paths") for k in keys) and setting("DOCENT_CONTEXT_CHARS", "11000") != str(systems.CONTEXT_CHARS):
+    if any(k in systems.SERVER_SYSTEMS for k in keys) and setting("DOCENT_CONTEXT_CHARS", "11000") != str(systems.CONTEXT_CHARS):
         raise SystemExit("DOCENT_CONTEXT_CHARS가 논문의 공통 문맥 예산과 다릅니다.")
     return {
         "code_sha256": code.hexdigest(),
@@ -89,8 +88,6 @@ def _select_questions(items: list[dict[str, Any]], quick: bool, limit: int) -> l
             if item["category"] not in seen:
                 seen.add(item["category"])
                 picked.append(item)
-            if len(picked) == QUICK_CATEGORIES:
-                break
         return picked
     return items[:limit] if limit > 0 else items
 
@@ -137,12 +134,12 @@ def _unfinished_run() -> Path:
 
 def _check_server(keys: list[str]) -> dict[str, Any] | None:
     """The dcent systems call a running docent.php in evaluation mode; stop early if it is not set up."""
-    if not any(k in ("dcent", "no-paths") for k in keys):
+    if not any(k in systems.SERVER_SYSTEMS for k in keys):
         return
     url = setting("DOCENT_URL", "")
     if not url:
         raise SystemExit(
-            "dcent·no-paths 시스템은 실행 중인 웹 도슨트를 호출합니다.\n"
+            "dcent와 그 변형(no-graph, no-facts, two-call)은 실행 중인 웹 도슨트를 호출합니다.\n"
             "  1) 다른 터미널에서:  PHP_CLI_SERVER_WORKERS=4 DOCENT_EVAL_MODE=1 php -S localhost:8000\n"
             "  2) secrets.toml에:   DOCENT_URL = \"http://localhost:8000/docent.php\"\n"
             "  또는 기준 시스템만:  --systems passage,hybrid,graph")
@@ -193,7 +190,7 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
                            "context_chars": systems.CONTEXT_CHARS, "answer_max_tokens": systems.ANSWER_MAX_TOKENS,
                            "retries": RETRIES},
             "generator": llm_model(),
-            "docent_url": setting("DOCENT_URL", "") if any(k in ("dcent", "no-paths") for k in keys) else "",
+            "docent_url": setting("DOCENT_URL", "") if any(k in systems.SERVER_SYSTEMS for k in keys) else "",
             "fingerprint": fingerprint,
             "code_version": _git_commit(), "python": platform.python_version(), "complete": False,
         }
@@ -214,14 +211,15 @@ def run(quick: bool = False, limit: int = 0, selection: str = "all", dataset: Pa
             answers.append({
                 "query_id": item["id"], "category": item["category"], "source": item.get("source", ""),
                 "system": key, "model": res["model"], "user_input": item["query"],
-                "query_entities": systems.question_entities(item["query"]) if key in ("passage", "graph", "controlled", "one-stage") else [],
+                "query_entities": systems.question_entities(item["query"]) if key in ("passage", "graph") else [],
                 "response": res["answer"], "response_cleaned": clean_answer(res["answer"], res.get("contexts", [])),
                 "retrieved_contexts": res.get("contexts", []),
                 "reference": "\n".join(item.get("ground_truth", item["gold_facts"])),
                 "fact_table": res.get("fact_table", ""), "generation_failed": res["failed"],
                 "context_chars": res.get("context_chars", 0), "prompt_tokens": res.get("prompt_tokens", 0),
-                "output_tokens": res.get("output_tokens", 0), "latency_sec": res.get("total_time", 0.0),
-                "cypher_record_count": res.get("cypher_record_count", ""), "narrative_used": res.get("narrative_used", ""),
+                "output_tokens": res.get("output_tokens", 0), "llm_calls": res.get("llm_calls", 1),
+                "graph_chars": res.get("graph_chars", ""), "latency_sec": res.get("total_time", 0.0),
+                "narrative_used": res.get("narrative_used", ""),
             })
             print(" ⚠️ 생성 실패" if res["failed"] else f" {res.get('total_time', 0):.1f}s", flush=True)
             write_json(run_dir / "answers.json", answers)

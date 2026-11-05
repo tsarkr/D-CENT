@@ -8,7 +8,7 @@
 | 경로 | 기능 | 실행 |
 |---|---|---|
 | [pipeline/](./pipeline/) | 데이터 구축: 원자료 → PostgreSQL/TEI → Neo4j 그래프 | `python -m pipeline` |
-| [docent.php](./docent.php), [includes/](./includes/), [static/](./static/) | 웹 도슨트 (질의 분석, Cypher 생성, 서사 경로, 2단계 생성) | PHP 서버 |
+| [docent.php](./docent.php), [includes/](./includes/), [static/](./static/) | 웹 도슨트 (그래프 화면, 그래프 사실표, 기록 검색, 한 번의 생성 호출) | PHP 서버 |
 | [evaluation/](./evaluation/) | 평가: 벤치마크, 시스템 비교, 전문가 평가, 리포트 | `python -m evaluation` |
 | [mcp_server.py](./mcp_server.py) | MCP 클라이언트용 읽기 전용 DB 도구 | `python mcp_server.py` |
 | [Latex/](./Latex/) | 논문 원고 | |
@@ -83,28 +83,23 @@ evaluation/
       BROWSER --> ROUTER["docent.php<br/>POST·Origin·CSRF·rate limit"]
       ROUTER --> ACTION["includes/actions.php<br/>action dispatch"]
 
-      ACTION --> ANALYZE["질의 분석<br/>언어·초점·키워드"]
-      ACTION --> NARRATIVE["서사 경로 생성<br/>날짜순 사건 및 연결"]
-      ANALYZE --> GQUERY["그래프 질의<br/>Text-to-Cypher 및 교차 확인"]
-      NARRATIVE --> GQUERY
-      GQUERY --> CONTEXT["문맥 조립<br/>서사 경로 → 그래프 근거 → 원문"]
-      GQUERY --> FETCH["원문 조회<br/>record_refs 및 이름 검색"]
-      FETCH --> CONTEXT
+      ACTION --> ANALYZE["그래프 화면<br/>질의 분석·Text-to-Cypher·원문"]
+      ACTION --> NARRATIVE["그래프 사실표<br/>사건·인물·지역별 사건 목록"]
+      NARRATIVE --> CONTEXT["근거 조립<br/>그래프 사실표 → 기록"]
       ACTION --> RETRIEVE["기록 검색기<br/>BM25 + 의미 검색 + 재순위화"]
       RETRIEVE --> CONTEXT
-      CONTEXT --> FACT["생성 모델 1단계<br/>팩트 표"]
-      FACT --> EXPLAIN["생성 모델 2단계<br/>근거 기반 해설"]
+      CONTEXT --> EXPLAIN["생성 모델 1회 호출<br/>근거 사실 목록 → 해설"]
       EXPLAIN --> RESPONSE["그래프·출처·답변"]
+      ANALYZE --> RESPONSE
       RESPONSE --> BROWSER
     end
 
-    GQUERY --> NEO
-    GQUERY --> NAMESDB
-    FETCH --> PG
+    ANALYZE --> NEO
+    ANALYZE --> NAMESDB
+    ANALYZE --> PG
     RETRIEVE --> OLLAMA[("Ollama<br/>nomic-embed-text")]
     NARRATIVE --> NEO
     ANALYZE --> GEMINI[("LLM API<br/>Gemini / DeepSeek / Ollama")]
-    FACT --> GEMINI
     EXPLAIN --> GEMINI
 
     %% 평가 파이프라인
@@ -117,7 +112,7 @@ evaluation/
       SYSTEMS --> HYBRID["hybrid<br/>BM25·dense·RRF"]
       SYSTEMS --> GRAPH_SYS["graph<br/>Neo4j 검색"]
       SYSTEMS --> DCENT["dcent<br/>웹 도슨트 HTTP 호출"]
-      SYSTEMS --> ABLATIONS["controlled·no-paths<br/>one-stage·hybrid-two-stage"]
+      SYSTEMS --> ABLATIONS["no-graph·no-facts<br/>two-call"]
 
       PASSAGE --> ANSWERS["answers.json"]
       HYBRID --> ANSWERS
@@ -193,17 +188,17 @@ DOCENT_URL = "http://localhost:8000/docent.php"   # dcent 시스템이 호출할
 EVAL_DELAY = "15"                                 # 호출 간격(초)
 ```
 
-웹 서버 쪽 선택 설정: `DOCENT_CONTEXT_CHARS`(생성 문맥 예산, 기본 11000), `DOCENT_NARRATIVE_CHARS`(서사 경로, 3500),
-`DOCENT_EVIDENCE_CHARS`(그래프 근거 확보분, 2500), `DOCENT_PATH_RECORDS`(검색 결과보다 앞에 둘 경로 입증 기록, 5),
-`DOCENT_RETRIEVER_TOP_K`(20), `DOCENT_EVAL_MODE=1`(평가 모드 허용), `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`.
+웹 서버 쪽 선택 설정: `DOCENT_CONTEXT_CHARS`(생성 문맥 예산, 기본 11000), `DOCENT_GRAPH_CHARS`(그래프 사실표 상한, 2500),
+`DOCENT_PATH_RECORDS`(그래프 사실표가 인용했지만 검색에 없는 기록, 앞에 둠, 3),
+`DOCENT_RETRIEVER_TOP_K`(23, 하이브리드 기준선과 같음), `DOCENT_EVAL_MODE=1`(평가 모드 허용), `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`.
 Ollama를 쓰면 `OLLAMA_NUM_CTX`(문맥 창, 16384)와 `OLLAMA_SEED`(42). 실행 중 읽는 데이터 파일:
 `includes/citation_rules.json`(근거 표기 규칙, 평가와 공유), `includes/historical_synonyms.json`(지명 이표기).
 
 ### Ollama 설정
 
 Ollama는 프롬프트가 문맥 창보다 길면 경고 없이 앞부분을 잘라 내고 뒷부분만 씁니다. 기본 문맥 창(버전에 따라
-2,048 또는 4,096토큰)은 D-CENT의 생성 프롬프트(근거 11,000자에 약 8,800토큰)보다 작아서, 프롬프트 앞쪽의
-시스템 지시와 서사 경로가 사라집니다. 다음 설정으로 막습니다.
+2,048 또는 4,096토큰)은 D-CENT의 생성 프롬프트(근거 11,000자에 약 4,500토큰)보다 작아서, 프롬프트 앞쪽의
+시스템 지시와 그래프 사실표가 사라집니다. 다음 설정으로 막습니다.
 
 | 설정 | 넣는 곳 | 값 | 효과 |
 |---|---|---|---|
@@ -265,11 +260,11 @@ php -S 127.0.0.1:8000      # 저장소 루트에서
 
 | Action | 기능 |
 |---|---|
-| `narrative` | 질문의 인물·장소에서 탐색 틀로 날짜 순 서사 경로 계산 (graph와 동시에) |
-| `analyze` | 질의 언어·초점·키워드 분석 |
-| `graph` | Text-to-Cypher(읽기 전용 검증) + 전문 색인 교차 확인, 문서 노드의 기록 식별자 |
-| `pg_prefetch` | 기록 식별자로 원문 조회, 남는 자리는 이름 검색 |
-| `explain` | 원문(경로 입증 기록 최대 5건, 질문으로 찾은 검색기 결과, 이름 일치 순) → 문맥 예산(서사 경로 → 그래프 근거 → 원문) → 팩트 표 → 해설 |
+| `narrative` | 그래프 사실표 (LLM 호출 없음): 질문이 가리키는 사건(날짜, 관련 인물, 관련 사건, 기록), 질문의 인물(관련 인물로 기록된 사건, 없으면 없다고), 사건을 가리키지 않는 질문이면 질문의 군(郡)에 기록된 모든 사건을 날짜순으로 건수와 함께 (graph와 동시에) |
+| `analyze` | 질의 언어·초점·키워드 분석 (그래프 화면용) |
+| `graph` | Text-to-Cypher(읽기 전용 검증) + 전문 색인 교차 확인 (그래프 화면용) |
+| `pg_prefetch` | 그래프 화면 노드의 원문 조회 |
+| `explain` | 질문만으로 답변: 그래프 사실표(`narrative` 결과, 없으면 여기서 계산) → 사실표가 인용했지만 검색에 없는 기록(최대 3건) → 검색기 기록, 하나의 11,000자 예산 → LLM 호출 1번으로 근거 사실 목록과 해설 |
 | `node_detail` | 그래프 노드의 원문 상세 |
 
 생성된 Cypher와 단계별 소요 시간은 PHP error log에 `[Docent]`로 기록됩니다. 사건 날짜는 Event 노드의
@@ -279,7 +274,9 @@ php -S 127.0.0.1:8000      # 저장소 루트에서
 
 ```bash
 .venv3.14/bin/python -m evaluation dataset              # 질문 검증 → dataset/benchmark.json
-.venv3.14/bin/python -m evaluation run --quick          # 3문항으로 점검
+.venv3.14/bin/python -m evaluation dataset --aggregation 12            # 지역 집계 문항 추가 (개발 세트)
+.venv3.14/bin/python -m evaluation dataset --aggregation 12 --holdout  # 보류 세트에도 (다른 군으로)
+.venv3.14/bin/python -m evaluation run --quick          # 범주마다 첫 문항으로 점검
 .venv3.14/bin/python -m evaluation run                  # 전체 실행 → results/<날짜_시각>/report.md
 .venv3.14/bin/python -m evaluation run --resume         # 중단된 실행 이어서
 .venv3.14/bin/python -m evaluation report               # 최근 실행의 리포트
@@ -296,14 +293,14 @@ php -S 127.0.0.1:8000      # 저장소 루트에서
 | `passage` | 문단 기준선: 개체 문자열을 포함한 서지 기록 |
 | `hybrid` | 하이브리드 기준선: BM25 + dense → RRF → cross-encoder 재순위 |
 | `graph` | 그래프 단독 기준선: 개체 이름으로 찾은 triple |
-| `dcent` | D-CENT 엔드투엔드: 배포 시스템을 HTTP로 호출 |
-| `controlled` | D-CENT 통제 조건: 이름 일치 triple과 기록, 2단계 생성 |
-| `no-paths` | 비교 조건 A: 엔드투엔드에서 서사 경로 제외 |
-| `one-stage` | 비교 조건 B: 통제 조건 근거를 한 번의 호출로 |
-| `hybrid-two-stage` | 비교 조건 C: 하이브리드 근거를 2단계 생성으로 |
+| `dcent` | D-CENT: 배포 시스템을 HTTP로 호출 (그래프 사실표 + 검색 기록, 생성 호출 1번) |
+| `no-graph` | 비교 조건: 그래프 사실표 없이 (하이브리드 기준선의 기록 + D-CENT의 생성) |
+| `no-facts` | 비교 조건: 답에 근거 사실 목록 없이 해설만 |
+| `two-call` | 비교 조건: 사실표를 별도 호출로 만든 뒤 답변 (예전 설계) |
 
-`main`(앞의 넷), `ablations`(뒤의 넷), `all`(기본값) 또는 쉼표로 고릅니다.
-`dcent`와 `no-paths`는 실행 중인 웹 도슨트를 호출하므로 서버를 평가 모드로 띄우고 `DOCENT_URL`을 설정합니다.
+`main`(앞의 넷), `ablations`(뒤의 셋), `all`(기본값) 또는 쉼표로 고릅니다.
+`dcent`와 그 비교 조건은 실행 중인 웹 도슨트를 호출하므로 서버를 평가 모드로 띄우고 `DOCENT_URL`을 설정합니다.
+비용 열은 답 하나에 든 모든 LLM 호출을 셉니다(`passage`·`graph`의 개체 추출 호출 포함).
 
 ```bash
 OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # 터미널 1 (임베딩, LLM_PROVIDER=ollama면 생성 모델도)
@@ -316,8 +313,8 @@ D-CENT는 기록 원문을 하이브리드 기준선과 같은 검색기(`pipeli
 하이브리드 기준선도 같은 서비스를 씁니다). 사이트는 검색 서비스 없이도 이름 일치 검색만으로 동작하지만,
 평가는 검색 서비스가 없으면 시작하지 않습니다.
 
-평가 모드의 `explain`은 생성에 쓴 문맥과 팩트 표를 함께 돌려주고, 공통 생성 조건을 적용하며, 기록
-식별자 인용을 요구합니다. 검색과 문맥 구성은 배포 경로 그대로입니다. `explain`은 분당 5회로 제한됩니다. API 생성 모델이면
+평가 모드의 `explain`은 생성에 쓴 문맥, LLM 호출 수, 프롬프트 크기를 함께 돌려주고 공통 생성 조건을
+적용합니다. 검색과 문맥 구성은 배포 경로 그대로입니다. `explain`은 분당 5회로 제한됩니다. API 생성 모델이면
 `EVAL_DELAY`를 15초 이상으로 두고, 로컬 Ollama 생성 모델이면 문항 하나가 충분히 오래 걸려 `EVAL_DELAY=0`으로도 제한에 걸리지 않습니다.
 
 새 빌드는 `data/output/build_manifest.json`에 빌드 식별자를 남깁니다. 매니페스트가 없는
@@ -335,8 +332,8 @@ PHP 서버는 같은 매니페스트의 빌드 식별자를 자동으로 씁니�
 `results/<날짜_시각>/`에 `config.json`(조건·모델·코드 버전), `answers.json`(답변과 근거),
 `scores.csv`(질문×시스템 점수), `report.md`, `table_main.tex`, `table_by_category.tex`, `case_study.md`(질문 하나의 D-CENT·기준선 답변 비교), `error_analysis.xlsx`(D-CENT 답변 20개의 실패 유형 표시용, 채운 뒤 `report`를 다시 실행하면 집계됨)가 생깁니다.
 
-리포트에는 시스템별 지표(평균과 95% 부트스트랩 CI), 계획된 비교(RQ1: D-CENT 대 기준선, RQ2: 서사 경로·
-쿼리 생성·2단계 생성·근거의 기여; 쌍대 순열 검정, 지표별 Holm 보정), 범주별·출처별 결과, 인용 검증,
+리포트에는 시스템별 지표(평균과 95% 부트스트랩 CI), 계획된 비교(RQ1: D-CENT 대 기준선, RQ2: 그래프 사실표·
+근거 사실 목록·호출 1번 대 2번·하이브리드 기록에서의 D-CENT 생성의 기여; 쌍대 순열 검정, 지표별 Holm 보정), 범주별·출처별 결과, 인용 검증,
 context precision, 전문가 평가, 그래프 규모, 직접 확인할 항목(생성 실패, 함정 동의로 표시된 문장)이
 들어갑니다. 여러 실행을 합치면 질문별로 실행 평균을 낸 뒤 검정하고, 실행 간 변동을 함께 보여줍니다.
 
@@ -347,6 +344,9 @@ context precision, 전문가 평가, 그래프 규모, 직접 확인할 항목(�
 템플릿 문항의 기준 사실은 사건 대장에 기록된 것(관련 인물, 날짜, 장소, 관련 사건 연결, 날짜로 정해지는 순서)만 씁니다.
 `dataset --generate`는 사건 대장에서 템플릿 문항을 다시 만들고(저자·외부 출제 문항은 유지),
 `dataset/third_party/*.json`의 외부 출제 문항(`author`, `question`, `category`, `reference_facts` 기입)을 병합합니다.
+`dataset --aggregation N`은 지역 집계 문항을 N개로 새로 만듭니다: 사건이 5~30건인 군에 사건 대장이 몇 건을
+기록하는지, 날짜순으로 어떤 사건인지 묻습니다. 사건마다 날짜와, 그 군의 다른 사건 이름에 없는 낱말(대개 마을 이름)로
+채점합니다(그런 낱말이 없는 사건은 건수에만 들어감). 사건 전체 이름은 평가자용으로 `ground_truth`에 둡니다. 다른 문항은 그대로 두므로 이전 결과와 비교할 수 있습니다.
 
 ### 전문가 평가
 

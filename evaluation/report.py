@@ -38,11 +38,10 @@ CONTRASTS = [
     ("RQ1", "dcent", "passage"),
     ("RQ1", "dcent", "hybrid"),
     ("RQ1", "dcent", "graph"),
-    ("RQ2 narrative paths", "dcent", "no-paths"),
-    ("RQ2 query generation, record retrieval", "dcent", "controlled"),
-    ("RQ2 two-stage generation (D-CENT evidence)", "controlled", "one-stage"),
-    ("RQ2 two-stage generation (hybrid evidence)", "hybrid-two-stage", "hybrid"),
-    ("RQ2 evidence (same generation)", "controlled", "hybrid-two-stage"),
+    ("RQ2 graph facts", "dcent", "no-graph"),
+    ("RQ2 fact list in the answer", "dcent", "no-facts"),
+    ("RQ2 one call vs. separate fact-table call", "dcent", "two-call"),
+    ("RQ2 generation on the same records", "no-graph", "hybrid"),
 ]
 TEST_METRICS = ["faithfulness", "hallucination_rate", "entity_hit_rate_at_k"]
 MIN_CATEGORY_N = 5   # categories with fewer analysed questions are listed without means
@@ -56,7 +55,7 @@ def _read_scores(run_dir: Path) -> list[dict[str, Any]]:
         r["run"] = run_dir.name
         r["failed"] = str(r.get("generation_failed", "")).lower() in {"1", "true"}
         for k, v in list(r.items()):
-            if k in METRICS or k.startswith("cite_") or k in ("context_chars", "prompt_tokens", "output_tokens", "latency_sec", "facts_covered", "facts_total"):
+            if k in METRICS or k.startswith("cite_") or k in ("context_chars", "prompt_tokens", "output_tokens", "llm_calls", "latency_sec", "facts_covered", "facts_total"):
                 try:
                     r[k] = float(v)
                 except (TypeError, ValueError):
@@ -231,7 +230,7 @@ def report(run_dirs: list[Path], rescore_first: bool = False) -> Path:
         md.append(f"\n> ⚠️ {', '.join(stale)}의 점수는 이전 채점 기준입니다. `python -m evaluation report --rescore`로 다시 채점하십시오.\n")
 
     # 1. Overall
-    header = ["System"] + [LABEL[m] for m in METRICS] + ["Failed", "Context chars", "Prompt tokens", "Latency (s)"]
+    header = ["System"] + [LABEL[m] for m in METRICS] + ["Failed", "Context chars", "LLM calls", "Prompt tokens", "Output tokens", "Latency (s)"]
     table = []
     for s in systems:
         lab = labels.get(s, s)
@@ -240,7 +239,8 @@ def report(run_dirs: list[Path], rescore_first: bool = False) -> Path:
                                       cell[(m, "Overall", lab)]["ci95_high"], 1 if m in ("faithfulness", "hallucination_rate", "declined") else 2)
                               if (m, "Overall", lab) in cell else "–" for m in METRICS]
                      + [f"{sum(r['failed'] for r in rows if r['system'] == s)}/{sum(1 for r in rows if r['system'] == s)}",
-                        f"{_mean([r['context_chars'] for r in raw]):.0f}", f"{_mean([r['prompt_tokens'] for r in raw]):.0f}",
+                        f"{_mean([r['context_chars'] for r in raw]):.0f}", f"{_mean([r.get('llm_calls') for r in raw]):.1f}",
+                        f"{_mean([r['prompt_tokens'] for r in raw]):.0f}", f"{_mean([r['output_tokens'] for r in raw]):.0f}",
                         f"{_mean([r['latency_sec'] for r in raw]):.1f}"])
     md.append("\n## 1. 시스템별 자동 지표 (평균 [95% 부트스트랩 CI])\n")
     md.append(_md_table(header, table))
@@ -248,6 +248,7 @@ def report(run_dirs: list[Path], rescore_first: bool = False) -> Path:
               "답변이 더해야 하는 내용(주로 기록된 인물)만으로 채점하며, 내용이 모두 질문에 있는 사실(두 사건의 선후, 인물이 기록에 없다는 것)은 "
               "채점하지 않고 평가자에게 맡깁니다. 함정 동의는 함정의 주어와 그 주장(지휘·연행·작성 등)이 부정 없는 한 절에 함께 나올 때만 표시하고, "
               "거짓 전제 문항은 질문의 전제 자체도 함정으로 봅니다. 표시된 문장은 9절에서 직접 확인하십시오. "
+              "LLM calls·Prompt tokens는 답 하나에 든 모든 생성 호출(개체 추출 호출 포함)의 합이며, 토큰은 글자 수/3으로 어림한 값입니다. "
               "Failed는 생성 실패 답변 수/전체 답변 수입니다. 실패한 문항은 모든 시스템에서 제외되므로, 실패율이 다르면 그 제외는 실패한 시스템에 유리하게 작용합니다.")
     _latex_main(table, header, out_dir / "table_main.tex")
 
@@ -440,11 +441,11 @@ def _print_summary(title: str, table: list[list[str]], header: list[str], contra
 
 
 # ── Worked example ───────────────────────────────────────────────────────────
-NARRATIVE_CATEGORIES = ("Spatial-Temporal Diffusion", "Multi-hop Chaining")
+NARRATIVE_CATEGORIES = ("Regional Aggregation", "Spatial-Temporal Diffusion", "Multi-hop Chaining")
 
 
 def write_case_study(run_dir: Path, labels: dict[str, str]) -> Path | None:
-    """case_study.md: one narrative question, D-CENT end to end next to the best-scoring baseline."""
+    """case_study.md: one narrative question, D-CENT next to the best-scoring baseline."""
     answers = [a for a in read_json(run_dir / "answers.json") if not a.get("generation_failed")]
     scores = {}
     with (run_dir / "scores.csv").open(encoding="utf-8", newline="") as f:
@@ -471,9 +472,9 @@ def write_case_study(run_dir: Path, labels: dict[str, str]) -> Path | None:
     context = (case["retrieved_contexts"] or [""])[0]
     lines = [f"# 사례: {case['query_id']} ({case['category']})", "", f"**질문** {case['user_input']}", "",
              "**기준 사실**", "", *[f"- {line}" for line in case["reference"].split("\n")], "",
-             "## D-CENT (end-to-end)", "", f"사실 재현율 {recall(case):.0f}%", "",
-             "**생성 문맥 앞부분 (서사 경로가 맨 앞)**", "", "```text", context[:2500], "```", "",
-             "**팩트 표**", "", case.get("fact_table") or "(없음)", "", "**답변**", "", case["response"], "",
+             "## D-CENT", "", f"사실 재현율 {recall(case):.0f}%", "",
+             "**근거 앞부분 (그래프 사실표가 맨 앞)**", "", "```text", context[:2500], "```", "",
+             "**답변** (근거 사실 목록 → 해설)", "", case["response"], "",
              f"**인용 검증** {cites(case)}", ""]
     if baseline:
         lines += [f"## {labels.get(baseline['system'], baseline['system'])}", "", f"사실 재현율 {recall(baseline):.0f}%", "",

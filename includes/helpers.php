@@ -273,162 +273,47 @@ function select_prefetch_names_by_degree($nodes, $edges) {
 
 // ── Evidence Context 구축 (예산 제한) ──
 /**
- * 생성 문맥 조립: 서사 경로 → 그래프 사료 → 원천 기록 순서로 놓고, 하나의 예산(기본 11,000자)을 나눈다.
+ * 근거 한 덩어리를 문자 예산 안에서 만든다: [그래프 사실표] → 기록 블록.
  *
- * - 서사 경로는 맨 앞에 놓여 사건의 시간 순서를 먼저 전달한다(상한 $narrative_cap).
- * - 나머지는 원천 기록에 먼저 배정한다. 그래프 사료(인물·단체 소개 등)에는 $evidence_cap만 남겨 두고,
- *   기록이 다 쓰지 않은 몫만 그래프 사료가 더 쓴다. 그래프 사료가 예산의 절반 가까이를 차지하면
- *   질문에 답하는 세부 사실이 적힌 기록 원문이 밀려나기 때문이다.
- * - 블록 사이 구분자("\n\n")도 예산에 포함한다.
- * 반환: ['context' => 생성 문맥, 'narrative_chars' => 실제로 들어간 서사 경로 글자 수]
+ * 그래프 사실표는 $graph_cap까지(줄 단위로 자름), 나머지 예산은 기록이 순서대로 채운다. 기록은 하이브리드
+ * 기준 시스템과 같은 형식(<SOURCE_EVIDENCE id="테이블-rowid">본문</SOURCE_EVIDENCE>)으로 넣어, 두 시스템이
+ * 같은 기록을 같은 모양으로 받게 한다. 예산을 넘는 마지막 기록은 본문만 잘라 식별자를 지킨다.
+ *
+ * @param string   $graph_block  docent_graph_facts()의 결과 (없으면 '')
+ * @param string[] $record_lines "[public.테이블] node=… rowid=N :: 본문" 형식의 줄 (docent_retrieve_records, docent_pg_row_text)
+ * @return array ['context' => string, 'graph_chars' => int]
  */
-function docent_assemble_context(string $narrative, array $evidences, array $pg_texts, string $lang, string $term, string $focus,
-                                 int $total_budget, int $narrative_cap, int $evidence_cap): array {
+function docent_assemble_context(string $graph_block, array $record_lines, int $total_budget, int $graph_cap): array {
     $total_budget = max(2000, $total_budget);
-    $narrative_block = mb_substr($narrative, 0, max(0, min($total_budget, $narrative_cap)));
-    $remaining = $total_budget - mb_strlen($narrative_block) - ($narrative_block !== '' ? 2 : 0);
-    $evidence_reserve = ($remaining > 0 && !empty($evidences)) ? min(max(0, $evidence_cap), $remaining) : 0;
-    $pg_budget = $remaining - $evidence_reserve - ($evidence_reserve > 0 ? 2 : 0);
-    $pg_context = $pg_budget > 0 ? build_budgeted_pg_context($pg_texts, $lang, 25, 180, 450, $pg_budget, $term, $focus) : '';
-    $remaining -= mb_strlen($pg_context) + ($pg_context !== '' ? 2 : 0);
-    $evidence_context = $remaining > 0
-        ? build_budgeted_evidence_context($evidences, $lang, 20, 250, 600, $remaining, $term, $focus) : '';
-    $context = trim(implode("\n\n", array_filter([$narrative_block, $evidence_context, $pg_context], fn($b) => $b !== '')));
-    return ['context' => $context, 'narrative_chars' => mb_strlen($narrative_block)];
-}
-
-function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
-    if (is_bool($lang)) $lang = $lang ? 'en' : 'ko';
-    $lines = []; $used_chars = 0;
-
-    foreach (array_values((array)$evidences) as $idx => $e) {
-        if (count($lines) >= $max_items) break;
-        if (($total_char_budget - $used_chars) < ($min_chars + 120)) break;
-
-        $doc = mb_substr(normalize_whitespace_text($e['doc'] ?? ''), 0, 120);
-        $doc = preg_replace('/\[[A-Za-z0-9_,]+\]\s*(n[a-f0-9]{8,}|[a-z]_\d+)/u', '[관련 사료 기록]', $doc);
-        $doc = str_replace(
-            ['[시소러스]', '[Thesaurus]', '[문건]', '[사료]', '[Event,사건]', '[Person,인물]'],
-            ['[역사 용어 사전]', '[Historical Dictionary]', '[1차 사료]', '[1차 사료]', '[사건 기록]', '[인물 기록]'],
-            $doc
-        );
-        $doc = preg_replace('/\b(n[a-f0-9]{10,}|[a-z]_\d{4,})\b/u', '', $doc);
-        $doc = trim(preg_replace('/\s+/u', ' ', $doc));
-
-        $concept = trim((string)($e['concept'] ?? ''));
-        $entity_attr = htmlspecialchars($concept ?: $doc, ENT_QUOTES, 'UTF-8');
-        // Cite a graph fact by the incident it concerns, which a reader can look up, not by a block label.
-        $id_attr = preg_match('/사건:\s*([^\n|]+)/u', (string)($e['text'] ?? ''), $sm) && trim($sm[1]) !== ''
-            ? htmlspecialchars(trim($sm[1]), ENT_QUOTES, 'UTF-8') : 'g_' . ($idx + 1);
-
-        $text = normalize_whitespace_text($e['text'] ?? '');
-        $text = preg_replace('/\b(n[a-f0-9]{10,}|[a-z]_\d{4,})\b/u', '', $text);
-        if ($text === '') continue;
-
-        // 지명/사건 추출
-        $region = ''; $event = '';
-        if (preg_match('/(평안[남북]도|함경[남북]도|충청[남북]도|전라[남북]도|경상[남북]도|강원도|경기도|황해도|평양|함흥|천안|병천|단천|간도|연해주|상해|진천|청주|용산|종로|보신각|대구|부산|통영|의주|해주|원산)[^\s,]*/u', $text . ' ' . $doc, $rm)) $region = $rm[0];
-        if (preg_match('/([가-힣\w]+(?:시위|만세|선언식|의거|봉기|집회|행진|사건|파견|회합))/u', $doc . ' ' . $text, $em)) $event = $em[0];
-
-        // Preserve source text: topic keywords alone cannot establish irrelevance.
-        $body = mb_substr($text, 0, $max_chars);
-
-        $labels = _get_envelope_labels($lang);
-        $comment_str = _build_scope_comment($lang, $entity_attr, $region, $event);
-        $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
-                  . "  {$comment_str}\n  [{$labels['doc']}] {$doc}\n  [{$labels['body']}] {$body}\n</SOURCE_EVIDENCE>";
-
-        $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);   // + the "\n\n" separator before it
-        $available = $total_char_budget - $used_chars;
-        if ($line_len > $available) {
-            $body_budget = mb_strlen($body) - ($line_len - $available);
-            if ($body_budget < min($min_chars, mb_strlen($body))) continue;
-            // Trim only the body, preserving the source identifier and closing tag.
-            $offset = mb_strrpos($envelope, $body);
-            $envelope = mb_substr($envelope, 0, $offset)
-                . mb_substr($body, 0, $body_budget)
-                . mb_substr($envelope, $offset + mb_strlen($body));
-            $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);
-        }
-        $lines[] = $envelope;
-        $used_chars += $line_len;
+    $graph = '';
+    foreach (preg_split('/\n/u', trim($graph_block)) as $line) {
+        if ($line === '') continue;
+        $next = $graph === '' ? $line : "{$graph}\n{$line}";
+        if (mb_strlen($next) > min($graph_cap, $total_budget)) break;
+        $graph = $next;
     }
-    return implode("\n\n", $lines);
-}
-
-function build_budgeted_pg_context($pg_texts, $lang, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
-    if (is_bool($lang)) $lang = $lang ? 'en' : 'ko';
-    $headers = ['ja' => '[一次史料原文（PostgreSQL所蔵公文書）]', 'zh' => '[一手史料原文（PostgreSQL历史档案）]', 'en' => '[Primary Archival Sources (PostgreSQL)]'];
-    $header = ($headers[$lang] ?? '[1차 사료 원문 (PostgreSQL)]') . "\n";
-    $lines = []; $used_chars = mb_strlen($header);   // the header counts against the budget
-
-    foreach (array_values((array)$pg_texts) as $idx => $t) {
-        if (count($lines) >= $max_items) break;
-        if (($total_char_budget - $used_chars) < ($min_chars + 120)) break;
-
-        $text = normalize_whitespace_text($t);
-        if ($text === '') continue;
-
-        $node_id = ''; $rowid = ''; $table = '';
-        if (preg_match('/node=([^\s]+)/u', $text, $nm)) $node_id = trim($nm[1]);
-        if (preg_match('/rowid=([^\s]+)/u', $text, $rm)) $rowid = trim($rm[1]);
-        if (preg_match('/^\[[^\].]*\.([A-Za-z0-9_]+)\]/u', $text, $tm)) $table = $tm[1];
-        // 기록 식별자는 "테이블-rowid" (예: raw_bibliography-123): 테이블이 다르면 rowid가 겹칠 수 있습니다.
-        $id_attr = $rowid ? (($table !== '' ? $table : 'pg') . "-{$rowid}") : "pg_" . ($idx + 1);
-        $entity_attr = htmlspecialchars($node_id ?: "기록_{$idx}", ENT_QUOTES, 'UTF-8');
-
-        $region = ''; $event = '';
-        if (preg_match('/(지역|주소|본적|발생지):\s*([^;]+)/u', $text, $reg_m)) $region = trim($reg_m[2]);
-        elseif (preg_match('/(평안[남북]도|함경[남북]도|충청[남북]도|전라[남북]도|경상[남북]도|강원도|경기도|황해도|평양|함흥|천안|병천|단천|간도|연해주|상해|진천|청주|용산|종로|보신각|대구|부산|통영|의주|해주|원산)[^\s,;]*/u', $text, $rm2)) $region = $rm2[0];
-        if (preg_match('/(사건명|제목):\s*([^;]+)/u', $text, $ev_m)) $event = trim($ev_m[2]);
-        elseif (preg_match('/([가-힣\w]+(?:시위|만세|선언식|의거|봉기|집회|행진|사건|파견))/u', $text, $em2)) $event = $em2[0];
-
-        $body = mb_substr($text, 0, $max_chars);
-
-        $comment_str = _build_scope_comment($lang, $entity_attr, $region, $event);
-        $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
-                  . "  {$comment_str}\n  {$body}\n</SOURCE_EVIDENCE>";
-
-        $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);   // + the "\n\n" separator before it
-        $available = $total_char_budget - $used_chars;
-        if ($line_len > $available) {
-            $body_budget = mb_strlen($body) - ($line_len - $available);
-            if ($body_budget < min($min_chars, mb_strlen($body))) continue;
-            // Trim only the body, preserving the source identifier and closing tag.
-            $offset = mb_strrpos($envelope, $body);
-            $envelope = mb_substr($envelope, 0, $offset)
-                . mb_substr($body, 0, $body_budget)
-                . mb_substr($envelope, $offset + mb_strlen($body));
-            $line_len = mb_strlen($envelope) + ($lines ? 2 : 0);
-        }
-        $lines[] = $envelope;
-        $used_chars += $line_len;
+    $parts = $graph !== '' ? [$graph] : [];
+    $used = mb_strlen($graph);
+    $seen = [];
+    foreach ($record_lines as $line) {
+        $line = normalize_whitespace_text((string)$line);
+        if (!preg_match('/^\[[^\].]*\.(raw_[a-z_]+)\]\s+node=\S*\s+rowid=(\d+)\s+::\s*(.*)$/u', $line, $m)) continue;
+        $id = "{$m[1]}-{$m[2]}";
+        $body = trim($m[3]);
+        if ($body === '' || isset($seen["{$id}|{$body}"])) continue;
+        $seen["{$id}|{$body}"] = true;
+        $body = mb_substr($body, 0, 600);
+        $open = "<SOURCE_EVIDENCE id=\"{$id}\">\n";
+        $close = "\n</SOURCE_EVIDENCE>";
+        $sep = $parts ? 2 : 0;
+        $room = $total_budget - $used - $sep - mb_strlen($open) - mb_strlen($close);
+        if ($room < 120) break;
+        $block = $open . mb_substr($body, 0, $room) . $close;
+        $parts[] = $block;
+        $used += $sep + mb_strlen($block);
     }
-
-    if (empty($lines)) return '';
-    return $header . implode("\n\n", $lines);
+    return ['context' => implode("\n\n", $parts), 'graph_chars' => mb_strlen($graph)];
 }
-
-// ── 내부 헬퍼 ──
-function _get_envelope_labels($lang) {
-    $map = [
-        'ja' => ['doc' => '史料', 'body' => '記述'],
-        'zh' => ['doc' => '文献', 'body' => '内容'],
-        'en' => ['doc' => 'Document', 'body' => 'Content'],
-    ];
-    return $map[$lang] ?? ['doc' => '문서', 'body' => '내용'];
-}
-
-function _build_scope_comment($lang, $entity, $region, $event) {
-    $scope = "[{$entity}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "]";
-    $templates = [
-        'ja' => "<!-- この史料の内容は {$scope} の記述にのみ有効であり他地域・事件との混同厳禁 -->",
-        'zh' => "<!-- 本史料内容仅对 {$scope} 的记述有效，严禁跨区域混淆 -->",
-        'en' => "<!-- This archival evidence applies strictly to {$scope} and must NOT be attributed to other regions/events -->",
-    ];
-    return $templates[$lang] ?? "<!-- 이 사료의 내용은 오직 {$scope} 서술에만 유효하며 타 지역/사건과 결합 금지 -->";
-}
-
 
 /** Evidence blocks in their actual prompt order, including any unwrapped narrative text. */
 function docent_context_items($context) {

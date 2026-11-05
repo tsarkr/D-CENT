@@ -17,7 +17,7 @@
 RUN is a folder name under evaluation/results/ (default: the latest run).
 Settings come from environment variables or .streamlit/secrets.toml: LLM_PROVIDER (gemini | deepseek),
 GEMINI_API_KEY, GEMINI_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
-DOCENT_URL (docent.php running with DOCENT_EVAL_MODE=1, for the dcent and no-paths systems),
+DOCENT_URL (docent.php running with DOCENT_EVAL_MODE=1, for dcent and its ablations no-graph, no-facts, two-call),
 EVAL_DELAY (seconds between calls, default 15), JUDGE_MODEL and OLLAMA_HOST (judge).
 """
 
@@ -49,9 +49,11 @@ def main() -> int:
     p.add_argument("--holdout", action="store_true", help="generate the held-out set instead (dataset/holdout/)")
     p.add_argument("--seed", type=int, default=None, help="seed for the held-out set (default 2026)")
     p.add_argument("--count", type=int, default=115, help="questions to generate for the held-out set before validation (default 115, about 100 pass)")
+    p.add_argument("--aggregation", type=int, default=0, metavar="N",
+                   help="replace the regional-aggregation questions with N new ones (with --holdout: in the held-out set)")
 
     p = sub.add_parser("run", help="run the systems on the benchmark")
-    p.add_argument("--quick", action="store_true", help="one question from each of three categories")
+    p.add_argument("--quick", action="store_true", help="the first question of each category")
     p.add_argument("--limit", type=int, default=0, help="only the first N questions")
     p.add_argument("--systems", default="all", help="all (default), main, ablations, or comma-separated keys")
     p.add_argument("--resume", action="store_true", help="continue the latest unfinished run")
@@ -75,6 +77,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "dataset":
+        if args.aggregation:
+            from evaluation.benchmark import add_aggregation
+            return add_aggregation(args.aggregation, holdout=args.holdout, seed=args.seed)
         if args.holdout:
             from evaluation.benchmark import HOLDOUT_SEED, build_holdout
             return build_holdout(args.count, HOLDOUT_SEED if args.seed is None else args.seed)

@@ -5,7 +5,7 @@
  * 1. handle_action_analyze()     — 질의 의도 분석 및 DB 키워드 매핑
  * 2. handle_action_graph()       — Neo4j 지식그래프 탐색 및 사료 수집
  * 3. handle_action_pg_prefetch() — PostgreSQL 원천 사료 연동
- * 4. handle_action_explain()     — AI RAG 도슨트 학술 해설 생성 (SSE / 동기)
+ * 4. handle_action_explain()     — 답변 생성: 그래프 사실표 + 검색 기록, LLM 호출 한 번 (SSE / 동기)
  * 5. handle_action_node_detail() — 노드 원천 사료 실시간 상세 조회
  */
 
@@ -164,52 +164,17 @@ function graphrag_detect_entities(string $query): array {
         }
     }
 
-    $route_graph = !empty($detected);
-
-    // ── 1-B. LLM 보조 NER (규칙 기반 미감지 시 경량 추출) ──
-    if (!$route_graph) {
-        try {
-            $ner_prompt_sys = "당신은 한국 근현대사 텍스트에서 고유명사(인물명·지명·사건명)를 추출하는 NER 시스템입니다.\n"
-                            . "입력 문장에서 핵심 고유명사만 JSON 배열로 반환하십시오.\n"
-                            . "규칙: 조사/어미 제거, 역사적 맥락 고유명사만, 최대 5개, 마크다운 없음.\n"
-                            . "출력 예: [\"유관순\", \"아우내\", \"수원\"]";
-            $ner_raw = call_llm([
-                ['role' => 'system', 'content' => $ner_prompt_sys],
-                ['role' => 'user',   'content' => $query],
-            ], true, 256, 0.0, 0.8, 15);
-
-            $ner_parsed = json_decode((string)$ner_raw, true);
-            if (is_array($ner_parsed)) {
-                foreach ($ner_parsed as $item) {
-                    $item = trim((string)$item);
-                    if (mb_strlen($item) >= 2 && !in_array($item, $detected, true)) {
-                        $detected[] = $item;
-                    }
-                }
-                $route_graph = !empty($detected);
-            }
-        } catch (\Throwable $nerErr) {
-            error_log('GraphRAG NER failed: ' . $nerErr->getMessage());
-        }
-    }
-
+    // 규칙으로 찾지 못한 이름은 graphrag_persons_in_question()이 그래프의 인물 이름으로 찾는다.
+    // (예전의 LLM 보조 NER 호출은 답변마다 숨은 호출 한 번을 더해 없앴다.)
+    $persons = array_values(array_filter($detected, fn($d) => in_array($d, $known_persons, true)
+        || (bool)preg_match('/^[가-힣]{2,4}$/u', $d) && !in_array($d, $place_keywords, true) && !in_array($d, $syn_detected, true)));
     return [
         'entities'    => array_values(array_unique($detected)),
-        'route_graph' => $route_graph,
+        'persons'     => array_values(array_unique($persons)),
+        'route_graph' => !empty($detected),
     ];
 }
 
-/**
- * [Step 2] Neo4j Multi-hop (3-hop) Cypher 실행
- *
- * 감지된 개체명($entity_name)을 시작점으로 삼아
- * Person → common_Event → Person2 → target_Event 경로를 탐색하고
- * 원시 레코드 배열을 반환한다.
- *
- * @param  object $client       Neo4j 클라이언트 (get_neo4j())
- * @param  string $entity_name  탐색 시작 인물/개체명
- * @return array  레코드 배열 (각 행: ['연관인물'=>.., '사건이름'=>.., '발생일자'=>..])
- */
 /** Record citation keys ("raw_source_info-123") from a Neo4j list or client input; at most three. */
 function docent_record_keys($value): array {
     if (is_object($value) && method_exists($value, 'toArray')) $value = $value->toArray();
@@ -252,6 +217,9 @@ function graphrag_run_with_timeout(object &$client, string $cypher, array $param
 }
 
 /**
+ * 인물 또는 장소 이름 하나에서 시작하는 한 단계 탐색: 그 인물이 관련 인물로 기록된 사건, 또는 사건명에
+ * 그 장소가 들어 있는 사건과 관련 인물. 행: ['연관인물', '사건이름', '발생일자', '공통사건', '기준인물', '근거'].
+ *
  * @param float|null $deadline  microtime(true) value after which no further query is started;
  *                              each query's timeout is also capped to the time remaining.
  */
@@ -259,36 +227,17 @@ function graphrag_run_multihop(object $client, string $entity_name, ?float $dead
     $entity_name = trim($entity_name);
     if ($entity_name === '') return [];
 
-    // ── 3-hop Person → Event → Person → Event 탐색 ──
-    $cypher_person = "
-        MATCH (p1:Person)-[r1:P14_carried_out_by]-(common_e:Event)-[r2:P14_carried_out_by]-(p2:Person)
-        WHERE (p1.명칭 = \$name OR p1.name = \$name) AND p1 <> p2
-        MATCH (p2)-[r3:P14_carried_out_by]-(target_e:Event)
-        WHERE target_e <> common_e
-        RETURN
-            [x IN [head(coalesce(r1.sources, [])), head(coalesce(r2.sources, [])), head(coalesce(r3.sources, []))]
-             WHERE x IS NOT NULL]                                     AS 근거,
-            COALESCE(p2.명칭, p2.name)                                AS 연관인물,
-            COALESCE(target_e.사건명, target_e.제목, target_e.name)   AS 사건이름,
-            target_e.날짜                                              AS 발생일자,
-            COALESCE(common_e.사건명, common_e.제목, common_e.name)   AS 공통사건,
-            COALESCE(p1.명칭, p1.name)                                AS 기준인물
-        ORDER BY target_e.날짜 ASC
-        LIMIT 20
-    ";
-
     // ── 직접 참여 사건 보완 (1-hop: 인물 → 사건) ──
     $cypher_direct = "
         MATCH (p:Person)-[r:P14_carried_out_by]-(e:Event)
-        WHERE (p.명칭 = \$name OR p.name = \$name)
-        OPTIONAL MATCH (e)-[:P7_took_place_at|ACTIVATED_AT]-(loc:Place)
-        RETURN
+        WHERE (p.명칭 = \$name OR p.name = \$name OR p.한글독음 = \$name)
+        RETURN DISTINCT
             coalesce(r.sources, [])[0..2]                         AS 근거,
             COALESCE(p.명칭, p.name)                              AS 연관인물,
             COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
             e.날짜                                                AS 발생일자,
             '' AS 공통사건,
-            COALESCE(p.명칭, p.name)                              AS 기준인물
+            \$name                                                AS 기준인물
         ORDER BY e.날짜 ASC
         LIMIT 15
     ";
@@ -309,30 +258,12 @@ function graphrag_run_multihop(object $client, string $entity_name, ?float $dead
         LIMIT 15
     ";
 
-    // ── 단체/기관/기준개체 풀텍스트 인덱스 기반 다중 홉 탐색 (Anchor 1개 선별 → Person → Event) ──
-    $escaped_entity = docent_escape_lucene($entity_name);
-    $cypher_anchor = "
-        CALL db.index.fulltext.queryNodes('namesIndex', \$lucene_name) YIELD node AS anchor, score
-        ORDER BY score DESC
-        LIMIT 1
-        MATCH (anchor)-[*1..2]-(p:Person)
-        WITH DISTINCT anchor, p LIMIT 50
-        MATCH (p)-[r:P14_carried_out_by]-(e:Event)
-        RETURN
-            coalesce(r.sources, [])[0..2]                         AS 근거,
-            COALESCE(p.명칭, p.name, '(인물 미상)')               AS 연관인물,
-            COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
-            e.날짜                                                AS 발생일자,
-            COALESCE(anchor.명칭, anchor.name, \$name)            AS 공통사건,
-            \$name                                                AS 기준인물
-        ORDER BY e.날짜 ASC
-        LIMIT 20
-    ";
-
     $results = [];
     $seen    = [];
 
-    $queries = [$cypher_person, $cypher_direct, $cypher_place, $cypher_anchor];
+    // 예전의 3-hop(인물→공통 사건→다른 인물→사건)과 전문 색인 기준 개체 탐색은 뺐다: 유명 인물을 거쳐
+    // 질문과 무관한 사건을 끌어와(허브 효과) 근거 예산만 차지했고, 평가에서 재현율을 올리지 못했다.
+    $queries = [$cypher_direct, $cypher_place];
     foreach ($queries as $cypher) {
         $timeout = GRAPHRAG_QUERY_TIMEOUT_SEC;
         if ($deadline !== null) {
@@ -341,10 +272,7 @@ function graphrag_run_multihop(object $client, string $entity_name, ?float $dead
             $timeout = min($timeout, $remaining);
         }
         try {
-            $params = [
-                'name' => $entity_name,
-                'lucene_name' => $escaped_entity !== '' ? $escaped_entity : $entity_name
-            ];
+            $params = ['name' => $entity_name];
             $res = graphrag_run_with_timeout($client, $cypher, $params, $timeout);
         } catch (\Throwable $e) {
             error_log("GraphRAG multi-hop query failed for [{$entity_name}]: " . $e->getMessage());
@@ -498,176 +426,254 @@ function graphrag_incident_rows(object $client, string $query, ?float $deadline 
     return array_slice($rows, 0, 20);
 }
 
-/**
- * [Step 3] GraphRAG 결과 직렬화 (SOURCE_EVIDENCE XML 포맷)
- *
- * Multi-hop 쿼리 결과를 LLM이 사료처럼 소비할 수 있는
- * <SOURCE_EVIDENCE> XML 블록으로 직렬화한다.
- *
- * @param  array  $multihop_rows  graphrag_run_multihop() 결과
- * @param  string $entity_name    탐색 기준 개체명
- * @param  string $lang           출력 언어 (ko|en|ja|zh)
- * @return string 직렬화된 SOURCE_EVIDENCE 블록 문자열 (없으면 '')
- */
-function graphrag_serialize_results(array $multihop_rows, string $entity_name, string $lang): string {
-    if (empty($multihop_rows)) return '';
-
-    $label_map = [
-        'ko' => ['header' => '[지식그래프 다중 홉 탐색 결과]',   'prefix' => '그래프 탐색 결과'],
-        'en' => ['header' => '[Knowledge Graph Multi-hop Results]', 'prefix' => 'Graph traversal result'],
-        'ja' => ['header' => '[知識グラフ多重ホップ探索結果]',    'prefix' => 'グラフ探索結果'],
-        'zh' => ['header' => '[知识图谱多跳探索结果]',            'prefix' => '图谱探索结果'],
-    ];
-    $labels = $label_map[$lang] ?? $label_map['ko'];
-
-    $lines = [];
-    foreach ($multihop_rows as $i => $row) {
-        $person  = $row['연관인물'] ?: '(인물 미상)';
-        $event   = $row['사건이름'] ?: '(사건명 미상)';
-        $date    = $row['발생일자'] ?: '';
-        $common  = $row['공통사건'] ?: '';
-        $anchor  = $row['기준인물'] ?: $entity_name;
-        $kind    = (string)($row['유형'] ?? '');
-        $when    = $date ? " ({$date})" : '';
-
-        // 자연어 서술 생성 (언어별)
-        if ($kind === 'incident' || $kind === 'related') {
-            $named = $row['연관인물'] !== '';
-            $texts = [
-                'ko' => $kind === 'related'
-                    ? "{$labels['prefix']}: 사건 대장은 [{$common}]과(와) [{$event}]{$when}을(를) 관련 사건으로 연결합니다."
-                    : ($named ? "{$labels['prefix']}: [{$event}]{$when}의 관련 인물로 '{$person}'이(가) 기록되어 있습니다."
-                              : "{$labels['prefix']}: [{$event}]{$when}은(는) 사건 대장에 기록되어 있으나 그래프에 연결된 관련 인물이 없습니다."),
-                'en' => $kind === 'related'
-                    ? "{$labels['prefix']}: the register links [{$common}] and [{$event}]{$when} as related incidents."
-                    : ($named ? "{$labels['prefix']}: '{$person}' is recorded as a person related to [{$event}]{$when}."
-                              : "{$labels['prefix']}: [{$event}]{$when} is in the register, but no related person is linked in the graph."),
-                'ja' => $kind === 'related'
-                    ? "{$labels['prefix']}: 事件台帳は[{$common}]と[{$event}]{$when}を関連事件として結ぶ。"
-                    : ($named ? "{$labels['prefix']}: [{$event}]{$when}の関連人物として'{$person}'が記録されている。"
-                              : "{$labels['prefix']}: [{$event}]{$when}は事件台帳にあるが、グラフに関連人物は結ばれていない。"),
-                'zh' => $kind === 'related'
-                    ? "{$labels['prefix']}: 事件台账将[{$common}]与[{$event}]{$when}列为相关事件。"
-                    : ($named ? "{$labels['prefix']}: '{$person}'被记录为[{$event}]{$when}的相关人物。"
-                              : "{$labels['prefix']}: [{$event}]{$when}见于事件台账，但图谱中没有关联人物。"),
-            ];
-            $body = $texts[$lang] ?? $texts['ko'];
-        } else switch ($lang) {
-            case 'en':
-                $body = "{$labels['prefix']}: '{$anchor}' is connected to '{$person}'"
-                      . ($common ? " via the shared event [{$common}]" : '')
-                      . ". '{$person}' is recorded as a participant in [{$event}]"
-                      . ($date ? " ({$date})" : '') . ".";
-                break;
-            case 'ja':
-                $body = "{$labels['prefix']}: '{$anchor}'は"
-                      . ($common ? "共通事件[{$common}]を通じて" : '')
-                      . "'{$person}'と関連する。'{$person}'は[{$event}]"
-                      . ($date ? "（{$date}）" : '') . "に参加した記録がある。";
-                break;
-            case 'zh':
-                $body = "{$labels['prefix']}: '{$anchor}'"
-                      . ($common ? "通过共同事件[{$common}]" : '')
-                      . "与'{$person}'存在关联。'{$person}'被记录为[{$event}]"
-                      . ($date ? "（{$date}）" : '') . "的参与者。";
-                break;
-            default: // ko
-                $body = "{$labels['prefix']}: '{$anchor}'은(는)"
-                      . ($common ? " 공통 사건 [{$common}]을 매개로" : '')
-                      . " '{$person}'과(와) 연결됩니다."
-                      . " '{$person}'은(는) [{$event}]"
-                      . ($date ? " ({$date})" : '') . "에 참여한 기록이 있습니다.";
-        }
-
-        $keys = docent_record_keys($row['근거'] ?? []);
-        if ($keys) {
-            $cue = ['en' => 'records', 'ja' => '根拠', 'zh' => '依据'][$lang] ?? '근거';
-            $body .= " ({$cue}: " . implode(', ', $keys) . ")";
-        }
-
-        // Cite a block by the record that attests it, else by its incident name, never by an internal label.
-        $id_attr     = htmlspecialchars($keys[0] ?? ($row['사건이름'] ?: 'graphrag_' . ($i + 1)), ENT_QUOTES, 'UTF-8');
-        $entity_attr = htmlspecialchars($anchor, ENT_QUOTES, 'UTF-8');
-        $event_attr  = htmlspecialchars($event,  ENT_QUOTES, 'UTF-8');
-
-        $lines[] = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\" event=\"{$event_attr}\" source=\"graphrag_multihop\">\n"
-                 . "  <!-- [GraphRAG] {$anchor} 다중 홉 탐색 — DB 확인 완료 사실만 포함 -->\n"
-                 . "  {$body}\n"
-                 . "</SOURCE_EVIDENCE>";
+/** Hangul words of 3–4 syllables in the question, without particles: candidate person names. */
+function graphrag_name_tokens(string $query): array {
+    $tokens = [];
+    foreach (preg_split('/[^가-힣]+/u', $query, -1, PREG_SPLIT_NO_EMPTY) as $w) {
+        $w = preg_replace('/(?:으로|에서|에게|이란|란|과|와|의|은|는|이|가|을|를|도|로|에)$/u', '', $w);
+        if (mb_strlen($w) >= 3 && mb_strlen($w) <= 4) $tokens[$w] = true;
     }
+    return array_slice(array_keys($tokens), 0, 30);
+}
 
-    if (empty($lines)) return '';
+/** Persons of the graph whose name is a word of the question (exact match, Hanja names by their reading). */
+function graphrag_persons_in_question(object $client, string $query, float $timeout): array {
+    $tokens = graphrag_name_tokens($query);
+    if (!$tokens || $timeout < 1.0) return [];
+    try {
+        $res = graphrag_run_with_timeout($client, "
+            MATCH (p:Person)
+            WHERE p.명칭 IN \$tokens OR p.name IN \$tokens OR p.한글독음 IN \$tokens
+            WITH coalesce(p.한글독음, p.명칭, p.name) AS name, count(*) AS n
+            RETURN name ORDER BY n DESC LIMIT 3", ['tokens' => $tokens], $timeout);
+    } catch (\Throwable $e) {
+        error_log('GraphRAG person lookup failed: ' . $e->getMessage());
+        return [];
+    }
+    $out = [];
+    foreach ($res as $rec) {
+        $name = trim((string)$rec->get('name'));
+        if ($name !== '' && in_array($name, $tokens, true)) $out[] = $name;
+    }
+    return $out;
+}
 
-    return "{$labels['header']}\n" . implode("\n\n", $lines);
+/** Register record keys ("raw_event_info-<rowid>") of incidents, by register id. */
+function docent_register_keys(array $event_ids): array {
+    $event_ids = array_values(array_filter(array_map('strval', $event_ids), fn($x) => $x !== ''));
+    if (!$event_ids || !($pdo = get_pg())) return [];
+    try {
+        $stmt = $pdo->prepare('SELECT rowid, "아이디" FROM raw_event_info WHERE "아이디" IN (' . implode(',', array_fill(0, count($event_ids), '?')) . ')');
+        $stmt->execute($event_ids);
+        $keys = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_NUM) as [$rowid, $id]) $keys[(string)$id] = "raw_event_info-{$rowid}";
+        return $keys;
+    } catch (\Throwable $e) {
+        error_log('register key lookup failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+/** At most this many incidents of a region are listed by name (the count covers all of them). */
+const GRAPHRAG_TIMELINE_MAX = 40;
+
+/**
+ * The incidents of an administrative region the question names, in date order, with their number.
+ *
+ * A region is named when every word of its name ("전라북도 진안군") occurs in the question; the most
+ * specific such region is used. Incidents are those placed in the region or in a region under it
+ * (P7_took_place_at, P89_falls_within). This answers what record retrieval cannot: how many incidents
+ * a county had and in what order, which needs every register entry of the county, not the top-ranked few.
+ */
+function graphrag_region_timeline(object $client, string $query, float $timeout): ?array {
+    $flat = preg_replace('/\s+/u', '', $query);
+    if ($timeout < 1.0 || mb_strlen($flat) < 4) return null;
+    try {
+        $res = graphrag_run_with_timeout($client, "
+            MATCH (r:Place:행정구역)
+            WITH r, coalesce(r.한글명칭, r.name) AS rn
+            WHERE rn IS NOT NULL AND size(split(rn, ' ')) >= 2
+              AND all(t IN split(rn, ' ') WHERE \$flat CONTAINS t)
+            WITH r, rn ORDER BY size(split(rn, ' ')) DESC, size(rn) DESC LIMIT 1
+            MATCH (e:Event)-[:P7_took_place_at]->(x:Place)
+            WHERE x = r OR (x)-[:P89_falls_within*1..4]->(r)
+            WITH r, e ORDER BY e.날짜, coalesce(e.사건명, e.name)
+            WITH r, collect(DISTINCT e) AS evs
+            RETURN coalesce(r.한글명칭, r.name) AS region, size(evs) AS total,
+                   [x IN evs[0..\$max] | {id: x.id, name: coalesce(x.사건명, x.name), date: x.날짜}] AS items",
+            ['flat' => $flat, 'max' => GRAPHRAG_TIMELINE_MAX], $timeout);
+    } catch (\Throwable $e) {
+        error_log('GraphRAG region timeline failed: ' . $e->getMessage());
+        return null;
+    }
+    $rec = $res[0] ?? null;
+    if (!$rec || (int)$rec->get('total') === 0) return null;
+    $items = [];
+    $raw = $rec->get('items');
+    foreach ((array)(is_object($raw) && method_exists($raw, 'toArray') ? $raw->toArray() : $raw) as $it) {
+        $it = is_object($it) && method_exists($it, 'toArray') ? $it->toArray() : (array)$it;
+        $name = trim((string)($it['name'] ?? ''));
+        if ($name === '') continue;
+        $items[] = ['id' => (string)($it['id'] ?? ''), 'name' => $name, 'date' => trim((string)($it['date'] ?? '')), 'key' => ''];
+    }
+    $keys = docent_register_keys(array_column($items, 'id'));
+    foreach ($items as &$it) $it['key'] = $keys[$it['id']] ?? '';
+    unset($it);
+    return ['region' => trim((string)$rec->get('region')), 'total' => (int)$rec->get('total'), 'items' => $items];
 }
 
 /**
- * [Step 4 진입점] GraphRAG 하이브리드 컨텍스트 빌더
+ * What the graph knows about the question, without any LLM call:
+ *   rows      incidents the question names (persons, related incidents) and incidents of the persons
+ *             and places it names (graphrag_incident_rows, graphrag_run_multihop)
+ *   persons   person names the question uses (known names, or words that are person names in the graph)
+ *   timeline  incidents of the region the question names, when it names no incident (graphrag_region_timeline)
+ * Computed by the narrative action in parallel with the graph view and passed to explain, or by explain itself.
  *
- * 1. NER 감지 → 2. Multi-hop Neo4j 탐색 → 3. 직렬화 →
- * 4. GraphRAG 블록을 기존 Vector 컨텍스트 앞에 강제 주입해
- *    최종 하이브리드 페이로드 문자열을 반환한다.
- *
- * @param  string $query          사용자 원본 질의 (term)
- * @param  string $vector_context 기존 evidence + pg 컨텍스트 문자열
- * @param  string $lang           출력 언어 (ko|en|ja|zh)
- * @return array [
- *   'context'       => string  최종 하이브리드 컨텍스트,
- *   'graphrag_used' => bool    GraphRAG 주입 여부,
- *   'entities'      => array   감지된 개체명 목록,
- * ]
- */
-/**
- * 질문에서 인물·장소를 감지하고 탐색 틀로 날짜 순 경로 행을 모읍니다(언어 무관).
- * graph 단계에서 미리 계산해 클라이언트에 넘기고, explain 단계는 그 결과를 재사용합니다.
- *
- * @return array ['rows' => array, 'entities' => string[]]
+ * @return array ['rows' => array, 'entities' => string[], 'persons' => string[], 'timeline' => ?array]
  */
 function graphrag_collect_rows(string $query): array {
+    $empty = ['rows' => [], 'entities' => [], 'persons' => [], 'timeline' => null];
     try {
         $client = get_neo4j();
     } catch (\Throwable $dbErr) {
         error_log('GraphRAG: Neo4j connection failed — ' . $dbErr->getMessage());
-        return ['rows' => [], 'entities' => []];
+        return $empty;
     }
     $t0 = microtime(true);
+    $left = fn() => min(GRAPHRAG_QUERY_TIMEOUT_SEC, $t0 + 15.0 - microtime(true));
 
-    // 질문이 이름으로 가리키는 사건을 먼저 찾습니다 (사건명 경로).
     $incident_rows = graphrag_incident_rows($client, $query, $t0 + 15.0);
     $incident_names = array_values(array_unique(array_map(fn($r) => $r['기준인물'], $incident_rows)));
 
     $ner = graphrag_detect_entities($query);
-    if (!$ner['route_graph'] || empty($ner['entities'])) {
-        return ['rows' => $incident_rows, 'entities' => $incident_names];
-    }
+    $persons = array_values(array_unique(array_merge($ner['persons'], graphrag_persons_in_question($client, $query, $left()))));
+    $entities = array_values(array_unique(array_merge($persons, $ner['entities'])));
+    $timeline = $incident_rows ? null : graphrag_region_timeline($client, $query, $left());
 
-    // 개체별 탐색 (최대 3개 개체, 결과 25행 또는 15초에서 중단)
     $all_rows = $incident_rows;
-    foreach (array_slice($ner['entities'], 0, 3) as $entity) {
+    foreach (array_slice($entities, 0, 3) as $entity) {
+        if (microtime(true) - $t0 > 15.0) break;
         $all_rows = array_merge($all_rows, graphrag_run_multihop($client, $entity, $t0 + 15.0));
-        if (count($all_rows) >= 25 || microtime(true) - $t0 > 15.0) break;
     }
-
     $dedup = [];
     $unique_rows = [];
     foreach ($all_rows as $r) {
-        $key = sha1($r['연관인물'] . '|' . $r['사건이름'] . '|' . ($r['공통사건'] ?? ''));
+        $key = sha1($r['연관인물'] . '|' . $r['사건이름'] . '|' . ($r['공통사건'] ?? '') . '|' . ($r['기준인물'] ?? ''));
         if (!isset($dedup[$key])) {
             $dedup[$key] = true;
             $unique_rows[] = $r;
         }
     }
-    // Statements about the incidents the question names come first, then the others; each group is in
-    // date order (발생일자 오름차순, 날짜 없는 행은 뒤로). The narrative share of the context budget is
-    // cut from the end, so the incident statements are the last to be dropped.
-    $unique_rows = array_slice($unique_rows, 0, 25);
-    $named = array_values(array_filter($unique_rows, fn($r) => in_array($r['유형'] ?? '', ['incident', 'related'], true)));
-    $other = array_values(array_filter($unique_rows, fn($r) => !in_array($r['유형'] ?? '', ['incident', 'related'], true)));
-    usort($named, 'graphrag_compare_by_date');
-    usort($other, 'graphrag_compare_by_date');
-    $unique_rows = array_merge($named, $other);
-    return ['rows' => $unique_rows,
-            'entities' => array_values(array_unique(array_merge($incident_names, $ner['entities'])))];
+    return ['rows' => array_slice($unique_rows, 0, 40),
+            'entities' => array_values(array_unique(array_merge($incident_names, $entities))),
+            'persons' => $persons,
+            'timeline' => $timeline];
+}
+
+/**
+ * The graph's answer material as short lines ([그래프 사실표]): one line per incident with its date,
+ * recorded persons, related incidents and record keys; one line per person the question names with the
+ * incidents the person is recorded for (or none); the incidents of a named region in date order.
+ * A person the question names but the register does not list for a named incident is stated as such:
+ * the graph, not the model, tells that the premise is unsupported.
+ */
+function docent_graph_facts(array $collected, string $lang): string {
+    $ko = $lang === 'ko';
+    $L = $ko
+        ? ['head' => '[그래프 사실표]', 'inc' => '사건', 'persons' => '관련 인물', 'none' => '관련 인물 기록 없음', 'rel' => '관련 사건',
+           'src' => '근거', 'absent' => '질문의 인물 중 관련 인물로 기록되지 않음', 'person' => '인물', 'pevents' => '관련 인물로 기록된 사건',
+           'pnone' => '그래프에서 관련 인물로 연결된 사건을 찾지 못함', 'place' => '사건명에 이 지명이 든 사건', 'region' => '지역', 'count' => '사건 대장의 사건 %d건 (날짜순%s)',
+           'more' => ', 앞의 %d건만 표시']
+        : ['head' => '[Graph facts]', 'inc' => 'Incident', 'persons' => 'related persons', 'none' => 'no related person recorded', 'rel' => 'related incidents',
+           'src' => 'records', 'absent' => 'persons in the question not recorded as related persons', 'person' => 'Person', 'pevents' => 'recorded as a related person in',
+           'pnone' => 'no incident found in the graph with this person as a related person', 'place' => 'incidents whose name contains this place', 'region' => 'Region',
+           'count' => '%d incidents in the register (in date order%s)', 'more' => ', first %d shown'];
+    $q = fn($name) => $ko ? "「{$name}」" : "'{$name}'";
+    $rows = $collected['rows'] ?? [];
+    $persons = array_values(array_filter((array)($collected['persons'] ?? [])));
+    $lines = [];
+
+    // Incidents the question names.
+    $incidents = [];
+    foreach ($rows as $r) {
+        $kind = $r['유형'] ?? '';
+        if ($kind !== 'incident' && $kind !== 'related') continue;
+        $base = $kind === 'related' ? (string)$r['공통사건'] : (string)$r['사건이름'];
+        if ($base === '') continue;
+        $incidents[$base] ??= ['date' => '', 'persons' => [], 'related' => [], 'keys' => []];
+        $inc = &$incidents[$base];
+        if ($kind === 'incident') {
+            $inc['date'] = $inc['date'] ?: (string)$r['발생일자'];
+            if ($r['연관인물'] !== '') $inc['persons'][] = $r['연관인물'];
+            foreach (docent_record_keys($r['근거'] ?? []) as $k) if (count($inc['keys']) < 4 && !in_array($k, $inc['keys'], true)) $inc['keys'][] = $k;
+        } else {
+            $inc['related'][] = $q($r['사건이름']) . ($r['발생일자'] !== '' ? "({$r['발생일자']})" : '');
+        }
+        unset($inc);
+    }
+    foreach ($incidents as $name => $inc) {
+        $line = "{$L['inc']} " . $q($name) . ($inc['date'] !== '' ? " ({$inc['date']})" : '')
+              . ' · ' . ($inc['persons'] ? "{$L['persons']}: " . implode(', ', array_unique($inc['persons'])) : $L['none']);
+        if ($inc['related']) $line .= " · {$L['rel']}: " . implode(', ', array_unique($inc['related']));
+        if ($inc['keys']) $line .= " · {$L['src']}: " . implode(', ', $inc['keys']);
+        $recorded = implode(' ', $inc['persons']);
+        // The incident route lists at most 12 persons; a longer list may leave out a person who is recorded.
+        $absent = count($inc['persons']) < 12 ? array_filter($persons, fn($p) => mb_strpos($recorded, $p) === false) : [];
+        if ($absent) $line .= " · {$L['absent']}: " . implode(', ', $absent);
+        $lines[] = $line;
+    }
+
+    // Persons and places the question names.
+    $by_anchor = [];
+    foreach ($rows as $r) {
+        if (in_array($r['유형'] ?? '', ['incident', 'related'], true) || ($r['사건이름'] ?? '') === '') continue;
+        $by_anchor[(string)$r['기준인물']][(string)$r['사건이름']] ??= ['date' => (string)$r['발생일자'], 'persons' => [], 'keys' => []];
+        $ev = &$by_anchor[(string)$r['기준인물']][(string)$r['사건이름']];
+        if (($r['연관인물'] ?? '') !== '' && $r['연관인물'] !== '(인물 미상)' && $r['연관인물'] !== $r['기준인물']) $ev['persons'][] = $r['연관인물'];
+        foreach (docent_record_keys($r['근거'] ?? []) as $k) if (count($ev['keys']) < 2 && !in_array($k, $ev['keys'], true)) $ev['keys'][] = $k;
+        unset($ev);
+    }
+    foreach ($persons as $person) {
+        $events = $by_anchor[$person] ?? [];
+        unset($by_anchor[$person]);
+        if (!$events) { $lines[] = "{$L['person']} " . $q($person) . ": {$L['pnone']}"; continue; }
+        uasort($events, fn($a, $b) => graphrag_compare_by_date(['발생일자' => $a['date']], ['발생일자' => $b['date']]));
+        $parts = [];
+        foreach (array_slice($events, 0, 8, true) as $name => $ev) {
+            $parts[] = $q($name) . ($ev['date'] !== '' ? "({$ev['date']})" : '') . ($ev['keys'] ? ' [' . implode(', ', $ev['keys']) . ']' : '');
+        }
+        $lines[] = "{$L['person']} " . $q($person) . " {$L['pevents']}: " . implode('; ', $parts);
+    }
+    foreach ($by_anchor as $place => $events) {
+        if ($place === '') continue;
+        uasort($events, fn($a, $b) => graphrag_compare_by_date(['발생일자' => $a['date']], ['발생일자' => $b['date']]));
+        $parts = [];
+        foreach (array_slice($events, 0, 8, true) as $name => $ev) {
+            $who = array_slice(array_unique($ev['persons']), 0, 4);
+            $parts[] = $q($name) . ($ev['date'] !== '' ? "({$ev['date']})" : '') . ($who ? ' ' . implode(', ', $who) : '')
+                     . ($ev['keys'] ? ' [' . implode(', ', $ev['keys']) . ']' : '');
+        }
+        $lines[] = $q($place) . " {$L['place']}: " . implode('; ', $parts);
+    }
+
+    // The region the question names.
+    $tl = $collected['timeline'] ?? null;
+    if (is_array($tl) && !empty($tl['items'])) {
+        $shown = count($tl['items']);
+        $more = $shown < (int)$tl['total'] ? sprintf($L['more'], $shown) : '';
+        $lines[] = "{$L['region']} " . $q((string)$tl['region']) . ': ' . sprintf($L['count'], (int)$tl['total'], $more);
+        foreach ($tl['items'] as $i => $it) {
+            $lines[] = '  ' . ($i + 1) . '. ' . ($it['date'] !== '' ? "{$it['date']} " : '') . $q($it['name']) . ($it['key'] !== '' ? " [{$it['key']}]" : '');
+        }
+    }
+    return $lines ? $L['head'] . "\n" . implode("\n", $lines) : '';
+}
+
+/** Record keys the graph facts cite, in order of first mention. */
+function docent_graph_record_keys(string $graph_block): array {
+    preg_match_all('/\braw_[a-z_]+-\d+\b/', $graph_block, $m);
+    return array_values(array_unique($m[0]));
 }
 
 /**
@@ -680,30 +686,6 @@ function handle_action_narrative() {
     $collected = $term !== '' ? graphrag_collect_rows($term) : ['rows' => [], 'entities' => []];
     error_log(sprintf('[Docent][timing] narrative action %.2fs (%d rows)', microtime(true) - $t0, count($collected['rows'])));
     echo json_encode($collected, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
-}
-
-/**
- * 서사 경로 블록을 생성 컨텍스트 맨 앞에 넣습니다.
- * $precomputed가 있으면(graph 단계 결과) 그래프를 다시 조회하지 않습니다.
- */
-function graphrag_build_hybrid_context(string $query, string $vector_context, string $lang, ?array $precomputed = null): array {
-    $collected = $precomputed ?? graphrag_collect_rows($query);
-    $rows = $collected['rows'] ?? [];
-    $entities = $collected['entities'] ?? [];
-    if (empty($rows) || empty($entities)) {
-        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $entities];
-    }
-    $graphrag_block = graphrag_serialize_results($rows, (string)$entities[0], $lang);
-    if ($graphrag_block === '') {
-        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $entities];
-    }
-    $sep = ($vector_context !== '') ? "\n\n" : '';
-    return [
-        'context'       => $graphrag_block . $sep . $vector_context,
-        'graphrag_used' => true,
-        'entities'      => $entities,
-        'rows'          => $rows,
-    ];
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1462,126 +1444,93 @@ function handle_action_pg_prefetch() {
 }
 
 /**
- * [Action 4] AI RAG 도슨트 해설 생성 (2단계 파이프라인)
+ * [Action 4] 답변 생성 (SSE 스트림 / 동기 JSON)
+ *
+ * 질문 하나로 답한다. 근거는 두 가지다:
+ *   1. 그래프 사실표 (docent_graph_facts): 질문이 가리키는 사건·인물·지역을 그래프에서 바로 정리한 짧은 줄.
+ *      narrative 액션이 그래프 화면과 동시에 미리 계산해 넘기면 그것을 쓰고, 없으면 여기서 계산한다.
+ *   2. 기록: 그래프 사실표가 인용한 기록 중 검색에 없는 것 몇 건 → 하이브리드 검색기가 질문으로 찾은 기록.
+ * 생성은 LLM 호출 한 번으로, 답 안에서 "근거 사실 목록 → 해설" 순서로 쓴다.
+ * analyze, graph(Text-to-Cypher), pg_prefetch 단계의 결과는 쓰지 않는다: 그 단계들은 화면의 그래프 탐색용이다.
+ *
+ * 평가 모드(DOCENT_EVAL_MODE=1인 서버에서 eval=1로 요청)에서는 생성 조건을 평가 하네스와 맞추고, 문맥과 호출 수를
+ * 함께 돌려준다. 비교 조건: no_graph=1(그래프 사실표와 그 기록 없이 검색 기록만), no_facts=1(사실 목록 없이 해설만),
+ * two_call=1(사실표를 별도 호출로 만든 뒤 해설: 예전 설계).
  */
 function handle_action_explain() {
     $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
-    $focus = docent_sanitize_text($_POST['focus'] ?? '', 100, false);
     $req_lang = strtolower(trim((string)($_POST['lang'] ?? '')));
-    $supported_langs = ['en', 'ko', 'ja', 'zh'];
-    $explain_lang = in_array($req_lang, $supported_langs, true) ? $req_lang : 'ko';
-    $evidences = json_decode($_POST['evidences'] ?? '[]', true);
-    $pg_texts = json_decode($_POST['pg_texts'] ?? '[]', true);
-    if (!is_array($evidences)) $evidences = [];
-    if (!is_array($pg_texts)) $pg_texts = [];
+    $lang = in_array($req_lang, ['en', 'ko', 'ja', 'zh'], true) ? $req_lang : 'ko';
 
-    // 평가 모드(DOCENT_EVAL_MODE=1인 서버에서 eval=1로 요청): 동기 JSON 응답에 생성기가 받은 문맥과
-    // 팩트 표를 함께 돌려주고, 생성 조건(temperature, top_p, 최대 출력 토큰)을 평가 하네스와 맞춥니다.
-    // 검색·문맥 구성·두 단계 생성은 배포 경로와 동일합니다.
     $eval_mode = get_cfg('DOCENT_EVAL_MODE', '0') === '1' && (string)($_POST['eval'] ?? '') === '1';
     $gen_temperature = null; $gen_top_p = null; $gen_max_tokens = 8192;
+    $no_graph = $no_facts = $two_call = false;
     if ($eval_mode) {
         if (isset($_POST['temperature']) && is_numeric($_POST['temperature'])) $gen_temperature = max(0.0, min(1.0, (float)$_POST['temperature']));
         if (isset($_POST['top_p']) && is_numeric($_POST['top_p'])) $gen_top_p = max(0.0, min(1.0, (float)$_POST['top_p']));
         if (isset($_POST['max_tokens']) && is_numeric($_POST['max_tokens'])) $gen_max_tokens = max(256, min(8192, (int)$_POST['max_tokens']));
+        $no_graph = (string)($_POST['no_graph'] ?? '') === '1';
+        $no_facts = (string)($_POST['no_facts'] ?? '') === '1';
+        $two_call = (string)($_POST['two_call'] ?? '') === '1';
     }
 
     $is_stream = !$eval_mode && (isset($_GET['stream']) || isset($_POST['stream']));
     if ($is_stream) {
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            session_write_close();
-        }
-
+        if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
         header('Content-Type: text/event-stream; charset=utf-8');
         header('Cache-Control: no-cache, no-transform');
         header('X-Accel-Buffering: no');
         header('Connection: keep-alive');
         while (ob_get_level()) ob_end_clean();
-
         echo ": keepalive\n\n";
         flush();
     }
+    $t_start = microtime(true);
 
-    // ── 1. 서사 경로 (graph 단계와 동시에 계산된 결과를 재사용, 없으면 여기서 계산) ──
-    // 평가 모드의 no_narrative=1은 서사 경로를 빼는 비교 조건입니다.
-    $t_stage = microtime(true);
-    $precomputed = null;
-    if ($eval_mode && (string)($_POST['no_narrative'] ?? '') === '1') {
-        $precomputed = ['rows' => [], 'entities' => []];
-    } else {
-        $narrative_in = json_decode($_POST['narrative'] ?? '', true);
-        if (is_array($narrative_in) && isset($narrative_in['rows'], $narrative_in['entities'])
-            && is_array($narrative_in['rows']) && is_array($narrative_in['entities'])) {
-            $clean_rows = [];
-            foreach (array_slice($narrative_in['rows'], 0, 25) as $row) {
-                if (!is_array($row)) continue;
-                $clean = [];
-                foreach (['연관인물', '사건이름', '발생일자', '공통사건', '기준인물'] as $k) {
-                    $clean[$k] = docent_sanitize_text((string)($row[$k] ?? ''), 200, false);
-                }
-                $clean['유형'] = in_array($row['유형'] ?? '', ['incident', 'related'], true) ? $row['유형'] : '';
-                $clean['근거'] = docent_record_keys($row['근거'] ?? []);
-                $clean_rows[] = $clean;
-            }
-            $clean_entities = array_values(array_filter(array_map(
-                fn($e) => docent_sanitize_text((string)$e, 60, false), array_slice($narrative_in['entities'], 0, 5))));
-            $precomputed = ['rows' => $clean_rows, 'entities' => $clean_entities];
-        }
+    // ── 1. 그래프 사실표 ──
+    $graph_block = '';
+    $collected = ['rows' => [], 'entities' => [], 'persons' => [], 'timeline' => null];
+    if (!$no_graph) {
+        $pre = json_decode($_POST['narrative'] ?? '', true);
+        $collected = is_array($pre) && isset($pre['rows']) && is_array($pre['rows']) ? docent_clean_collected($pre) : graphrag_collect_rows($term);
+        $graph_block = docent_graph_facts($collected, $lang);
     }
-    $graphrag_result = graphrag_build_hybrid_context($term, '', $explain_lang, $precomputed);
-    error_log(sprintf('[Docent][timing] narrative paths %.2fs', microtime(true) - $t_stage));
-    $graphrag_used = $graphrag_result['graphrag_used'];
 
-    // 원천 기록의 순서: 서사 경로를 입증하는 기록 몇 건(P1) → 질문으로 찾은 기록(하이브리드 검색기,
-    // includes/retriever.php) → 나머지 경로 입증 기록 → 이름 일치로 가져온 기록.
-    // 경로 입증 기록을 모두 앞에 두면 사건이 많은 질문에서 그것만으로 기록 자리가 차서, 질문에 답하는
-    // 기록이 들어가지 못한다. 평가 모드에서는 검색기가 없으면 실패한다: 다른 조건으로 조용히 평가되지 않도록.
+    // ── 2. 기록: 그래프 사실표가 인용한 기록 몇 건(검색에 없는 것) → 검색된 기록 ──
+    // 평가 모드에서는 검색기가 없으면 실패한다: 다른 조건으로 조용히 평가되지 않도록.
     $retrieved = docent_retrieve_records($term, $eval_mode);
+    $have = [];
+    foreach ($retrieved as $line) {
+        if (preg_match('/^\[[^\].]*\.(raw_[a-z_]+)\]\s+node=\S*\s+rowid=(\d+)/u', $line, $hm)) $have["{$hm[1]}-{$hm[2]}"] = true;
+    }
     $path_refs = [];
-    foreach (($graphrag_result['rows'] ?? []) as $row) {
-        foreach (docent_record_keys($row['근거'] ?? []) as $key) {
-            if (preg_match('/^(raw_[a-z_]+)-(\d+)$/', $key, $km)) {
-                $path_refs[$key] = ['table' => $km[1], 'rowid' => (int)$km[2], 'node_id' => (string)($row['사건이름'] ?? '')];
-            }
-        }
+    foreach (docent_graph_record_keys($graph_block) as $key) {
+        if (isset($have[$key]) || !preg_match('/^(raw_[a-z_]+)-(\d+)$/', $key, $km)) continue;
+        $path_refs[] = ['table' => $km[1], 'rowid' => (int)$km[2], 'node_id' => 'graph'];
+        if (count($path_refs) >= max(0, (int)get_cfg('DOCENT_PATH_RECORDS', '3'))) break;
     }
-    $path_texts = [];
-    if ($path_refs && ($pdo_paths = get_pg())) {
-        $have = [];
-        foreach (array_merge($retrieved, $pg_texts) as $line) {
-            if (preg_match('/^\[[^\].]*\.([A-Za-z0-9_]+)\]\s+node=\S*\s+rowid=(\S+)/u', (string)$line, $hm)) $have["{$hm[1]}-{$hm[2]}"] = true;
-        }
-        $missing = array_values(array_diff_key($path_refs, $have));
-        $path_texts = array_map('docent_pg_row_text',
-            $missing ? fetch_pg_rows_for_refs($pdo_paths, $missing, get_pg_tables_metadata($pdo_paths)) : []);
-    }
-    $path_first = max(0, (int)get_cfg('DOCENT_PATH_RECORDS', '5'));
-    $pg_texts = array_merge(array_slice($path_texts, 0, $path_first), $retrieved, array_slice($path_texts, $path_first), $pg_texts);
-
-    // ── 2. 하나의 문맥 예산(기본 11,000자)을 서사 경로 → 그래프 사료 → 원천 기록 순으로 놓음 (docent_assemble_context) ──
-    $assembled = docent_assemble_context(
-        (string)$graphrag_result['context'], $evidences, $pg_texts, $explain_lang, $term, $focus,
-        (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'),
-        (int)get_cfg('DOCENT_NARRATIVE_CHARS', '3500'),
-        (int)get_cfg('DOCENT_EVIDENCE_CHARS', '2500'));
+    $path_texts = ($path_refs && ($pdo = get_pg()))
+        ? array_map('docent_pg_row_text', fetch_pg_rows_for_refs($pdo, $path_refs, get_pg_tables_metadata($pdo))) : [];
+    $assembled = docent_assemble_context($graph_block, array_merge($path_texts, $retrieved),
+        (int)get_cfg('DOCENT_CONTEXT_CHARS', '11000'), (int)get_cfg('DOCENT_GRAPH_CHARS', '2500'));
     $context_str = $assembled['context'];
+    error_log(sprintf('[Docent][timing] evidence %.2fs (graph %d chars, %d records)', microtime(true) - $t_start,
+        $assembled['graph_chars'], substr_count($context_str, '<SOURCE_EVIDENCE')));
 
-    if ($is_stream && $graphrag_used) {
-        // 클라이언트에 GraphRAG 주입 여부 알림 (SSE 메타 코멘트)
-        echo ": graphrag-injected entities=" . implode(',', $graphrag_result['entities']) . "\n\n";
+    if ($is_stream && $assembled['graph_chars'] > 0) {
+        echo ": graphrag-injected entities=" . implode(',', array_slice($collected['entities'] ?? [], 0, 5)) . "\n\n";
         flush();
     }
 
-    // ── [환각 방지 게이트] GDB·RDB 사료가 전혀 없으면 도슨트 생성 차단 ──
+    // ── [환각 방지 게이트] 근거가 전혀 없으면 생성하지 않음 ──
     if ($context_str === '') {
         $no_info_msgs = [
-            'ko' => "죄송합니다. 지식그래프(Graph DB) 및 원천 사료(RDB) 어디에서도 '"  . $term . "'에 관한 정보를 찾을 수 없었습니다.\n\n검색어를 달리하거나, 3·1운동과 관련된 인물·사건·지역명으로 다시 질의해 주시기 바랍니다.",
-            'en' => "No information about '" . $term . "' was found in either the Knowledge Graph (Graph DB) or the primary source database (RDB).\n\nPlease try a different search term, or query using a person, event, or location name related to the March 1st Movement.",
-            'ja' => "知識グラフ(Graph DB)および一次史料データベース(RDB)のいずれにも、'" . $term . "'に関する情報が見つかりませんでした。\n\n別の検索語でお試しになるか、3・1運動に関連する人物・事件・地名で再度ご質問ください。",
-            'zh' => "在知识图谱(Graph DB)与原始史料数据库(RDB)中均未找到关于'" . $term . "'的相关信息。\n\n请换用其他检索词，或以三一运动相关的人物、事件、地名重新提问。",
+            'ko' => "죄송합니다. 지식그래프와 원천 기록 어디에서도 '" . $term . "'에 관한 정보를 찾을 수 없었습니다.\n\n검색어를 달리하거나, 3·1운동과 관련된 인물·사건·지역명으로 다시 질의해 주시기 바랍니다.",
+            'en' => "No information about '" . $term . "' was found in the knowledge graph or the source records.\n\nPlease try a different search term, or ask about a person, incident, or place related to the March 1st Movement.",
+            'ja' => "知識グラフと一次史料のいずれにも、'" . $term . "'に関する情報が見つかりませんでした。\n\n別の検索語でお試しになるか、3・1運動に関連する人物・事件・地名で再度ご質問ください。",
+            'zh' => "在知识图谱与原始史料中均未找到关于'" . $term . "'的相关信息。\n\n请换用其他检索词，或以三一运动相关的人物、事件、地名重新提问。",
         ];
-        $no_info_text = $no_info_msgs[$explain_lang] ?? $no_info_msgs['ko'];
-
+        $no_info_text = $no_info_msgs[$lang] ?? $no_info_msgs['ko'];
         if ($is_stream) {
             echo "data: " . json_encode(["chunk" => $no_info_text], JSON_UNESCAPED_UNICODE) . "\n\n";
             echo "data: [DONE]\n\n";
@@ -1589,77 +1538,84 @@ function handle_action_explain() {
             flush();
             return;
         }
-        echo json_encode(["text" => $no_info_text] + ($eval_mode ? ["context" => "", "fact_table" => "", "graphrag_used" => false, "prompt_chars" => 0] : []),
-            JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        echo json_encode(["text" => $no_info_text] + ($eval_mode ? ["context" => "", "context_items" => [], "fact_table" => "", "graphrag_used" => false,
+            "graph_chars" => 0, "prompt_chars" => 0, "llm_calls" => 0] : []), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
         return;
     }
 
-    // 2. [1단계 파이프라인] 사료 비판 기반 정밀 팩트 추출
+    // ── 3. 생성 ──
+    $prompt_chars = 0;
+    $llm_calls = 0;
     $fact_table = '';
-    if ($is_stream) {
-        echo ": stage1-fact-table\n\n";
-        flush();
+    if ($two_call) {
+        $fp = get_fact_extraction_prompts($lang, $context_str);
+        $fact_table = call_llm([["role" => "system", "content" => $fp['system']], ["role" => "user", "content" => $fp['user']]],
+            false, 1500, $gen_temperature ?? 0.0, $gen_top_p ?? 0.8, 120);
+        if (trim((string)$fact_table) === '') throw new RuntimeException('Fact extraction returned nothing.');
+        $prompt_chars += mb_strlen($fp['system'] . $fp['user']);
+        $llm_calls++;
     }
-    $fact_prompts = get_fact_extraction_prompts($explain_lang, $context_str);
-    $t_stage = microtime(true);
-    try {
-        $fact_table = call_llm([
-            ["role" => "system", "content" => $fact_prompts['system']],
-            ["role" => "user", "content" => $fact_prompts['user']]
-        ], false, 1500, $gen_temperature ?? 0.0, $gen_top_p ?? 0.8, 50);
-        error_log(sprintf('[Docent][timing] stage 1 fact table %.2fs', microtime(true) - $t_stage));
-    } catch (\Throwable $extErr) {
-        error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
-        // Evaluation counts this as a failed run; the public docent continues without the fact table.
-        if ($eval_mode) throw new RuntimeException('Fact extraction failed.', 0, $extErr);
-        $fact_table = '';
-    }
-
-    // 3. [2단계 파이프라인] 학술 도슨트 해설 원고 작성
-    $explain_prompts = get_explain_prompts($explain_lang, $term, $context_str, $fact_table);
-    $sys_prompt = $explain_prompts['system'];
-    $user_prompt = $explain_prompts['user'];
-    if ($eval_mode) {
-        // 평가 구성: 주장마다 근거를 표시하게 하여 인용 검증(verify_citations.py)을 적용할 수 있게 합니다.
-        $sys_prompt .= "\n\n" . get_citation_rule($explain_lang);
-    }
+    $prompts = get_answer_prompts($lang, $term, $context_str, !$no_facts && !$two_call, (string)$fact_table);
+    $sys_prompt = $prompts['system'] . "\n\n" . get_citation_rule($lang === 'ko' ? 'ko' : 'en');
+    $messages = [["role" => "system", "content" => $sys_prompt], ["role" => "user", "content" => $prompts['user']]];
+    $prompt_chars += mb_strlen($sys_prompt . $prompts['user']);
+    $llm_calls++;
 
     if ($is_stream) {
-        stream_llm([
-            ["role" => "system", "content" => $sys_prompt],
-            ["role" => "user", "content" => $user_prompt]
-        ], function($chunk) {
+        stream_llm($messages, function($chunk) {
             echo "data: " . json_encode(["chunk" => $chunk], JSON_UNESCAPED_UNICODE) . "\n\n";
             if (ob_get_level()) ob_flush();
             flush();
         }, 8192, 0.1, 0.85);
-
         echo "data: [DONE]\n\n";
         if (ob_get_level()) ob_flush();
         flush();
         return;
     }
 
-    // Fallback: 동기식 JSON 응답
-    $t_stage = microtime(true);
-    $res = call_llm([
-        ["role" => "system", "content" => $sys_prompt],
-        ["role" => "user", "content" => $user_prompt]
-    ], false, $gen_max_tokens, $gen_temperature ?? 0.1, $gen_top_p ?? 0.85, $eval_mode ? 120 : 60);
-
+    $t_gen = microtime(true);
+    $res = call_llm($messages, false, $gen_max_tokens, $gen_temperature ?? 0.1, $gen_top_p ?? 0.85, $eval_mode ? 180 : 60);
     $out = ["text" => $res];
     if ($eval_mode) {
         $out += [
             "context" => $context_str,
             "context_items" => docent_context_items($context_str),
-            "fact_table" => $fact_table,
-            "graphrag_used" => $graphrag_used,
-            "narrative_chars" => $assembled['narrative_chars'],
-            "prompt_chars" => mb_strlen($fact_prompts['system'] . $fact_prompts['user'] . $sys_prompt . $user_prompt),
-            "generation_seconds" => round(microtime(true) - $t_stage, 3),
+            "fact_table" => (string)$fact_table,
+            "graphrag_used" => $assembled['graph_chars'] > 0,
+            "graph_chars" => $assembled['graph_chars'],
+            "prompt_chars" => $prompt_chars,
+            "llm_calls" => $llm_calls,
+            "generation_seconds" => round(microtime(true) - $t_gen, 3),
         ];
     }
     echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+}
+
+/** Graph material sent by the client (the narrative action's output), cleaned. */
+function docent_clean_collected(array $in): array {
+    $rows = [];
+    foreach (array_slice((array)$in['rows'], 0, 40) as $row) {
+        if (!is_array($row)) continue;
+        $clean = [];
+        foreach (['연관인물', '사건이름', '발생일자', '공통사건', '기준인물'] as $k) $clean[$k] = docent_sanitize_text((string)($row[$k] ?? ''), 200, false);
+        $clean['유형'] = in_array($row['유형'] ?? '', ['incident', 'related'], true) ? $row['유형'] : '';
+        $clean['근거'] = docent_record_keys($row['근거'] ?? []);
+        $rows[] = $clean;
+    }
+    $names = fn($list, $n) => array_values(array_filter(array_map(fn($e) => docent_sanitize_text((string)$e, 60, false), array_slice((array)$list, 0, $n))));
+    $timeline = null;
+    if (is_array($in['timeline'] ?? null) && is_array($in['timeline']['items'] ?? null)) {
+        $items = [];
+        foreach (array_slice($in['timeline']['items'], 0, GRAPHRAG_TIMELINE_MAX) as $it) {
+            if (!is_array($it)) continue;
+            $key = docent_record_keys([(string)($it['key'] ?? '')]);
+            $items[] = ['id' => docent_sanitize_text((string)($it['id'] ?? ''), 60, false), 'name' => docent_sanitize_text((string)($it['name'] ?? ''), 200, false),
+                        'date' => docent_sanitize_text((string)($it['date'] ?? ''), 20, false), 'key' => $key[0] ?? ''];
+        }
+        $timeline = ['region' => docent_sanitize_text((string)($in['timeline']['region'] ?? ''), 80, false),
+                     'total' => max(0, (int)($in['timeline']['total'] ?? 0)), 'items' => $items];
+    }
+    return ['rows' => $rows, 'entities' => $names($in['entities'] ?? [], 8), 'persons' => $names($in['persons'] ?? [], 5), 'timeline' => $timeline];
 }
 
 /**

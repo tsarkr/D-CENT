@@ -178,18 +178,26 @@ class McpSafety(unittest.TestCase):
 
 
 class DcentSafety(unittest.TestCase):
-    def test_narrative_timeout_does_not_wait_on_executor_exit(self):
-        pool = MagicMock()
-        pool.submit.return_value.result.side_effect = TimeoutError()
+    def test_dcent_sends_the_question_alone_with_the_ablation_flag(self):
         client = MagicMock(url='http://offline.invalid/docent.php')
-        client.call.side_effect = [{}, {"nodes": []},
-                                  {"context": "path", "context_items": ["path"], "text": "answer", "fact_table": "facts"}]
-        with patch.object(systems, '_DCENT', client), \
-             patch.object(systems, 'client_keywords', return_value=[]), \
-             patch('concurrent.futures.ThreadPoolExecutor', return_value=pool):
-            result = systems.run_dcent_e2e({'query': 'question'})
-        pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-        self.assertEqual(result['contexts'], ['path'])
+        client.call.return_value = {"context": "[그래프 사실표]", "context_items": ["[그래프 사실표]"], "text": "answer",
+                                    "prompt_chars": 3000, "llm_calls": 2, "graph_chars": 15, "fact_table": "facts",
+                                    "graphrag_used": True, "generation_seconds": 1.0}
+        with patch.object(systems, '_DCENT', client):
+            result = systems.SYSTEMS["two-call"][1]({'query': 'question'})
+        action, data = client.call.call_args[0]
+        self.assertEqual(action, 'explain')
+        self.assertEqual((data['term'], data['two_call'], data['eval']), ('question', '1', '1'))
+        self.assertNotIn('evidences', data)
+        self.assertEqual((result['contexts'], result['llm_calls'], result['prompt_tokens'], result['fact_table']),
+                         (['[그래프 사실표]'], 2, 1000, 'facts'))
+        with patch.object(systems, '_DCENT', client):
+            one_call = systems.SYSTEMS["dcent"][1]({'query': 'question'})
+        self.assertNotIn('fact_table', one_call)   # an empty fact table would mark the answer as failed
+
+    def test_ablations_are_served_by_the_same_endpoint(self):
+        self.assertEqual(systems.SERVER_SYSTEMS, {"dcent", *systems.ABLATIONS})
+        self.assertEqual(set(systems.SYSTEMS), {*systems.MAIN_SYSTEMS, *systems.ABLATIONS})
 
     def test_rate_limit_cannot_extend_request_budget(self):
         client = systems.DcentClient('http://offline.invalid')
@@ -332,6 +340,25 @@ class CheckpointSafety(unittest.TestCase):
             root = Path(directory)
             write_json(root / 'data/output/build_manifest.json', {'complete': False})
             with self.assertRaises(SystemExit): run._fingerprint(root / 'unused', ['passage'])
+
+
+class AggregationSafety(unittest.TestCase):
+    def test_each_incident_is_scored_on_its_own_words(self):
+        from evaluation import benchmark
+        places = ["도통리", "좌포리", "진안읍", "평지리", "부귀면", "동향면"]
+        events = [{"title": f"4월 {i + 1}일 전북 진안군 {pl} 시위", "start_date": f"1919-04-{i + 1:02d}",
+                   "place": "전라북도 진안군 성수면", "persons": []} for i, pl in enumerate(places)]
+        events.append({"title": "4월 9일 전북 진안군 도통리 시위", "start_date": "1919-04-09", "place": "전라북도 장수군", "persons": []})
+        events += [{"title": f"{k}월 1일 {k}리 시위", "start_date": f"1919-0{k}-01", "place": "미국 캘리포니아", "persons": []} for k in range(3, 9)]
+        with patch.object(benchmark, 'load_events_from_pg', return_value=events):
+            items = benchmark.aggregation_questions(5, 42, set(), "Q")
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["gold_facts"][:2], ["기록된 사건 수: 6건", "1919-04-01 도통리"])
+        one = "4월 1일 도통리에서 시위가 일어났다."
+        self.assertEqual(metrics.evaluate_faithfulness(one, item["gold_facts"], item["query"])[1], 1)
+        with patch.object(benchmark, 'load_events_from_pg', return_value=events):
+            self.assertEqual(benchmark.aggregation_questions(5, 42, {"전라북도 진안군"}, "Q"), [])
 
 
 if __name__ == '__main__':

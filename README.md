@@ -9,7 +9,7 @@ to the records. 한국어: [README_ko.md](./README_ko.md).
 | Path | Function | Run |
 |---|---|---|
 | [pipeline/](./pipeline/) | Data build: source files → PostgreSQL/TEI → Neo4j graph | `python -m pipeline` |
-| [docent.php](./docent.php), [includes/](./includes/), [static/](./static/) | Web docent (query analysis, Cypher generation, narrative paths, two-stage generation) | PHP server |
+| [docent.php](./docent.php), [includes/](./includes/), [static/](./static/) | Web docent (graph view, graph facts, record retrieval, one-call generation) | PHP server |
 | [evaluation/](./evaluation/) | Evaluation: benchmark, system comparison, expert judgment, report | `python -m evaluation` |
 | [mcp_server.py](./mcp_server.py) | Read-only database tools for MCP clients | `python mcp_server.py` |
 | [Latex/](./Latex/) | Manuscript | |
@@ -84,28 +84,23 @@ evaluation/
       BROWSER --> ROUTER["docent.php<br/>POST, Origin, CSRF, rate limit"]
       ROUTER --> ACTION["includes/actions.php<br/>action dispatch"]
 
-      ACTION --> ANALYZE["Analyze question<br/>language, focus, keywords"]
-      ACTION --> NARRATIVE["Build narrative paths<br/>dated incidents and links"]
-      ANALYZE --> GQUERY["Graph query<br/>Text-to-Cypher and cross-check"]
-      NARRATIVE --> GQUERY
-      GQUERY --> CONTEXT["Assemble context<br/>paths -> graph evidence -> records"]
-      GQUERY --> FETCH["Fetch records<br/>record_refs and name search"]
+      ACTION --> ANALYZE["Graph view<br/>analyze, Text-to-Cypher, records"]
+      ACTION --> NARRATIVE["Graph facts<br/>incidents, persons, region timeline"]
+      NARRATIVE --> CONTEXT["Assemble evidence<br/>graph facts -> records"]
       ACTION --> RETRIEVE["Record retriever<br/>BM25 + dense + rerank"]
       RETRIEVE --> CONTEXT
-      FETCH --> CONTEXT
-      CONTEXT --> FACT["LLM stage 1<br/>fact table"]
-      FACT --> EXPLAIN["LLM stage 2<br/>evidence-based explanation"]
+      CONTEXT --> EXPLAIN["LLM, one call<br/>facts from the records -> narrative"]
       EXPLAIN --> RESPONSE["Graph, citations, and answer"]
+      ANALYZE --> RESPONSE
       RESPONSE --> BROWSER
     end
 
-    GQUERY --> NEO
-    GQUERY --> NAMESDB
-    FETCH --> PG
+    ANALYZE --> NEO
+    ANALYZE --> NAMESDB
+    ANALYZE --> PG
     RETRIEVE --> OLLAMA[("Ollama<br/>nomic-embed-text")]
     NARRATIVE --> NEO
     ANALYZE --> GEMINI[("LLM API<br/>Gemini / DeepSeek / Ollama")]
-    FACT --> GEMINI
     EXPLAIN --> GEMINI
 
     %% Evaluation
@@ -118,7 +113,7 @@ evaluation/
       SYSTEMS --> HYBRID["hybrid<br/>BM25, dense, RRF"]
       SYSTEMS --> GRAPH_SYS["graph<br/>Neo4j retrieval"]
       SYSTEMS --> DCENT["dcent<br/>web docent over HTTP"]
-      SYSTEMS --> ABLATIONS["controlled, no-paths,<br/>one-stage, hybrid-two-stage"]
+      SYSTEMS --> ABLATIONS["no-graph, no-facts,<br/>two-call"]
 
       PASSAGE --> ANSWERS["answers.json"]
       HYBRID --> ANSWERS
@@ -195,8 +190,8 @@ EVAL_DELAY = "15"                                 # seconds between calls
 ```
 
 Optional web-server settings: `DOCENT_CONTEXT_CHARS` (generation context budget, default 11000),
-`DOCENT_NARRATIVE_CHARS` (narrative paths, 3500), `DOCENT_EVIDENCE_CHARS` (graph evidence reserved, 2500),
-`DOCENT_PATH_RECORDS` (path-attesting records placed before the retrieved ones, 5), `DOCENT_RETRIEVER_TOP_K` (20),
+`DOCENT_GRAPH_CHARS` (graph facts, at most 2500), `DOCENT_PATH_RECORDS` (records cited by the graph facts and
+missing from the retrieved ones, placed first, 3), `DOCENT_RETRIEVER_TOP_K` (23, as the hybrid baseline),
 `DOCENT_EVAL_MODE=1` (allow evaluation mode), `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`; with Ollama, `OLLAMA_NUM_CTX`
 (context window, 16384) and `OLLAMA_SEED` (42). Data files read at runtime: `includes/citation_rules.json`
 (citation rule, shared with the evaluation) and `includes/historical_synonyms.json` (place-name variants).
@@ -205,7 +200,7 @@ Optional web-server settings: `DOCENT_CONTEXT_CHARS` (generation context budget,
 
 Ollama cuts every prompt to its context window without warning, keeping the end and dropping the start. Its
 default window (2,048 or 4,096 tokens, depending on the version) is smaller than the generation prompt of
-D-CENT (about 8,800 tokens for 11,000 characters of evidence), so the system rules and the narrative paths at the
+D-CENT (about 4,500 tokens for 11,000 characters of evidence), so the system rules and the graph facts at the
 start of the prompt would be lost. Two settings guard against this:
 
 | Setting | Where | Value | Effect |
@@ -269,11 +264,11 @@ Open <http://127.0.0.1:8000/docent.php>. One question is answered through these 
 
 | Action | Function |
 |---|---|
-| `narrative` | dated narrative paths from the persons and places in the question (in parallel with graph) |
-| `analyze` | language, focus, and keywords of the question |
-| `graph` | Text-to-Cypher (read-only guard) with a full-text cross-check; record identifiers of document nodes |
-| `pg_prefetch` | record text by identifier, remaining slots by name |
-| `explain` | record text (up to 5 path-attesting records, the retriever's chunks for the question, then name matches); context budget (paths → graph evidence → record text) → fact table → answer |
+| `narrative` | graph facts, no LLM call: the incidents the question names (date, related persons, related incidents, records), the persons it names (their incidents, or none), and, when it names no incident, every incident of the county it names in date order with their number (in parallel with graph) |
+| `analyze` | language, focus, and keywords of the question (graph view only) |
+| `graph` | Text-to-Cypher (read-only guard) with a full-text cross-check, for the graph view |
+| `pg_prefetch` | record text of the graph view's nodes |
+| `explain` | the answer, from the question alone: graph facts (from `narrative`, or computed here) → records they cite that retrieval missed (up to 3) → the retriever's records, in one 11,000-character budget; one LLM call that lists the facts with their records and then writes the narrative |
 | `node_detail` | records behind a graph node |
 
 Generated Cypher and step timings are written to the PHP error log with the prefix `[Docent]`. Incident dates
@@ -283,7 +278,9 @@ are properties of Event nodes; validity periods of relations are not modeled.
 
 ```bash
 .venv3.14/bin/python -m evaluation dataset              # validate questions → dataset/benchmark.json
-.venv3.14/bin/python -m evaluation run --quick          # three questions, as a check
+.venv3.14/bin/python -m evaluation dataset --aggregation 12            # add regional-aggregation questions (development set)
+.venv3.14/bin/python -m evaluation dataset --aggregation 12 --holdout  # the same for the held-out set (other counties)
+.venv3.14/bin/python -m evaluation run --quick          # first question of each category, as a check
 .venv3.14/bin/python -m evaluation run                  # full run → results/<date_time>/report.md
 .venv3.14/bin/python -m evaluation run --resume         # continue an interrupted run
 .venv3.14/bin/python -m evaluation report               # report of the latest run
@@ -301,14 +298,14 @@ and two retries of a failed generation.
 | `passage` | Passage baseline: bibliographic records containing an entity string |
 | `hybrid` | Hybrid baseline: BM25 + dense → RRF → cross-encoder rerank |
 | `graph` | Graph-only baseline: triples found by entity name |
-| `dcent` | D-CENT end to end: the deployed system over HTTP |
-| `controlled` | D-CENT with controlled evidence: name-matched triples and records, two-stage generation |
-| `no-paths` | Ablation A: end to end without narrative paths |
-| `one-stage` | Ablation B: controlled evidence answered in one call |
-| `hybrid-two-stage` | Ablation C: hybrid evidence with the two-stage generation |
+| `dcent` | D-CENT: the deployed system over HTTP (graph facts + retrieved records, one generation call) |
+| `no-graph` | Ablation: without the graph facts (the hybrid baseline's records, D-CENT's generation) |
+| `no-facts` | Ablation: without the fact list in the answer (narrative only) |
+| `two-call` | Ablation: the fact table in a separate call before the answer (the earlier design) |
 
-Choose `main` (the first four), `ablations` (the last four), `all` (default), or a comma-separated list.
-`dcent` and `no-paths` call a running web docent: start the server in evaluation mode and set `DOCENT_URL`.
+Choose `main` (the first four), `ablations` (the last three), `all` (default), or a comma-separated list.
+`dcent` and its ablations call a running web docent: start the server in evaluation mode and set `DOCENT_URL`.
+Cost columns count every LLM call of an answer, including the entity extraction of `passage` and `graph`.
 
 ```bash
 OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 ollama serve   # terminal 1 (embeddings; generator if LLM_PROVIDER=ollama)
@@ -321,8 +318,8 @@ served by `python -m pipeline retriever`; set `DOCENT_RETRIEVER_URL` for the PHP
 evaluation, so the baseline asks the same service). The site runs without it, on name matching only;
 an evaluation does not start without it.
 
-In evaluation mode, `explain` returns the context and fact table it generated from, applies the shared
-generation conditions, and asks for record citations; retrieval and context assembly are those of the
+In evaluation mode, `explain` returns the context it generated from, the number of LLM calls and the prompt
+size, and applies the shared generation conditions; retrieval and context assembly are those of the
 deployed system. `explain` allows five requests per minute: with an API generator keep `EVAL_DELAY` at 15 seconds
 or more; with a local Ollama generator a question takes long enough that `EVAL_DELAY=0` stays under the limit.
 
@@ -345,8 +342,8 @@ evidence), `scores.csv` (scores per question and system), `report.md`, `table_ma
 `error_analysis.xlsx` (20 D-CENT answers to code for the four failure modes; rerun `report` to tally them).
 
 The report contains per-system measures (mean and 95% bootstrap CI), the planned comparisons (RQ1: D-CENT
-against the baselines; RQ2: contributions of the narrative paths, query generation, two-stage generation,
-and evidence; paired permutation tests, Holm correction per measure), results by category and by question
+against the baselines; RQ2: contributions of the graph facts, the fact list, one call against two, and
+D-CENT's generation on the hybrid baseline's records; paired permutation tests, Holm correction per measure), results by category and by question
 source, citation verification, context precision, expert judgments, graph size, and items to check by hand
 (failed generations, sentences flagged as trap endorsements). Combined runs are averaged per question before
 testing, and run-to-run variation is shown.
@@ -360,6 +357,11 @@ dates, places, links between related incidents, and the order given by the dates
 `dataset --generate` first regenerates the template questions from the event register (curated and
 third-party questions are kept) and merges external questions from `dataset/third_party/*.json` (with
 `author`, `question`, `category`, and `reference_facts` filled in).
+`dataset --aggregation N` replaces the regional-aggregation questions with N new ones: how many incidents the
+register records for a county with 5–30 incidents, and which, in date order. Each incident is scored on its date
+and the words of its name no other incident of the county has (usually the village; incidents without such words are
+only counted); the full names are in
+`ground_truth` for the raters. Other questions are kept, so earlier results on them stay comparable.
 
 ### Expert judgments
 
