@@ -4,7 +4,7 @@
                   everything the pipeline extracted, to be marked O/X, plus what it missed
   expert score    precision / recall / F1 with bootstrap intervals and Cohen's kappa
                   -> results/graph/expert.json
-  rate export     blind rating of a run's answers: one workbook per rater, system names replaced
+  rate export     blind rating of the answers of one or more runs: one workbook per rater, system names replaced
                   by shuffled labels; the key goes to annotation/rating_key/, never to raters
   rate score      per-system means with intervals, paired tests, citation accuracy, agreement,
                   and the correlation of ratings with answer length -> <run>/rating.json
@@ -535,13 +535,31 @@ def _neutral_citations(text: str, contexts: list[str] | None = None) -> tuple[st
     return ID_RE.sub(lambda m: number(record_key(m.group(1), m.group(2))), text), {n: k for k, n in numbers.items()}
 
 
-def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tuple[str, ...] = ("A", "B")) -> int:
-    """Blind rating workbooks for a run's answers (systems in RATED_SYSTEMS only)."""
+def rate_export(run_dirs: Path | list[Path], n_questions: int = 0, seed: int = 42, raters: tuple[str, ...] = ("A", "B")) -> int:
+    """Blind rating workbooks for the answers of one or more runs (systems in RATED_SYSTEMS only).
+
+    With several runs, a system's answers are taken from the last run given that has them: a run that
+    re-ran only D-CENT after a fix, given after the full run, supplies D-CENT's answers and the full run
+    the baselines'. Every answer is shown as the verifier leaves it (``clean_answer``), the same step for
+    every system, so that citations to evidence the system did not receive, and internal labels, are gone.
+    """
+    from evaluation.metrics import clean_answer
+    run_dirs = [run_dirs] if isinstance(run_dirs, Path) else list(run_dirs)
     out_dir, key_dir = RATING_DIR, RATING_KEY_DIR
     _refuse_overwrite([out_dir / f"rating_{r}.xlsx" for r in raters] + [key_dir / "blinding_key.json"])
-    records = [r for r in read_json(run_dir / "answers.json") if r.get("system") in RATED_SYSTEMS]
+    chosen: dict[tuple[str, str], dict[str, Any]] = {}
+    for run_dir in run_dirs:
+        systems_here = {r.get("system") for r in read_json(run_dir / "answers.json")}
+        for system in systems_here & set(RATED_SYSTEMS):
+            for key_ in [k for k in chosen if k[1] == system]:
+                del chosen[key_]
+        for r in read_json(run_dir / "answers.json"):
+            if r.get("system") in RATED_SYSTEMS:
+                chosen[(r["query_id"], r["system"])] = {**r, "_run": run_dir.name,
+                                                        "response": clean_answer(r["response"], r.get("retrieved_contexts", []))}
+    records = list(chosen.values())
     if not records:
-        raise SystemExit(f"평가할 답변이 없습니다 ({', '.join(RATED_SYSTEMS)} 시스템의 답변이 {run_dir}에 없음).")
+        raise SystemExit(f"평가할 답변이 없습니다 ({', '.join(RATED_SYSTEMS)} 시스템의 답변이 {', '.join(map(str, run_dirs))}에 없음).")
     n_models = len({r["model"] for r in records})
     by_question: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
@@ -574,7 +592,7 @@ def rate_export(run_dir: Path, n_questions: int = 0, seed: int = 42, raters: tup
                 for n in dict.fromkeys(int(m.group(1)) for m in re.finditer(rf"\[{CITE_LABEL} (\d+)\]", sentence)):
                     found.append((sentence.strip(), n))
             picked = sorted(rng.sample(range(len(found)), min(CITES_PER_ANSWER, len(found))))
-            key[item_id] = {"run": run_dir.name, "query_id": query_id, "system": record.get("system", ""), "model": record["model"],
+            key[item_id] = {"run": record["_run"], "query_id": query_id, "system": record.get("system", ""), "model": record["model"],
                             "category": record.get("category", ""), "source": record.get("source", ""),
                             "answer_chars": len(record["response"]), "citations": cited_keys, "n_citations": len(found)}
             answer_rows.append({"item_id": item_id, "query_id": query_id, "question": record["user_input"],

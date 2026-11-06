@@ -11,7 +11,7 @@
                                                 --rescore re-scores the saved answers with the current rules
   python -m evaluation judge [RUN]              context precision with a local LLM judge (secondary)
   python -m evaluation expert export|score      historians validate the extracted entities and relations
-  python -m evaluation rate export [RUN] [--n N] | rate score
+  python -m evaluation rate export [RUN ...] [--n N] | rate score
                                                 historians rate the answers of a run blind
 
 RUN is a folder name under evaluation/results/ (default: the latest run).
@@ -71,7 +71,7 @@ def main() -> int:
 
     p = sub.add_parser("rate", help="blind rating of answers (export | score)")
     p.add_argument("action", choices=["export", "score"])
-    p.add_argument("run", nargs="?", help="run to export (default: the latest)")
+    p.add_argument("runs", nargs="*", help="runs to export; a later run replaces the answers of the systems it contains (default: the latest)")
     p.add_argument("--n", type=int, default=0, help="rate only N questions, sampled across categories (default: all)")
 
     args = parser.parse_args()
@@ -107,7 +107,8 @@ def main() -> int:
         from evaluation.human import expert_export, expert_score
         return expert_export() if args.action == "export" else expert_score([])
     from evaluation.human import rate_export, rate_score
-    return rate_export(_run_dir(args.run), n_questions=args.n) if args.action == "export" else rate_score([])
+    runs = [_run_dir(name) for name in args.runs] or [_run_dir(None)]
+    return rate_export(runs, n_questions=args.n) if args.action == "export" else rate_score([])
 
 
 if __name__ == "__main__":
