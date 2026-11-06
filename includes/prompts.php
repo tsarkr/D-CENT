@@ -20,7 +20,7 @@ function get_answer_prompts(string $lang, string $term, string $context, bool $w
              . "2. 질문의 전제가 근거와 맞지 않으면 먼저 그 점을 밝히십시오.\n"
              . "3. 한 사건·지역의 인물이나 행위를 다른 사건·지역으로 옮기지 마십시오. 이름이 같은 지명은 행정구역으로 구분하십시오.\n"
              . "4. 어떤 기록(판결문, 신문조서, 사건 대장 등)이 말하는지 드러나면 그대로 밝히십시오.\n"
-             . "5. [그래프 사실표]는 사건 대장과 기록에서 정리한 사건·날짜·관련 인물·관련 사건·지역별 사건 목록입니다. 순서·수·관련 인물을 말할 때 이것을 먼저 쓰십시오.\n"
+             . "5. [그래프 사실표]는 사건 대장과 기록에서 정리한 사건·날짜·관련 인물·관련 사건·지역별 사건 목록입니다. 순서·수·관련 인물을 말할 때 이것을 먼저 쓰고, 근거로는 그 줄에 적힌 기록 식별자나 사건명을 쓰십시오. '그래프 사실표'라는 이름을 근거로 쓰지 마십시오.\n"
              . "6. 인사말과 서두, 전산 용어(그래프, 데이터베이스, 노드 등)를 쓰지 마십시오.\n\n"
              . ($with_facts
                 ? "출력 형식:\n### 근거 사실\n질문에 답하는 데 필요한 사실을 한 줄에 하나씩 5~12줄로 쓰고, 각 줄 끝에 근거를 괄호로 표시하십시오.\n"
@@ -37,7 +37,7 @@ function get_answer_prompts(string $lang, string $term, string $context, bool $w
          . "2. If a premise of the question does not match the evidence, say so first.\n"
          . "3. Never move a person or an action from one incident or place to another. Tell apart places with the same name by their administrative region.\n"
          . "4. When it is clear which record speaks (court judgment, interrogation record, incident register), say so.\n"
-         . "5. The [Graph facts] list incidents, dates, related persons, related incidents, and incidents per region, compiled from the register and the records. Use them first for order, counts, and related persons.\n"
+         . "5. The [Graph facts] list incidents, dates, related persons, related incidents, and incidents per region, compiled from the register and the records. Use them first for order, counts, and related persons, and cite the record identifier or incident name given on the line, never the name 'Graph facts'.\n"
          . "6. No greetings or preamble, and no technical terms (graph, database, node).\n\n"
          . ($with_facts
             ? "Output format:\n### Facts from the records\nOne fact per line, 5 to 12 lines, each ending with its source in parentheses.\n"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import itertools
 import re
+from collections import Counter
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ def _is_negative(text: str) -> bool:
 
 
 # Version of the automatic answer scores; `report --rescore` rewrites scores.csv with the current one.
-METRICS_VERSION = 3  # v3: names written in Hanja are read in Hangul before matching
+METRICS_VERSION = 4  # v3: names written in Hanja are read in Hangul before matching; v4: the graph-facts header is not an evidence item, and citing it is an internal label
 
 HANJA_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
 
@@ -149,7 +150,7 @@ def evidence_items(contexts: list[str]) -> list[str]:
                 items.append(part)
             else:
                 headers = {
-                    '<GRAPH_TOPOLOGY>', '</GRAPH_TOPOLOGY>',
+                    '<GRAPH_TOPOLOGY>', '</GRAPH_TOPOLOGY>', '[그래프 사실표]', '[Graph facts]',
                     '[지식그래프 다중 홉 탐색 결과]', '[Knowledge Graph Multi-hop Results]',
                     '[知識グラフ多重ホップ探索結果]', '[知识图谱多跳探索结果]',
                     '[1차 사료 원문 (PostgreSQL)]', '[Primary Archival Sources (PostgreSQL)]',
@@ -348,6 +349,7 @@ LABEL_RE = re.compile(
       | graph\s*db(?:\s*컨텍스트)?
       | 그래프\s*db | 지식\s*그래프(?:\s*(?:문맥|컨텍스트|톱놀로지|토폴로지))?
       | 사료\s*및\s*지식\s*그래프
+      | 그래프\s*사실표 | graph\s*facts        # the header of D-CENT's graph facts
       | 액티비티 | activity
       | P14_carried_out_by | P7_took_place_at | P9_consists_of | ACTIVATED_AT | DEFINED_AS
     )$""",
@@ -356,7 +358,7 @@ LABEL_RE = re.compile(
 
 # Label fragments inside a longer citation ("사료 ID: P106i", "GRAPH_TOPOLOGY 구간 1").
 LABEL_FRAGMENT_RE = re.compile(
-    r"\bP\d+[a-z]?(?:_[A-Za-z0-9_]+)?\b|GRAPH_|SOURCE_EVIDENCE|\bg_\d+|\bgraphrag_\d+|그래프\s*(?:톱|토)폴로지|블록\s*\d|사료\s*ID\s*:",
+    r"\bP\d+[a-z]?(?:_[A-Za-z0-9_]+)?\b|GRAPH_|SOURCE_EVIDENCE|\bg_\d+|\bgraphrag_\d+|그래프\s*(?:톱|토)폴로지|그래프\s*사실표|블록\s*\d|사료\s*ID\s*:",
     re.IGNORECASE,
 )
 
@@ -442,8 +444,61 @@ def verify_answer(answer: str, contexts: list[str]) -> list[dict[str, Any]]:
     return found
 
 
+GRAPH_LABEL_RE = re.compile(r"^(?:그래프\s*사실표|graph\s*facts)$", re.IGNORECASE)
+_WORD_RE = re.compile(r"[가-힣一-鿿A-Za-z0-9]{2,}")
+GRAPH_LINE_WORDS = {"사건", "인물", "관련", "근거", "지역", "기록", "기록된", "기록되지", "관련인물로", "그래프에서", "연결된", "찾지",
+                    "못함", "없음", "사건명에", "지명이", "사건의", "사건대장의", "날짜순", "1919", "raw"}
+
+
+def resolve_graph_labels(answer: str, contexts: list[str]) -> tuple[str, Counter]:
+    """Replace a citation of the graph facts by name ("(그래프 사실표)") with what the line it rests on cites.
+
+    The claim is the text between the previous sentence end and the citation. The graph-facts line with the
+    most of its words (names, places; not the line's own labels) found in the claim, at least two, supplies its record ids, or, without ids, the incident name
+    it quotes; with no such line the label is dropped. Returns the answer and counts of
+    resolved_ids / resolved_incident / dropped.
+    """
+    lines = [c for c in contexts if not c.lstrip().startswith("<SOURCE_EVIDENCE")]
+    words = [set(_WORD_RE.findall(hangul_reading(line))) - GRAPH_LINE_WORDS for line in lines]
+    counts: Counter = Counter()
+
+    def fix(m: re.Match) -> str:
+        group = m.group(1) if m.group(1) is not None else m.group(2)
+        parts = _split(group)
+        if not any(GRAPH_LABEL_RE.match(p) for p in parts):
+            return m.group(0)
+        start = max(m.string.rfind(ch, 0, m.start()) for ch in ".!?\n。")
+        claim = hangul_reading(m.string[start + 1:m.start()])
+        score = [sum(w in claim for w in ws) for ws in words]
+        best = max(range(len(lines)), key=lambda i: score[i], default=None)
+        out = []
+        for p in parts:
+            if not GRAPH_LABEL_RE.match(p):
+                out.append(p)
+                continue
+            if best is None or score[best] < 2:
+                counts["dropped"] += 1
+                continue
+            ids = list(dict.fromkeys(f"raw_{t}-{r}" for t, r in ID_RE.findall(lines[best])))
+            if ids:
+                counts["resolved_ids"] += 1
+                out.extend(ids[:3])
+                continue
+            name = re.search(r"「([^」]+)」", lines[best])
+            counts["resolved_incident" if name else "dropped"] += 1
+            if name:
+                out.append(name.group(1))
+        out = list(dict.fromkeys(out))
+        if not out:
+            return ""
+        return f"({', '.join(out)})" if m.group(1) is not None else f"`{', '.join(out)}`"
+
+    return GROUP_RE.sub(fix, answer or ""), counts
+
+
 def clean_answer(answer: str, contexts: list[str]) -> str:
-    """Remove record ids not in the evidence and internal labels; keep everything else."""
+    """Resolve citations of the graph facts by name, remove record ids not in the evidence and internal labels;
+    keep everything else."""
     ids = context_ids(contexts)
 
     def keep(part: str) -> bool:
@@ -462,7 +517,8 @@ def clean_answer(answer: str, contexts: list[str]) -> str:
             return ""
         return f"({', '.join(kept)})" if m.group(1) is not None else f"`{', '.join(kept)}`"
 
-    cleaned = GROUP_RE.sub(fix, normalize_citation_tags(answer))
+    resolved, _ = resolve_graph_labels(normalize_citation_tags(answer), contexts)
+    cleaned = GROUP_RE.sub(fix, resolved)
     cleaned = INTERNAL_LABEL_RE.sub("", cleaned)   # labels outside parentheses
     cleaned = re.sub(r"\(\s*(?:[,~]\s*)*\)", "", cleaned)
     return re.sub(r"[ \t]+([.,。])", r"\1", cleaned)

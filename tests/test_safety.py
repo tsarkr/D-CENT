@@ -115,6 +115,20 @@ class MetricsSafety(unittest.TestCase):
         self.assertEqual(metrics.normalize_citation_tags(standalone),
                          '독립선언식을 계획하였다 (raw_source_info-12). 이후 (raw_source_info-13) 체포되었다.')
 
+    def test_graph_facts_header_is_neither_evidence_nor_a_source(self):
+        self.assertEqual(metrics.evidence_items(["[그래프 사실표]\n사건 「가」 · 관련 인물: 나"]), ["사건 「가」 · 관련 인물: 나"])
+        self.assertTrue(metrics.is_label('그래프 사실표'))
+        self.assertEqual(metrics.citation_stats('김철수가 참여했다 (그래프 사실표).', ['사건'])['cite_internal_labels'], 1)
+
+    def test_graph_facts_label_is_resolved_to_the_line_it_rests_on(self):
+        contexts = ["사건 「3월 4일 평남 평양부 시위」 (1919-03-04) · 관련 인물: 조형극, 김선두 · 근거: raw_event_info-702, raw_source_info-21405",
+                    "인물 「김구」: 그래프에서 관련 인물로 연결된 사건을 찾지 못함",
+                    '<SOURCE_EVIDENCE id="raw_source_info-9">본문</SOURCE_EVIDENCE>']
+        text, counts = metrics.resolve_graph_labels("평양부 시위에는 조형극과 김선두가 기록되어 있다 ([그래프 사실표]). 날씨는 맑았다 (그래프 사실표).", contexts)
+        self.assertIn("(raw_event_info-702, raw_source_info-21405)", text)
+        self.assertNotIn("사실표", text)
+        self.assertEqual((counts["resolved_ids"], counts["dropped"]), (1, 1))
+
     def test_ranked_items_preserve_mrr(self):
         self.assertEqual(metrics.evaluate_retrieval_direct({'target_entities': ['유관순']},
                          ['무관한 기록', '유관순 기록'])['entity_mrr'], 0.5)

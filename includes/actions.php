@@ -110,7 +110,8 @@ function graphrag_detect_entities(string $query): array {
 
     // ── 1-A. 규칙 기반 빠른 감지 (LLM 호출 없이) ──
     // 한국인 인명 패턴: 2~4자 한글 (성씨 목록 앞에 붙은 경우)
-    static $person_suffixes = ['열사', '의사', '선생', '목사', '장군', '대장', '선생님'];
+    // '대장' is left out: "사건 대장" (the incident register) would make "사건" a person.
+    static $person_suffixes = ['열사', '의사', '선생', '목사', '장군', '선생님'];
     static $known_persons   = [
         '유관순', '손병희', '이동휘', '한용운', '김구', '안창호', '이승만', '신채호',
         '박은식', '이회영', '윤봉길', '이봉창', '나석주', '안중근', '조소앙',
