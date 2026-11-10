@@ -309,9 +309,11 @@ def report(run_dirs: list[Path], rescore_first: bool = False) -> Path:
             for s in systems if (v := [x["context_precision"] for x in res if x["system"] == s])]))
     else:
         md.append("- Context precision: 아직 없음 (`python -m evaluation judge`).")
-    rated = [d for d in run_dirs if (d / "rating.json").exists()]
+    rated = [d / "rating.json" for d in run_dirs if (d / "rating.json").exists()]
+    if not rated and (RESULTS_DIR / "rating.json").exists():
+        rated = [RESULTS_DIR / "rating.json"]
     if rated:
-        rating = read_json(rated[-1] / "rating.json")
+        rating = read_json(rated[-1])
         metrics = ["accuracy", "completeness", "usefulness", "narrative_order", "narrative_attribution", "unsupported_claims", "declined"]
         md.append(f"\n**답변 블라인드 평가** (평가자 {rating['n_raters']}명, 질문 {rating['n_questions']}개)\n")
         md.append(_md_table(["System"] + metrics + ["인용 정확도(엄격)"], [
@@ -332,9 +334,10 @@ def report(run_dirs: list[Path], rescore_first: bool = False) -> Path:
                 f"{m} 시스템 내 r={v.get('within_system_r')}" + (f" (전체 r={v.get('pearson_r')})" if v.get("pearson_r") is not None else "")
                 for m, v in lb.items()))
         for pair, entry in rating.get("agreement", {}).items():
-            md.append(f"\n평가자 일치도 {pair}: " + ", ".join(
-                f"{k} κ={v.get('weighted_kappa', v.get('kappa')):.2f}" for k, v in entry.items()
-                if v.get("weighted_kappa", v.get("kappa")) is not None))
+            kappas = [f"{k} κ={v.get('weighted_kappa', v.get('kappa')):.2f}" for k, v in entry.items()
+                      if v.get("weighted_kappa", v.get("kappa")) is not None]
+            if kappas:
+                md.append(f"\n평가자 일치도 {pair}: " + ", ".join(kappas))
     else:
         md.append("- 답변 블라인드 평가: 아직 없음 (`python -m evaluation rate export` → 평가 → `rate score`).")
 
@@ -418,8 +421,9 @@ def _graph_section() -> str:
                             + [f"{v['tp']}/{v['fp']}/{v['fn']}"])
         parts.append(_md_table(["검증자", "유형", "Precision", "Recall", "F1", "TP/FP/FN"], rows) if rows else "채점 결과가 비어 있습니다.")
         for pair, v in e.get("agreement", {}).items():
-            parts.append(f"\n검증자 일치도 {pair}: 공통 {v['n_items']}개, 단순 일치율 {v.get('raw_agreement')}, "
-                         f"Cohen's κ {v['cohen_kappa']}, Gwet's AC1 {v.get('gwet_ac1')} (O 비율 {v.get('share_judged_correct')})")
+            if v.get("n_items", 0) > 0:
+                parts.append(f"\n검증자 일치도 {pair}: 공통 {v['n_items']}개, 단순 일치율 {v.get('raw_agreement')}, "
+                             f"Cohen's κ {v['cohen_kappa']}, Gwet's AC1 {v.get('gwet_ac1')} (O 비율 {v.get('share_judged_correct')})")
         parts.append("\n관계(P14, P7)는 놓친 항목을 받지 않으므로 정밀도만 보고합니다.")
     else:
         parts.append("\n- 전문가 검증: 아직 없음 (`python -m evaluation expert export` → 검증 → `expert score`).")

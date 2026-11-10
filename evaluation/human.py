@@ -56,7 +56,7 @@ RELATION_TYPES = [t for t in TYPES if t not in ENTITY_TYPES]
 # Missed items are collected for entities only: writing a missed relation would require the annotator to
 # reconstruct the incident, which few do, so relation recall would be overstated. Relations get precision only.
 MISSED_TYPES = ["Person", "Place"]
-SKIP_COLUMNS = {"제공", "제공일자", "tei_status"}   # administrative columns, not part of the record
+SKIP_COLUMNS = {"제공", "제공일자", "tei_status", "생성자", "검수자"}   # administrative columns, not part of the record
 VERDICT_OK, VERDICT_WRONG = "O", "X"
 
 EXPERT_INSTRUCTIONS = [
@@ -193,9 +193,14 @@ def sample_records(n: int, seed: int) -> list[dict[str, Any]]:
     return records[:n]
 
 
+def _strip_skip_columns(tei: str) -> str:
+    cols = "|".join(re.escape(c) for c in SKIP_COLUMNS)
+    return re.sub(rf'<p\b[^>]*?data-col="(?:{cols})"[^>]*?(?:/>|>.*?</p>)', "", tei or "", flags=re.DOTALL)
+
+
 def extract_items(record: dict[str, Any]) -> list[dict[str, str]]:
     """Entities tagged in the TEI and the event relations the graph builder derives from them."""
-    tei = record["tei"]
+    tei = _strip_skip_columns(record["tei"])
     persons = list(dict.fromkeys(_surface(m) for m in re.findall(r"<persName[^>]*>(.*?)</persName>", tei, flags=re.DOTALL)))
     places = list(dict.fromkeys(_surface(m) for m in re.findall(r"<placeName[^>]*>(.*?)</placeName>", tei, flags=re.DOTALL)))
     items = [{"type": "Person", "value": p} for p in persons if p]
@@ -253,9 +258,27 @@ def _load_annotation(path: Path) -> dict[str, Any]:
     unjudged = 0
     invalid: list[tuple[str, str, str, str]] = []
     counts: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0}))
-    records = [r["record_id"] for r in read_sheet(path, "records")]
+    record_rows = read_sheet(path, "records")
+    records = [r["record_id"] for r in record_rows]
     known = set(records)
+    skipped_persons: dict[str, set[str]] = defaultdict(set)
+    for r in record_rows:
+        kept_lines, skip_vals = [], set()
+        for line in (r.get("text") or "").splitlines():
+            col, sep, val = line.partition(":")
+            if sep and col.strip() in SKIP_COLUMNS:
+                for token in re.split(r"[(),;/\s]+", val.strip()):
+                    if token:
+                        skip_vals.add(_clean(token))
+                skip_vals.add(_clean(val))
+            else:
+                kept_lines.append(line)
+        kept_text = _clean("\n".join(kept_lines))
+        skipped_persons[r["record_id"]] = {v for v in skip_vals if v and v not in kept_text}
+
     for row in read_sheet(path, "extracted"):
+        if row.get("type") == "Person" and _clean(row.get("value")) in skipped_persons.get(row.get("record_id", ""), set()):
+            continue
         verdict = _verdict(row.get("verdict"))
         if not verdict:
             unjudged += 1
@@ -267,6 +290,8 @@ def _load_annotation(path: Path) -> dict[str, Any]:
     ignored_missed, duplicate_missed, seen = 0, 0, set()
     for row in read_sheet(path, "missed"):
         record_id, kind, value = row.get("record_id", ""), row.get("type", ""), row.get("value", "")
+        if kind == "Person" and _clean(value) in skipped_persons.get(record_id, set()):
+            continue
         if kind in RELATION_TYPES:
             ignored_missed += 1          # relations are scored for precision only
             continue
